@@ -1,0 +1,239 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  SUPER_ADMIN     // SaaS Provider
+  AGENCY_OWNER    // White-label Agency
+  BUSINESS_OWNER  // End Business 
+  MANAGER         // Store Manager
+  CASHIER         // Standard Cashier
+  CUSTOMER        // End User
+}
+
+enum CardType {
+  STAMP
+  CASHBACK
+  DISCOUNT
+  REWARD
+  MULTIPASS
+  COUPON
+  CERTIFICATE
+  SUBSCRIPTION
+}
+
+// Global user model serving every role (multi-tenant safe)
+model User {
+  id            String    @id @default(uuid())
+  email         String?   @unique
+  passwordHash  String?
+  name          String?
+  phone         String?   @unique
+  birthday      DateTime? // Core CRM feature
+  gender        String?
+  role          Role      @default(CUSTOMER)
+  
+  // Referrals (Boomerangme viral loop)
+  referralCode  String?   @unique
+  referredById  String?
+  referredBy    User?     @relation("Referrals", fields: [referredById], references: [id])
+  referrals     User[]    @relation("Referrals")
+
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // SaaS and Tenancy Relations
+  ownedAgency       Agency?   @relation("AgencyOwner")
+  ownedBusiness     Business? @relation("BusinessOwner")
+  
+  // Staff bindings (Managers/Cashiers)
+  staffAtLocationId String?
+  staffAtLocation   Location? @relation("LocationStaff", fields: [staffAtLocationId], references: [id])
+
+  // End User Data
+  customerCards CustomerCard[]
+  transactions  Transaction[]
+  pushTokens    PushToken[]
+}
+
+// White-label Agencies (Resellers)
+model Agency {
+  id          String   @id @default(uuid())
+  name        String
+  domain      String?  @unique // Custom domain routing
+  branding    Json?    // White-label logos, colors, favicons
+  status      String   @default("ACTIVE") // ACTIVE, SUSPENDED
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  ownerId     String   @unique
+  owner       User     @relation("AgencyOwner", fields: [ownerId], references: [id])
+  
+  businesses  Business[]
+  subscriptions Subscription[]
+}
+
+// End Businesses (Cafes, Salons, etc.)
+model Business {
+  id          String   @id @default(uuid())
+  name        String
+  currency    String   @default("SYP")
+  website     String?
+  status      String   @default("ACTIVE")
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  agencyId    String
+  agency      Agency   @relation(fields: [agencyId], references: [id])
+
+  ownerId     String   @unique
+  owner       User     @relation("BusinessOwner", fields: [ownerId], references: [id])
+
+  locations     Location[]
+  cardTemplates CardTemplate[]
+  automations   Automation[]
+  integrations  Integration[]
+}
+
+// Multi-location Support (Franchises)
+model Location {
+  id          String   @id @default(uuid())
+  name        String
+  address     String?
+  lat         Float?   // Geofencing for Apple/Google Wallet lock screen Push
+  lng         Float?
+  radius      Int      @default(100) // Meters for geofence trigger
+
+  businessId  String
+  business    Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  staff       User[]   @relation("LocationStaff")
+}
+
+// Card Design & Reward Rules
+model CardTemplate {
+  id          String   @id @default(uuid())
+  name        String
+  type        CardType
+  description String?
+  terms       String?
+  
+  design      Json     // Colors, logo, icon, hero image, Apple Wallet layout
+  rules       Json     // {"stamps": 10, "cashbackPercent": 5, "welcomePoints": 50, "expirationDays": 365}
+  
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  businessId  String
+  business    Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  issuedCards CustomerCard[]
+  rewards     Reward[]
+}
+
+// Tiered Rewards (e.g. 5 stamps = drink, 10 = meal)
+model Reward {
+  id             String   @id @default(uuid())
+  name           String
+  description    String?
+  pointsRequired Int
+  
+  templateId     String
+  template       CardTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+}
+
+// The Actual Digital Card in Apple/Google/PWA
+model CustomerCard {
+  id              String   @id @default(uuid())
+  status          String   @default("ACTIVE") // ACTIVE, REVOKED, EXPIRED
+  currentBalance  Int      @default(0) // Stamps/Points/Money
+  
+  // Wallet Identifiers
+  applePassId     String?  @unique
+  googlePassId    String?  @unique
+  pwaToken        String   @unique @default(cuid()) // Unique link for PWA access
+
+  lastVisitAt     DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  customerId      String
+  customer        User     @relation(fields: [customerId], references: [id])
+
+  templateId      String
+  template        CardTemplate @relation(fields: [templateId], references: [id])
+
+  transactions    Transaction[]
+}
+
+// Audit Trail & CRM Data Engine
+model Transaction {
+  id              String   @id @default(uuid())
+  amount          Int      // Positive (Earn), Negative (Redeem)
+  type            String   @default("VISIT") // VISIT, REWARD_REDEMPTION, WELCOME_BONUS, REFERRAL_BONUS
+  description     String?
+  createdAt       DateTime @default(now())
+
+  cardId          String
+  card            CustomerCard @relation(fields: [cardId], references: [id], onDelete: Cascade)
+
+  cashierId       String?
+  cashier         User?        @relation(fields: [cashierId], references: [id])
+}
+
+// Push Notifications & SMS Triggers (Boomerangme Richie AI equivalent)
+model Automation {
+  id          String   @id @default(uuid())
+  name        String
+  triggerType String   // BIRTHDAY, INACTIVE_30_DAYS, AFTER_VISIT, SIGN_UP, GEOFENCE
+  actionType  String   // PUSH_NOTIFICATION, SMS
+  messageBody String   // "We miss you! Come back for 20% off."
+  delayHours  Int      @default(0)
+  isActive    Boolean  @default(true)
+
+  businessId  String
+  business    Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+}
+
+// PWA Browser Push Notification Subs
+model PushToken {
+  id          String   @id @default(uuid())
+  token       String   @unique
+  deviceType  String?  // iOS, Android, Desktop
+  createdAt   DateTime @default(now())
+
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// API Keys / POS Webhooks (Boomerangme integrations)
+model Integration {
+  id          String   @id @default(uuid())
+  provider    String   // ZAPIER, REST_API, STRIPE, CUSTOM_POS
+  apiKey      String?  
+  webhookUrl  String?
+  settings    Json?
+  
+  businessId  String
+  business    Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+}
+
+// SaaS Billing
+model Subscription {
+  id          String   @id @default(uuid())
+  planId      String   // STRIPE_PRICE_ID or LOCAL_PLAN
+  status      String   @default("TRIAL") // TRIAL, ACTIVE, PAST_DUE, CANCELED
+  currentPeriodEnd DateTime
+
+  // Billing applies to Agencies (which buy bulk) or direct Businesses
+  agencyId    String?
+  agency      Agency?  @relation(fields: [agencyId], references: [id])
+}

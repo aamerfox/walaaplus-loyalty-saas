@@ -1,0 +1,71 @@
+{
+  "Index": {
+    "title": "مرحباً بكم في منصة الولاء (سوريا)",
+    "description": "منصة الولاء الأمثل لأعمالك التجارية."
+  },
+  "Navigation": {
+    "dashboard": "لوحة القيادة",
+    "customers": "العملاء",
+    "cards": "محرك بطاقات الولاء",
+    "distribution": "نشر وتوزيع البطاقات",
+    "feedback": "جمع التقييمات",
+    "locations": "السياج الجغرافي (فروعك)",
+    "push": "الإشعارات والأتمتة",
+    "referrals": "برنامج الإحالة (Referral)",
+    "rfm": "تحليل العملاء (RFM)",
+    "team": "إدارة فريق العمل",
+    "templates": "قوالب البطاقات (Templates)",
+    "forms": "نماذج إصدار البطاقة (Forms)",
+    "developer": "المطورين والويب هوك (Developer)",
+    "billing": "الاشتراكات والفواتير",
+    "settings": "الإعدادات",
+    "logout": "تسجيل الخروج"
+  },
+  "Landing": {
+    "heroTitle": "محرك الولاء المطلق",
+    "heroSubtitle": "أطلق بطاقات الولاء الرقمية الخاصة بك مباشرة في محافظ Apple و Google لعملائك. مصمم للأعمال المحلية ووكالات التسويق العالمية.",
+    "ctaStart": "ابدأ الآن مجاناً",
+    "ctaDemo": "احجز عرض توضيحي",
+    "navHome": "الرئيسية",
+    "navFeatures": "المميزات",
+    "navPricing": "الخطط والأسعار",
+    "navLogin": "تسجيل الدخول"
+  },
+  "DashboardOverview": {
+    "title": "لوحة التحليلات",
+    "subtitle": "تتبع أداء وكالتك وعملائك التجاريين",
+    "newCardAction": "تصميم بطاقة",
+    "totalCustomers": "إجمالي العملاء",
+    "activeCards": "البطاقات النشطة",
+    "pointsIssued": "نقاط الولاء الممنوحة",
+    "vsLastMonth": "مقارنة بالشهر الماضي",
+    "growthChart": "نمو العملاء"
+  },
+  "CardBuilder": {
+    "title": "استوديو تصميم البطاقات",
+    "subtitle": "قم بتصميم بطاقات Apple/Google Wallet مع معاينة حية",
+    "designSettings": "التصميم والإعدادات",
+    "primaryColor": "لون العلامة التجارية (الرئيسي)",
+    "bgColor": "لون الخلفية",
+    "stampsCount": "عدد الأختام المطلوبة",
+    "stamps": "أختام",
+    "saveCard": "حفظ ونشر البطاقة",
+    "previewType": "بطاقة أختام",
+    "scanHint": "امسح للحصول على الختم",
+    "preview": "معاينة حية"
+  },
+  "CRM": {
+    "title": "إدارة علاقات العملاء (CRM)",
+    "subtitle": "عرض عملائك المخلصين ونشاطهم",
+    "export": "تصدير CSV",
+    "addCustomer": "إضافة عميل",
+    "searchPlaceholder": "البحث بالاسم أو رقم الهاتف...",
+    "filter": "تصفية",
+    "name": "اسم العميل",
+    "phone": "رقم الهاتف",
+    "visits": "إجمالي الزيارات",
+    "lastVisit": "آخر زيارة",
+    "points": "النقاط",
+    "status": "الحالة"
+  }
+}

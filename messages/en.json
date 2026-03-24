@@ -1,0 +1,71 @@
+{
+  "Index": {
+    "title": "Welcome to WalaaPlus",
+    "description": "The ultimate loyalty platform for your business."
+  },
+  "Navigation": {
+    "dashboard": "Dashboard",
+    "customers": "Customers",
+    "cards": "Card Loyalty Engine",
+    "distribution": "Card Distribution",
+    "feedback": "Feedback Collection",
+    "locations": "Geofencing",
+    "push": "Push Automations",
+    "referrals": "Referral Program",
+    "rfm": "RFM Analytics",
+    "team": "Team Management",
+    "templates": "Card Templates",
+    "forms": "Installation Forms",
+    "developer": "Developer & API",
+    "billing": "Billing & SaaS",
+    "settings": "Settings",
+    "logout": "Log out"
+  },
+  "Landing": {
+    "heroTitle": "The Ultimate Loyalty Engine",
+    "heroSubtitle": "Launch your own digital loyalty cards directly into your customers' Apple & Google Wallets. Designed for local businesses and global marketing agencies.",
+    "ctaStart": "Start Free Trial",
+    "ctaDemo": "Book a Demo",
+    "navHome": "Home",
+    "navFeatures": "Features",
+    "navPricing": "Pricing",
+    "navLogin": "Log In"
+  },
+  "DashboardOverview": {
+    "title": "Analytics Dashboard",
+    "subtitle": "Track your agency and business performance",
+    "newCardAction": "Design a Card",
+    "totalCustomers": "Total Customers",
+    "activeCards": "Active Cards Issued",
+    "pointsIssued": "Loyalty Points Issued",
+    "vsLastMonth": "vs last month",
+    "growthChart": "Customer Growth"
+  },
+  "CardBuilder": {
+    "title": "Card Builder Studio",
+    "subtitle": "Design Apple/Google Wallet cards with real-time preview",
+    "designSettings": "Design & Settings",
+    "primaryColor": "Primary Brand Color",
+    "bgColor": "Background Color",
+    "stampsCount": "Number of Stamps required",
+    "stamps": "stamps",
+    "saveCard": "Save & Publish Card",
+    "previewType": "Stamp Card",
+    "scanHint": "Scan to collect stamp",
+    "preview": "Live Preview"
+  },
+  "CRM": {
+    "title": "Customer Relationship Management",
+    "subtitle": "View your loyal customers and their activity",
+    "export": "Export CSV",
+    "addCustomer": "Add Customer",
+    "searchPlaceholder": "Search by name or phone...",
+    "filter": "Filter",
+    "name": "Customer Name",
+    "phone": "Phone Number",
+    "visits": "Total Visits",
+    "lastVisit": "Last Visit",
+    "points": "Points",
+    "status": "Status"
+  }
+}
