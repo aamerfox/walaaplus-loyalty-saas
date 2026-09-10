@@ -1,0 +1,85 @@
+# Owner Decisions Required
+
+These decisions cannot be made by the development agent. They involve accounts, money, credentials, legal exposure, or authority the agent does not hold.
+
+The agent may propose defaults and write runbooks. **The agent must never request, generate, hold, paste, or commit live credentials.**
+
+Status key: ⬜ open · ✅ decided · ⏸ deferred to a later phase
+
+---
+
+## A. Blocking Phase 0, Prompt 0.2
+
+These must be answered before infrastructure, CI or deployment work proceeds.
+
+| # | Decision | Recommended default | Status |
+|---|---|---|---|
+| A1 | **Rebuild-branch push permission.** May the agent push to `rebuild/*` branches on the existing GitHub remote? `master` is never pushed to under any circumstance. | Yes, `rebuild/*` only; `master` changes only through a pull request the owner merges | ⬜ |
+| A2 | **Repository visibility.** The remote `github.com/aamerfox/walaaplus-loyalty-saas` is **currently public** (verified anonymous HTTP 200). Should it become private before the rebuild? | Make private. A public repo published a hardcoded auth fallback secret, see [PHASE-0-HYGIENE.md](PHASE-0-HYGIENE.md) finding H-1 | ⬜ |
+| A3 | **CI provider.** | GitHub Actions, since the remote is already GitHub | ⬜ |
+| A4 | **Database for development and staging.** | PostgreSQL 15+ in Docker Compose for local and staging; managed Postgres optional later | ⬜ |
+| A5 | **Node version pin.** Local is Node v24.19.0, npm 11.17.0. CI and production must match. | Pin Node 24 LTS in `.nvmrc`, CI and Dockerfile | ⬜ |
+
+---
+
+## B. Blocking Phase 1a, Prompt 2
+
+Service workers, installability and web push **refuse to run without TLS**, except on `localhost`. Staging cannot verify the PWA card without a real certificate.
+
+| # | Decision | Recommended default | Status |
+|---|---|---|---|
+| B1 | **Hosting.** Where do the Next.js standalone container, the pg-boss worker container and PostgreSQL run? | One VPS running Docker Compose, in or near the target region | ⬜ |
+| B2 | **Staging domain.** | A subdomain of a domain the owner controls, for example `staging.walaaplus.<tld>` | ⬜ |
+| B3 | **HTTPS certificate for staging.** **Hard prerequisite for Phase 1a Prompt 2 verification.** | Caddy or nginx with Let's Encrypt automatic certificates | ⬜ |
+| B4 | **Production domain.** | Decided before the café pilot goes live | ⬜ |
+| B5 | **Secrets provisioning.** Who creates the `.env` values on each server, and where are they stored? | Owner provisions server environment files directly; agent supplies variable names and generation commands only | ⬜ |
+| B6 | **Production deployment authority.** | Owner only. Agent never deploys to production | ⬜ |
+
+---
+
+## C. Blocking Phase 1.5
+
+| # | Decision | Recommended default | Status |
+|---|---|---|---|
+| C1 | **VAPID key pair for web push.** The private key is a real secret. The agent supplies the generation command and the variable names; the **owner generates and stores the keys** for staging and production separately. | `npx web-push generate-vapid-keys`; store as `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` | ⬜ |
+| C2 | **Backup destination.** Where do nightly database dumps go, and who owns restore? | Object storage the owner controls, with a documented and rehearsed restore drill | ⬜ |
+| C3 | **Backup retention and restore ownership.** | 30 daily dumps; owner performs the restore drill in staging with the agent's runbook | ⬜ |
+| C4 | **Error and uptime monitoring.** | Self-hosted or free-tier service; owner creates the account | ⬜ |
+| C5 | **Minimum daily scanner volume** that defines a valid pilot day, per merchant. | Owner sets a number, for example 10 scans per operating day | ⬜ |
+
+---
+
+## D. Phase 2 and later, product decisions
+
+| # | Decision | Status |
+|---|---|---|
+| D1 | **Cashback and discount pull-forward.** Build in Phase 2 only on confirmed pharmacy or retail demand. If built there, Phase 4 Prompt 1 becomes an audit only. | ⏸ |
+| D2 | **SMS provider for Syria.** Required before automated card delivery, OTP restore or SMS campaigns. Twilio may not serve the market. | ⏸ |
+| D3 | **Email provider.** Required for password reset in the MVP and campaigns later. | ⬜ needed for password reset |
+| D4 | **WhatsApp Business API access.** | ⏸ |
+
+---
+
+## E. Phase 5, commercial and legal
+
+None of these may be started by the agent without an explicit written decision.
+
+| # | Decision | Status |
+|---|---|---|
+| E1 | **Payment provider.** Stripe does not operate in Syria. Agency billing needs an alternative or a foreign entity. | ⏸ |
+| E2 | **Supported countries and currencies** for the agency market. | ⏸ |
+| E3 | **Legal entity, tax and invoicing responsibility.** | ⏸ |
+| E4 | **Subscription model and pricing** for merchants and agencies. | ⏸ |
+| E5 | **Refund policy.** | ⏸ |
+| E6 | **Apple Developer account** for Wallet passes, $99 per year, plus obtainability from the region. | ⏸ |
+| E7 | **GoHighLevel Marketplace publication.** Private app first; public listing needs explicit owner approval. | ⏸ |
+
+---
+
+## F. Standing rules
+
+1. The agent never handles live credentials. It writes variable names, generation commands and runbooks.
+2. The agent never pushes to `master`, never force-pushes, never rewrites published history.
+3. The agent never deploys to production.
+4. Every evidence file records which steps the agent performed and which the owner performed.
+5. Any decision above that becomes blocking mid-phase halts that prompt with `ENGINEERING GATE NOT PASSED — BLOCKED BY: <decision id>`.
