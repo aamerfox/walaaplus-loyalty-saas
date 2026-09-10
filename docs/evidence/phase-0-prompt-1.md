@@ -2,7 +2,7 @@
 
 **Prompt:** Audit, Baseline, and Specification
 **Date:** 2026-09-11
-**Performed by:** development agent (Claude Opus 5). No owner actions were required or taken during this prompt.
+**Performed by:** development agent (Claude Fable 5.1). No owner actions were required or taken during this prompt.
 **Branch:** `rebuild/phase-0-foundation`
 
 ---
@@ -48,7 +48,11 @@ b9ee686 (origin/master, master)              feat: complete Phase 10-13 Go-Live 
 
 ### Why a baseline commit was judged safe
 
-The prompt permitted a baseline commit only if the audit proves the included files carry no secrets or personal data. After the exclusions below, that holds:
+The prompt permitted a baseline commit only if the audit proves the included files carry no secrets or personal data. After the exclusions below, the accurate statement is:
+
+> No live credentials, API keys, private keys, or certificates were found or committed. The prototype baseline intentionally still contains a publicly known hardcoded auth fallback, which is an insecure configuration defect—not a usable secret—and must be removed in Phase 0 Prompt 0.2.
+
+Exclusions applied before staging:
 
 - **Excluded by new ignore rules:** `playwright-results/` (1.2 MB, 13 regenerable files), `tmp_debug.js`.
 - **Untracked with `git rm --cached`, kept on disk:** `build.log`, `build_error.log`, `lint_errors.txt`. These embedded the developer's local Windows username in absolute paths, 23 occurrences across two files, inside a public repository.
@@ -192,7 +196,7 @@ Uniqueness constraints that Prompt 0.3 must verify as **unique**, not merely ind
 | Live credentials in source | **None found** |
 | Personal data in tracked files | 23 local-path occurrences in two log artifacts, **now untracked** |
 | Remote exposure | **Repository is public.** Escalated as decision A2 |
-| Secrets committed by this prompt | **None** |
+| Secrets committed by this prompt | **No live credentials, API keys, private keys, or certificates were found or committed.** The prototype baseline intentionally still contains a publicly known hardcoded auth fallback, which is an insecure configuration defect—not a usable secret—and must be removed in Phase 0 Prompt 0.2 |
 | Credentials handled by the agent | **None requested, generated, held or written** |
 | Hardcoded fallback secret | **Found, documented, unmodified by design.** Both strings burned. Removal scheduled for Prompt 0.2 |
 
@@ -263,7 +267,7 @@ Not blocking Prompt 0.2, but blocking later: **B1–B6** hosting, domains and th
 | Five specification documents created | ✅ |
 | Repository hygiene report produced | ✅ `PHASE-0-HYGIENE.md` |
 | Secret scan performed and triaged | ✅ Two independent passes, cross-checked |
-| No secrets committed | ✅ |
+| No live credentials, API keys, private keys or certificates found or committed | ✅ The prototype baseline intentionally still contains a publicly known hardcoded auth fallback, which is an insecure configuration defect—not a usable secret—and must be removed in Phase 0 Prompt 0.2 |
 | No personal data committed | ✅ Three log artifacts untracked |
 | No ambiguous file committed | ✅ Every one of the 41 paths classified before staging |
 | `master` not committed to, merged, or pushed | ✅ Still `b9ee686` |
@@ -279,3 +283,5 @@ Not blocking Prompt 0.2, but blocking later: **B1–B6** hosting, domains and th
 **Result: ENGINEERING GATE PASSED — READY FOR THE NEXT PROMPT**
 
 Prompt 0.2 may begin once decisions A1 to A5 are recorded.
+
+PASS — READY FOR PHASE 0 PROMPT 2
