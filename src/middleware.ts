@@ -12,6 +12,7 @@ const authMiddleware = withAuth(
     return intlMiddleware(req);
   },
   {
+    secret: process.env.NEXTAUTH_SECRET || "walaaplus-local-dev-secret-key-123",
     callbacks: {
       authorized: ({ token }) => token != null
     },

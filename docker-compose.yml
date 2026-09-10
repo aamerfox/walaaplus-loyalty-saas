@@ -1,17 +1,11 @@
 version: '3.8'
 services:
-  postgres:
+  db:
     image: postgres:15-alpine
-    container_name: walaaplus-postgres
     restart: always
     environment:
-      POSTGRES_USER: user
-      POSTGRES_PASSWORD: password
+      POSTGRES_USER: walaaplus
+      POSTGRES_PASSWORD: walaaplus_password
       POSTGRES_DB: loyalty
     ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-
-volumes:
-  postgres_data:
+      - '5433:5432'

@@ -30,8 +30,24 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
+# build / lint artifacts (never commit: they embed local absolute paths)
+*.log
+build.log
+build_error.log
+lint_errors.txt
+
+# test output
+/playwright-results/
+/playwright-report/
+/test-results/
+
+# scratch / temporary scripts
+tmp_*.js
+tmp_*.ts
+
+# env files. The sanitized .env.example template IS tracked on purpose.
 .env*
+!.env.example
 
 # vercel
 .vercel

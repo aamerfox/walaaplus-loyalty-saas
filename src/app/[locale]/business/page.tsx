@@ -1,30 +1,62 @@
 import { getTranslations } from "next-intl/server";
 import { Users, CreditCard, Activity, ArrowUpRight } from "lucide-react";
+import { getServerSession } from "next-auth";
+import { authOptions } from "@/lib/auth";
+import { prisma } from "@/lib/prisma";
+import GrowthChart from "@/components/dashboard/GrowthChart";
 
 export default async function BusinessDashboardOverview() {
   const t = await getTranslations("DashboardOverview");
+  const session = await getServerSession(authOptions);
+  
+  if (!session?.user?.email) return <div>Unauthorized</div>;
+
+  const user = await prisma.user.findUnique({
+    where: { email: session.user.email },
+    include: { ownedBusiness: true }
+  });
+
+  let businessId = user?.ownedBusiness?.id;
+  if (!businessId && user) {
+    const biz = await prisma.business.findFirst({ where: { ownerId: user.id } });
+    businessId = biz?.id;
+  }
+
+  // Real Database Counts
+  const customerCount = businessId ? await prisma.user.count({
+    where: { role: 'CUSTOMER', customerCards: { some: { template: { businessId } } } }
+  }) : 0;
+
+  const activeCards = businessId ? await prisma.customerCard.count({
+    where: { template: { businessId }, status: 'ACTIVE' }
+  }) : 0;
+
+  const totalPoints = businessId ? await prisma.customerCard.aggregate({
+    where: { template: { businessId } },
+    _sum: { currentBalance: true }
+  }) : { _sum: { currentBalance: 0 } };
 
   const stats = [
     {
       title: t("totalCustomers"),
-      value: "2,543",
-      trend: "+12%",
+      value: customerCount.toLocaleString(),
+      trend: "+0%", // Trend logic can be added later
       icon: Users,
       color: "text-blue-600 dark:text-blue-400",
       bg: "bg-blue-50 dark:bg-blue-500/10"
     },
     {
       title: t("activeCards"),
-      value: "1,205",
-      trend: "+5%",
+      value: activeCards.toLocaleString(),
+      trend: "+0%",
       icon: CreditCard,
       color: "text-indigo-600 dark:text-indigo-400",
       bg: "bg-indigo-50 dark:bg-indigo-500/10"
     },
     {
       title: t("pointsIssued"),
-      value: "45,230",
-      trend: "+24%",
+      value: (totalPoints._sum?.currentBalance || 0).toLocaleString(),
+      trend: "+0%",
       icon: Activity,
       color: "text-emerald-600 dark:text-emerald-400",
       bg: "bg-emerald-50 dark:bg-emerald-500/10"
@@ -79,11 +111,10 @@ export default async function BusinessDashboardOverview() {
         })}
       </div>
       
-      {/* Chart Placeholder for Premium Feel */}
-      <div className="bg-white dark:bg-zinc-900 rounded-2xl p-6 border border-zinc-200 dark:border-zinc-800 shadow-sm mt-8 min-h-[400px]">
-         <h2 className="text-lg font-bold mb-6 text-zinc-900 dark:text-zinc-100">{t("growthChart")}</h2>
-         <div className="w-full h-[300px] flex items-center justify-center bg-zinc-50 dark:bg-zinc-800/50 rounded-xl border border-dashed border-zinc-200 dark:border-zinc-700">
-            <span className="text-zinc-500 font-medium">Interactive Recharts area loading...</span>
+      <div className="bg-white dark:bg-zinc-900 rounded-[2.5rem] p-8 border border-zinc-200 dark:border-zinc-800 shadow-xl mt-8 min-h-[450px]">
+         <h2 className="text-2xl font-black mb-8 text-zinc-900 dark:text-zinc-100 tracking-tight">{t("growthChart")}</h2>
+         <div className="w-full h-[320px]">
+            <GrowthChart />
          </div>
       </div>
     </div>

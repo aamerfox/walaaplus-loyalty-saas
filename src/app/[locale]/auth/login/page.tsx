@@ -4,11 +4,38 @@ import { useLocale } from "next-intl";
 import { Link } from "@/i18n/routing";
 import { ArrowRight, Lock, Eye, EyeOff } from "lucide-react";
 import { useState } from "react";
+import { signIn } from "next-auth/react";
+import { useRouter } from "next/navigation";
 
 export default function LoginPage() {
   const locale = useLocale();
   const dir = locale === 'ar' ? 'rtl' : 'ltr';
   const [showPassword, setShowPassword] = useState(false);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+  const router = useRouter();
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setError('');
+
+    const res = await signIn("credentials", {
+      redirect: false,
+      email,
+      password,
+    });
+
+    if (res?.error) {
+      setError(locale === 'ar' ? 'بيانات الاعتماد غير صحيحة' : 'Invalid credentials');
+      setLoading(false);
+    } else {
+      router.push(`/${locale}/business`);
+      router.refresh();
+    }
+  };
 
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950 flex flex-col justify-center font-sans relative overflow-hidden" dir={dir}>
@@ -40,7 +67,12 @@ export default function LoginPage() {
               </p>
            </div>
 
-           <form className="space-y-5">
+           <form className="space-y-5" onSubmit={handleLogin}>
+              {error && (
+                <div className="bg-red-50 text-red-600 p-3 rounded-lg text-sm text-center font-bold">
+                  {error}
+                </div>
+              )}
               
               <div className="space-y-2">
                  <label className="text-xs font-bold uppercase tracking-wider text-zinc-500">
@@ -48,6 +80,9 @@ export default function LoginPage() {
                  </label>
                  <input 
                     type="email" 
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    required
                     placeholder="name@company.com" 
                     className="w-full bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-indigo-500 outline-none transition-all dark:text-white"
                  />
@@ -65,6 +100,9 @@ export default function LoginPage() {
                  <div className="relative">
                     <input 
                        type={showPassword ? 'text' : 'password'} 
+                       value={password}
+                       onChange={(e) => setPassword(e.target.value)}
+                       required
                        placeholder="••••••••" 
                        className="w-full bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-indigo-500 outline-none transition-all dark:text-white"
                     />
@@ -79,11 +117,13 @@ export default function LoginPage() {
               </div>
 
               <div className="pt-2">
-                 {/* Fake Login Action that redirects immediately to Dashboard since Auth isn't wired to Prisma yet */}
-                 <Link href="/business" className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3.5 rounded-xl flex justify-center items-center gap-2 shadow-lg shadow-indigo-600/20 transition-transform active:scale-95">
+                 <button 
+                    type="submit" 
+                    disabled={loading}
+                    className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-bold py-3.5 rounded-xl flex justify-center items-center gap-2 shadow-lg shadow-indigo-600/20 transition-transform active:scale-95">
                     <Lock size={18} />
-                    {locale === 'ar' ? 'تسجيل الدخول' : 'Sign In'}
-                 </Link>
+                    {loading ? (locale === 'ar' ? 'جاري التحقق...' : 'Signing in...') : (locale === 'ar' ? 'تسجيل الدخول' : 'Sign In')}
+                 </button>
               </div>
 
            </form>

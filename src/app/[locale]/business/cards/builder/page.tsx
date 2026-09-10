@@ -1,8 +1,9 @@
 "use client";
 
 import { useTranslations } from "next-intl";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useLocale } from "next-intl";
+import { useRouter, useSearchParams } from "next/navigation";
 
 type CardType = 'STAMP' | 'CASHBACK' | 'DISCOUNT' | 'SUBSCRIPTION' | 'GIFT' | 'COUPON';
 
@@ -10,24 +11,106 @@ export default function CardBuilder() {
   const t = useTranslations("CardBuilder");
   const locale = useLocale();
   const dir = locale === 'ar' ? 'rtl' : 'ltr';
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const editId = searchParams.get('id');
 
   const [primaryColor, setPrimaryColor] = useState("#4f46e5");
   const [bgColor, setBgColor] = useState("#ffffff");
   const [cardType, setCardType] = useState<CardType>('STAMP');
-  
-  // Type specific settings
   const [stampsCount, setStampsCount] = useState(10);
   const [cashbackPercent, setCashbackPercent] = useState(5);
   const [discountPercent, setDiscountPercent] = useState(20);
   const [subscriptionItem, setSubscriptionItem] = useState("Premium Coffee");
   const [hidePoweredBy, setHidePoweredBy] = useState(false);
   const [requireCustomerImage, setRequireCustomerImage] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isLoading, setIsLoading] = useState(!!editId);
+
+  // Load existing card data if editing
+  useEffect(() => {
+    if (!editId) return;
+    setIsLoading(true);
+    fetch(`/api/cards/${editId}`)
+      .then(r => r.json())
+      .then(data => {
+        if (data.card) {
+          const card = data.card;
+          const design = card.design as any;
+          const rules = card.rules as any;
+          setCardType(card.type as CardType);
+          setPrimaryColor(design?.primaryColor || "#4f46e5");
+          setBgColor(design?.bgColor || "#ffffff");
+          setHidePoweredBy(design?.hidePoweredBy || false);
+          setRequireCustomerImage(design?.requireCustomerImage || false);
+          setStampsCount(rules?.stampsCount || 10);
+          setCashbackPercent(rules?.cashbackPercent || 5);
+          setDiscountPercent(rules?.discountPercent || 20);
+          setSubscriptionItem(rules?.subscriptionItem || "Premium Coffee");
+        }
+      })
+      .catch(console.error)
+      .finally(() => setIsLoading(false));
+  }, [editId]);
+
+  const handleSaveCard = async () => {
+    setIsSaving(true);
+    try {
+      const payload = {
+        type: cardType, primaryColor, bgColor,
+        stampsCount, cashbackPercent, discountPercent,
+        subscriptionItem, hidePoweredBy, requireCustomerImage
+      };
+
+      let res;
+      if (editId) {
+        // Update existing card
+        res = await fetch(`/api/cards/${editId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+      } else {
+        // Create new card
+        res = await fetch('/api/cards', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+      }
+
+      if (res.ok) {
+        alert(locale === 'ar' ? (editId ? 'تم تحديث البطاقة بنجاح!' : 'تم إنشاء البطاقة بنجاح!') : (editId ? 'Card updated!' : 'Card created!'));
+        router.push(`/${locale}/business/cards/templates`);
+      } else {
+        alert(locale === 'ar' ? 'فشل حفظ البطاقة. تأكد من أنك مسجل الدخول.' : 'Failed to save card. Make sure you are logged in.');
+      }
+    } catch (err) {
+      console.error(err);
+      alert('Error saving card');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950 flex items-center justify-center">
+        <div className="text-center">
+          <div className="w-12 h-12 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+          <p className="text-zinc-500 font-medium">{locale === 'ar' ? 'جاري تحميل بيانات البطاقة...' : 'Loading card data...'}</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="p-4 sm:p-8 min-h-screen bg-zinc-50 dark:bg-zinc-950 font-sans" dir={dir}>
       <div className="max-w-7xl mx-auto">
         <div className="text-center mb-10">
-           <h1 className="text-4xl font-black tracking-tight text-zinc-900 dark:text-zinc-100">{t("title")}</h1>
+           <h1 className="text-4xl font-black tracking-tight text-zinc-900 dark:text-zinc-100">
+             {editId ? (locale === 'ar' ? 'تعديل البطاقة' : 'Edit Card') : t("title")}
+           </h1>
            <p className="text-zinc-500 mt-2 text-lg font-medium">{t("subtitle")}</p>
         </div>
 
@@ -137,8 +220,11 @@ export default function CardBuilder() {
                     </div>
                  </div>
 
-                 <button className="w-full py-4 bg-zinc-900 dark:bg-white text-white dark:text-zinc-900 font-black text-lg rounded-2xl transition-transform hover:scale-[1.02] active:scale-95 shadow-xl mt-6">
-                    {t("saveCard")}
+                 <button 
+                    onClick={handleSaveCard}
+                    disabled={isSaving}
+                    className="w-full py-4 bg-zinc-900 dark:bg-white disabled:opacity-50 text-white dark:text-zinc-900 font-black text-lg rounded-2xl transition-transform hover:scale-[1.02] active:scale-95 shadow-xl mt-6">
+                    {isSaving ? (locale === 'ar' ? 'جاري الحفظ...' : 'Saving...') : t("saveCard")}
                  </button>
               </div>
            </div>

@@ -59,6 +59,7 @@ model User {
   customerCards CustomerCard[]
   transactions  Transaction[]
   pushTokens    PushToken[]
+  feedbacks     Feedback[]
 }
 
 // White-label Agencies (Resellers)
@@ -96,10 +97,17 @@ model Business {
   ownerId     String   @unique
   owner       User     @relation("BusinessOwner", fields: [ownerId], references: [id])
 
+  feedbackSettings Json? // {"enabled": true, "googleMapsUrl": "...", "negativeMessage": "..."}
+  formSettings     Json? // {"firstName": { "enabled": true, "required": true }, ...}
+  apiToken         String?  @unique
+  webhookSettings  Json?    // {"cardIssued": { "url": "...", "active": true }, ...}
+
   locations     Location[]
   cardTemplates CardTemplate[]
   automations   Automation[]
   integrations  Integration[]
+  notifications Notification[]
+  feedbacks     Feedback[]
 }
 
 // Multi-location Support (Franchises)
@@ -109,7 +117,8 @@ model Location {
   address     String?
   lat         Float?   // Geofencing for Apple/Google Wallet lock screen Push
   lng         Float?
-  radius      Int      @default(100) // Meters for geofence trigger
+  radius            Int      @default(100) // Meters for geofence trigger
+  lockscreenMessage String?  // "Welcome to Walaa Cafe!"
 
   businessId  String
   business    Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
@@ -172,6 +181,7 @@ model CustomerCard {
   template        CardTemplate @relation(fields: [templateId], references: [id])
 
   transactions    Transaction[]
+  feedbacks       Feedback[]
 }
 
 // Audit Trail & CRM Data Engine
@@ -236,4 +246,36 @@ model Subscription {
   // Billing applies to Agencies (which buy bulk) or direct Businesses
   agencyId    String?
   agency      Agency?  @relation(fields: [agencyId], references: [id])
+}
+// Push Notifications & SMS History
+model Notification {
+  id              String   @id @default(uuid())
+  title           String
+  message         String
+  type            String   // PUSH, SMS
+  status          String   @default("SENT")
+  externalId      String?  // OneSignal ID, Twilio SID, etc.
+  recipientCount  Int      @default(0)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  businessId      String
+  business        Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+}
+
+// Post-visit customer reviews
+model Feedback {
+  id          String   @id @default(uuid())
+  rating      Int      @default(5) // 1 to 5 stars
+  comment     String?
+  createdAt   DateTime @default(now())
+
+  businessId  String
+  business    Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  customerId  String
+  customer    User     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  cardId      String
+  card        CustomerCard @relation(fields: [cardId], references: [id], onDelete: Cascade)
 }

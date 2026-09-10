@@ -1,14 +1,62 @@
 import { getTranslations } from "next-intl/server";
 import { Search, Filter, MoreHorizontal, Download } from "lucide-react";
+import { getServerSession } from "next-auth";
+import { authOptions } from "@/lib/auth";
+import { prisma } from "@/lib/prisma";
+import { cn } from "@/lib/utils";
 
-export default async function CustomersCRM() {
+export default async function CustomersCRM({ params }: { params: Promise<{ locale: string }> }) {
+  const { locale } = await params;
+  const isAr = locale === 'ar';
   const t = await getTranslations("CRM");
   
-  const customers = [
-    { id: 1, name: "Ahmad Yassin", phone: "+963 944 123 456", visits: 12, lastVisit: "2 days ago", points: 450, status: "Active" },
-    { id: 2, name: "Sarah Khaled", phone: "+963 933 987 654", visits: 5, lastVisit: "1 week ago", points: 120, status: "Active" },
-    { id: 3, name: "Omar Naser", phone: "+963 955 456 789", visits: 1, lastVisit: "3 months ago", points: 10, status: "Inactive" },
-  ];
+  const session = await getServerSession(authOptions);
+  if (!session?.user?.email) return <div className="p-8 text-center font-bold text-rose-600">Unauthorized</div>;
+
+  const user = await prisma.user.findUnique({
+    where: { email: session.user.email },
+    include: { ownedBusiness: true }
+  });
+
+  let businessId = user?.ownedBusiness?.id;
+  if (!businessId && user) {
+    const biz = await prisma.business.findFirst({ where: { ownerId: user.id } });
+    businessId = biz?.id;
+  }
+
+  const customers = businessId ? await prisma.user.findMany({
+    where: {
+      role: 'CUSTOMER',
+      customerCards: {
+        some: {
+          template: {
+            businessId
+          }
+        }
+      }
+    },
+    include: {
+      customerCards: {
+        where: { template: { businessId } },
+        include: { transactions: { orderBy: { createdAt: 'desc' }, take: 1 } }
+      }
+    },
+    orderBy: { createdAt: 'desc' }
+  }) : [];
+
+  const formattedCustomers = customers.map(c => {
+    const card = c.customerCards[0];
+    const lastVisit = card?.lastVisitAt ? new Date(card.lastVisitAt).toLocaleDateString(locale) : (isAr ? 'لا يوجد' : 'None');
+    return {
+      id: c.id,
+      name: c.name || (isAr ? 'عميل بدون اسم' : 'Unnamed Customer'),
+      phone: c.phone || 'N/A',
+      visits: card?.transactions.length || 0,
+      lastVisit,
+      points: card?.currentBalance || 0,
+      status: card?.status === 'ACTIVE' ? (isAr ? 'نشط' : 'Active') : (isAr ? 'غير نشط' : 'Inactive')
+    };
+  });
 
   return (
     <div className="space-y-6">
@@ -41,7 +89,7 @@ export default async function CustomersCRM() {
          </div>
          
          <div className="overflow-x-auto">
-            <table className="w-full text-start text-sm">
+            <table className="w-full text-start text-sm text-zinc-900 dark:text-zinc-100">
                <thead className="bg-zinc-50 dark:bg-zinc-900/80 text-zinc-500 dark:text-zinc-400 border-b border-zinc-200 dark:border-zinc-800">
                   <tr>
                      <th className="px-6 py-4 font-semibold text-start">{t("name")}</th>
@@ -54,15 +102,18 @@ export default async function CustomersCRM() {
                   </tr>
                </thead>
                <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
-                  {customers.map(c => (
+                  {formattedCustomers.length > 0 ? formattedCustomers.map(c => (
                      <tr key={c.id} className="hover:bg-zinc-50/80 dark:hover:bg-zinc-800/30 transition-colors">
-                        <td className="px-6 py-4 font-medium text-zinc-900 dark:text-zinc-100">{c.name}</td>
+                        <td className="px-6 py-4 font-medium">{c.name}</td>
                         <td className="px-6 py-4 text-zinc-500 dark:text-zinc-400">{c.phone}</td>
-                        <td className="px-6 py-4 font-medium text-zinc-900 dark:text-zinc-100">{c.visits}</td>
+                        <td className="px-6 py-4 font-medium">{c.visits}</td>
                         <td className="px-6 py-4 text-zinc-500 dark:text-zinc-400">{c.lastVisit}</td>
                         <td className="px-6 py-4 font-bold text-indigo-600 dark:text-indigo-400">{c.points}</td>
                         <td className="px-6 py-4">
-                           <span className={`px-3 py-1 text-xs font-bold tracking-wide rounded-full ${c.status === 'Active' ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-400' : 'bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400'}`}>
+                           <span className={cn(
+                             "px-3 py-1 text-xs font-bold tracking-wide rounded-full",
+                             c.status === 'Active' || c.status === 'نشط' ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-400' : 'bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400'
+                           )}>
                               {c.status}
                            </span>
                         </td>
@@ -70,7 +121,13 @@ export default async function CustomersCRM() {
                            <button className="p-2 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors"><MoreHorizontal className="w-5 h-5 mx-auto" /></button>
                         </td>
                      </tr>
-                  ))}
+                  )) : (
+                    <tr>
+                      <td colSpan={7} className="px-6 py-10 text-center text-zinc-500 font-medium italic">
+                        {isAr ? 'لا يوجد عملاء مسجلين بعد' : 'No customers registered yet'}
+                      </td>
+                    </tr>
+                  )}
                </tbody>
             </table>
          </div>

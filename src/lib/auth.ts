@@ -62,5 +62,5 @@ export const authOptions: NextAuthOptions = {
     signIn: "/auth/login",
     error: "/auth/login"
   },
-  secret: process.env.NEXTAUTH_SECRET || "super-secret-walaaplus-dev-key-123",
+  secret: process.env.NEXTAUTH_SECRET || "walaaplus-local-dev-secret-key-123",
 };
