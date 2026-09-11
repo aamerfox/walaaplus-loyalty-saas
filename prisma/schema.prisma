@@ -457,21 +457,21 @@ model LoyaltyOperation {
   performedByUserId         String? // null for ENROLLMENT/SYSTEM/AUTOMATION
   rewardTierId              String?
 
-  kind                 OperationKind
-  unitType             UnitType
-  quantity             Int // signed; negative = redemption/reversal/expiry
-  purchaseAmountMinor  Int? // customer spend in this transaction
-  monetaryDeltaMinor   Int? // money moved for cash-based programs (later)
-  redemptionValueMinor Int? // merchant cost of a redeemed reward
-  balanceAfter         Int // projection snapshot for `unitType` after this row
-  countsAsVisit        Boolean // frozen at write time; see PRODUCT-SPEC §5.4
-  source               OperationSource
-  comment              String? // internal, never shown to the customer
-  reason               String? // required on reversals/corrections
+  kind                  OperationKind
+  unitType              UnitType
+  quantity              Int // signed; negative = redemption/reversal/expiry
+  purchaseAmountMinor   Int? // customer spend in this transaction
+  monetaryDeltaMinor    Int? // money moved for cash-based programs (later)
+  redemptionValueMinor  Int? // merchant cost of a redeemed reward
+  balanceAfter          Int // projection snapshot for `unitType` after this row
+  countsAsVisit         Boolean // frozen at write time; see PRODUCT-SPEC §5.4
+  source                OperationSource
+  comment               String? // internal, never shown to the customer
+  reason                String? // required on reversals/corrections
   reversalOfOperationId String?
-  externalProvider     String?
-  externalEventId      String?
-  createdAt            DateTime        @default(now())
+  externalProvider      String?
+  externalEventId       String?
+  createdAt             DateTime        @default(now())
 
   business       Business                @relation(fields: [businessId], references: [id])
   location       Location                @relation(fields: [locationId], references: [id])
@@ -595,4 +595,27 @@ model PushDelivery {
   card         CustomerCard     @relation(fields: [customerCardId], references: [id])
 
   @@index([pushMessageId, status])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Authentication abuse control
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// One fixed window per (scope, keyHash) for authentication rate limiting.
+///
+/// Enforcement is in the DATABASE, not in process memory, so the limit holds across web
+/// processes and restarts (src/server/security/rate-limit.ts). `keyHash` is an HMAC of the
+/// normalised identifier — never a plain email address or raw IP — so the table cannot be
+/// mined for who tried to sign in. Rows expire and are pruned; `expiresAt` is indexed for it.
+model AuthRateLimit {
+  id            String   @id @default(uuid())
+  scope         String // e.g. auth.signin.email, auth.register.ip
+  keyHash       String // HMAC-SHA256 of the normalised identifier, hex
+  attempts      Int      @default(1)
+  windowStart   DateTime @default(now())
+  expiresAt     DateTime
+  lastAttemptAt DateTime @default(now())
+
+  @@unique([scope, keyHash])
+  @@index([expiresAt])
 }

@@ -30,6 +30,27 @@ const envSchema = z.object({
 
   /** Port for the worker's /health endpoint. 0 = OS-assigned (tests). */
   WORKER_HEALTH_PORT: z.coerce.number().int().min(0).max(65535).default(8081),
+
+  // ── Authentication rate limiting (src/server/security/rate-limit.ts) ────────
+  // Defaults are deliberately usable as-is: a real merchant retypes a password a handful of
+  // times, an attacker does not. Every value is validated, so a typo cannot silently disable
+  // the limit — `AUTH_RATE_LIMIT_REGISTER_MAX=0` is refused at startup, not treated as "off".
+
+  /** Registration attempts allowed per client address per window. */
+  AUTH_RATE_LIMIT_REGISTER_MAX: z.coerce.number().int().min(1).max(10_000).default(10),
+  /** Registration window length, seconds. */
+  AUTH_RATE_LIMIT_REGISTER_WINDOW_SECONDS: z.coerce.number().int().min(1).max(86_400).default(900),
+  /** Credential sign-in attempts allowed per identifier and per client address per window. */
+  AUTH_RATE_LIMIT_SIGNIN_MAX: z.coerce.number().int().min(1).max(10_000).default(10),
+  /** Sign-in window length, seconds. */
+  AUTH_RATE_LIMIT_SIGNIN_WINDOW_SECONDS: z.coerce.number().int().min(1).max(86_400).default(900),
+  /**
+   * Optional dedicated pepper for the keyed hash of rate-limit identifiers. When absent, one is
+   * derived from NEXTAUTH_SECRET — so there is always a keyed hash, never a bare sha256 that a
+   * dictionary of email addresses could be matched against. Set it to rotate the two
+   * independently. Rotating either simply starts fresh windows.
+   */
+  AUTH_RATE_LIMIT_PEPPER: z.string().min(16, "must be at least 16 characters").optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;

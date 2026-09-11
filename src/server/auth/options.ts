@@ -4,11 +4,29 @@ import CredentialsProvider from "next-auth/providers/credentials";
 import { z } from "zod";
 import { prisma } from "../db";
 import { env } from "../env";
+import { clearSignInLimit, consumeSignInLimit } from "../security/rate-limit";
 
 const credentialsSchema = z.object({
   email: z.string().trim().toLowerCase().pipe(z.email()),
   password: z.string().min(1).max(200),
 });
+
+/**
+ * Client address from the headers NextAuth hands `authorize`. The app sits behind one reverse
+ * proxy, so the FIRST entry of x-forwarded-for is the client. Returns null when nothing usable
+ * is present — the identifier window still applies, so a missing address is not a bypass.
+ */
+function clientIpFromHeaders(headers: Record<string, unknown> | undefined): string | null {
+  const read = (name: string): string | null => {
+    const v = headers?.[name];
+    if (typeof v === "string") return v;
+    if (Array.isArray(v) && typeof v[0] === "string") return v[0];
+    return null;
+  };
+  const forwarded = read("x-forwarded-for");
+  if (forwarded) return forwarded.split(",")[0]?.trim() || null;
+  return read("x-real-ip");
+}
 
 let cached: NextAuthOptions | undefined;
 
@@ -32,9 +50,16 @@ export function getAuthOptions(): NextAuthOptions {
           email: { label: "Email", type: "email" },
           password: { label: "Password", type: "password" },
         },
-        async authorize(raw) {
+        async authorize(raw, req) {
           const parsed = credentialsSchema.safeParse(raw);
           if (!parsed.success) return null;
+
+          // Rate limit BEFORE the database lookup and before bcrypt, so a flood of guesses
+          // cannot be turned into a flood of password hashes. Both the identifier window and
+          // the client-address window are counted; either one can refuse.
+          const ip = clientIpFromHeaders(req?.headers);
+          const limit = await consumeSignInLimit(parsed.data.email, ip);
+          if (!limit.allowed) return null;
 
           const user = await prisma.user.findUnique({
             where: { email: parsed.data.email },
@@ -44,6 +69,11 @@ export function getAuthOptions(): NextAuthOptions {
 
           const ok = await bcrypt.compare(parsed.data.password, user.passwordHash);
           if (!ok) return null;
+
+          // A successful sign-in forgets the identifier's window, so a legitimate user who
+          // mistyped a few times is not locked out by their own success. The address window
+          // stays, so one host cannot mint unlimited attempts by interleaving valid sign-ins.
+          await clearSignInLimit(parsed.data.email);
 
           return {
             id: user.id,

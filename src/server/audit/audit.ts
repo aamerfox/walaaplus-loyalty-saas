@@ -14,6 +14,8 @@ export const AuditAction = {
   LOCATION_CREATED: "location.created",
   /** A ledger group written by the platform rather than by a signed-in staff member. */
   LEDGER_SYSTEM_GROUP_APPENDED: "ledger.system_group_appended",
+  /** An authentication window was exhausted. Recorded once per window; never carries credentials. */
+  AUTH_RATE_LIMITED: "auth.rate_limited",
 } as const;
 export type AuditActionName = (typeof AuditAction)[keyof typeof AuditAction];
 

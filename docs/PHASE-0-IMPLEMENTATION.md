@@ -252,9 +252,69 @@ Tracked with status in [DECISIONS-REQUIRED.md](DECISIONS-REQUIRED.md). Blocking 
 - Provision the migrator and runtime database credentials for staging and production and run
   `npm run db:migrate && npm run db:roles` there (§4 "Database roles")
 
+
 ---
 
-## 9. Removed in this phase
+## 9. Authentication rate limiting
+
+Enforced in **PostgreSQL**, not in process memory: an in-process counter resets on restart and is
+per replica, and the staging design must not depend on there being exactly one web process.
+
+| Surface | Windows | Response when exhausted |
+|---|---|---|
+| `POST /api/auth/register` | per client address | `429` with `Retry-After`, fixed body text |
+| Credential sign-in | per identifier **and** per client address | NextAuth's generic sign-in failure |
+
+One row per `(scope, keyHash)` in `AuthRateLimit` holds a fixed window. Enforcement is a single
+`INSERT … ON CONFLICT (scope, keyHash) DO UPDATE … RETURNING` statement: PostgreSQL takes a row
+lock on the conflicting row, so simultaneous attempts serialise and the counter is exact. There is
+no read-then-write window for a burst of parallel requests to slip through, which
+`tests/integration/auth-rate-limit.test.ts` proves by firing three times the limit in parallel and
+asserting exactly `max` are allowed and every attempt was counted once.
+
+**What is stored.** `keyHash` is an HMAC-SHA256 of the *normalised* identifier (trimmed,
+lower-cased) keyed with a pepper — `AUTH_RATE_LIMIT_PEPPER`, or one derived from `NEXTAUTH_SECRET`
+when that is unset. The table answers "has this key been seen too often" without being a readable
+list of who tried to sign in, and a dictionary of email addresses cannot be matched against it.
+Normalising first means capitalisation or padding cannot multiply an attacker's allowance.
+
+**Windows and expiry.** A refused attempt is counted but never extends the window, so nobody can
+hold a legitimate user out indefinitely. A successful sign-in forgets that identifier's window
+(a user who mistyped twice is not punished for succeeding) while the address window stays, so one
+host cannot mint unlimited attempts by interleaving valid sign-ins. Expired rows are removed by
+`pruneExpiredRateLimits()` in bounded batches of 1,000, triggered on a 2% sample of new windows;
+`AuthRateLimit_expiresAt_idx` keeps the sweep off a sequential scan. The function is exported so a
+scheduled worker job can own it outright once the job runner takes on business jobs in Phase 1.5.
+
+**Auditing.** The first refusal of each window writes one `auth.rate_limited` audit row carrying
+the scope, the limit, the window length and a 12-character prefix of the keyed hash — enough to
+correlate repeated refusals, not enough to recover the identifier. No email, no address, no
+credential. Only the first refusal is audited, so one request cannot be turned into unbounded
+audit writes. An audit failure never turns a refusal into a 500.
+
+### NextAuth's flow, and what it does and does not allow
+
+NextAuth owns `/api/auth/callback/credentials`; the application does not wrap that route. The
+single hook it exposes is the provider's `authorize`, so that is where the limit is enforced —
+**before** the user lookup and **before** `bcrypt.compare`, so a flood of guesses cannot be turned
+into a flood of password hashes. Consequences, accepted deliberately:
+
+- A refused sign-in returns `null`, which NextAuth renders as its generic sign-in failure. The
+  caller gets **no `429` and no `Retry-After`** on this path. Returning one would require owning
+  the callback route, which is a Phase 1a decision once the real sign-in UI exists.
+- That same genericity is the account-enumeration defence: a wrong password, an unknown account,
+  a deactivated account and an exhausted window are indistinguishable to the caller.
+- `authorize` receives the request headers, so the client address comes from `x-forwarded-for`
+  (first entry — the app sits behind one reverse proxy) or `x-real-ip`. When no address is
+  present the identifier window still applies, so a missing header is not a bypass.
+
+**Known residual, carried to Phase 1a:** registration still answers "an account with this email
+already exists" on conflict, which is an enumeration vector distinct from rate limiting. The
+standard fix is the verification-email flow ("if that address is new, check your inbox"), which
+needs the email provider of decision D3. Tracked in `docs/evidence/phase-0-prompt-3.md` §9.
+---
+
+## 10. Removed in this phase
 
 Deleted from the working branch (all preserved in tag `prototype-baseline`): the prototype Prisma
 schema and seed, `src/lib/auth.ts`, `src/lib/prisma.ts`, `src/middleware.ts`, every route under
@@ -266,6 +326,4 @@ The dashboard sidebar (`src/components/dashboard/Sidebar.tsx`) lists only routes
 `IMPLEMENTED_ROUTES` set — currently the dashboard home. The remaining mock pages are unreachable
 from navigation until the commit that implements each one adds its route.
 
-`POST /api/auth/register` is rate limited per client address (10 attempts / 15 minutes, HTTP 429
-with `Retry-After`) by an in-process fixed-window limiter (`src/server/rate-limit.ts`). It is
-per web replica; a shared store replaces it when the platform runs more than one replica.
+See §9 for authentication rate limiting.

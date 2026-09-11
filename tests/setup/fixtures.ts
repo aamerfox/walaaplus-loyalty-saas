@@ -12,6 +12,7 @@ import { registerBusinessOwner, type RegisterInput } from "@/server/registration
 import { requireBusinessMembership, type TenantContext } from "@/server/tenant/context";
 
 const APP_TABLES = [
+  "AuthRateLimit",
   "PushDelivery",
   "PushSubscription",
   "PushMessage",
