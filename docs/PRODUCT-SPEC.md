@@ -333,6 +333,8 @@ enrollmentTitle, enrollmentImageUrl, active, createdAt, updatedAt
 
 Every template gets a default link named **Direct** with `utmSource = direct` at creation. There is no separate generic enrollment token, so **every issued card always carries source attribution**.
 
+Uniqueness: `publicToken` is globally unique; `name` is unique **per template**. `utmSource` is deliberately *not* unique — several links (two Instagram campaigns, two in-store table codes) may share one source and differ by name, medium or campaign.
+
 ---
 
 ## 5. MVP loyalty engine

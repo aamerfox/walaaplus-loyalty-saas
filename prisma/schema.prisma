@@ -389,7 +389,9 @@ model UtmSourceLink {
   template ProgramTemplate @relation(fields: [templateId], references: [id])
   cards    CustomerCard[]
 
-  @@unique([templateId, utmSource])
+  // Many links may share a utmSource (two Instagram campaigns, two in-store table codes).
+  // The human-facing NAME is unique per template; publicToken is globally unique above.
+  @@unique([templateId, name])
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

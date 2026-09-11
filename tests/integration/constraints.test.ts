@@ -17,7 +17,7 @@ describe("database constraints and indexes", () => {
       "CustomerBusinessProfile_businessId_customerId_key",
       "ProgramVersion_templateId_versionNumber_key",
       "UtmSourceLink_publicToken_key",
-      "UtmSourceLink_templateId_utmSource_key",
+      "UtmSourceLink_templateId_name_key",
       "CustomerCard_serialNumber_key",
       "CustomerCard_qrToken_key",
       "CustomerCard_shareToken_key",
