@@ -27,6 +27,9 @@ const local = readFileSync(path.join(ROOT, "deploy/Caddyfile"), "utf8");
 const staging = readFileSync(path.join(ROOT, "deploy/Caddyfile.staging"), "utf8");
 const stagingEnvTemplate = readFileSync(path.join(ROOT, ".env.staging.example"), "utf8");
 const runbook = readFileSync(path.join(ROOT, "docs/STAGING-RUNBOOK.md"), "utf8");
+const cohostSnippet = readFileSync(path.join(ROOT, "deploy/Caddyfile.walaaplus-staging.caddy"), "utf8");
+
+const NEWLINE = String.fromCharCode(10);
 
 /** Directive lines only, comments and blanks removed. */
 function directives(text: string): string[] {
@@ -220,5 +223,95 @@ describe("database password guidance", () => {
     for (const [name, text] of sources) {
       expect(text, `${name} must say why hex`).toMatch(/not a URL|breaks|ends the (?:URL's )?authority/i);
     }
+  });
+});
+
+describe("deploy/Caddyfile.walaaplus-staging.caddy — a fragment for an existing host Caddy", () => {
+  /*
+   * This file is inserted by hand into a host /etc/caddy/Caddyfile that already serves
+   * OpenClaw/OpenBot. Two failure modes matter more than anything else it could get wrong.
+   *
+   * A global options block. A Caddyfile may contain exactly one `{ ... }` block at the top, and
+   * the host already has it. A second one is a parse error, and a parse error in that file takes
+   * the EXISTING sites down — this fragment would break the neighbours, not just itself.
+   *
+   * An upstream that is not 127.0.0.1:3100. Ports 3456, 5432 and 18789 on that host belong to
+   * OpenBot; proxying a public hostname at one of them would expose someone else's service under
+   * a WalaaPlus name.
+   */
+  const lines = directives(cohostSnippet);
+  const body = lines.join(NEWLINE);
+
+  it("declares one site, and it is the staging hostname", () => {
+    const siteLines = lines.filter((l) => l.endsWith("{") && !l.startsWith("header") && !l.startsWith("handle") && !l.startsWith("reverse_proxy"));
+    expect(siteLines).toEqual(["staging.truebiznes.com {"]);
+  });
+
+  it("contains no global options block", () => {
+    // A global block is a bare `{` on its own line, before any site address.
+    expect(lines, "a second global options block breaks the whole host Caddyfile").not.toContain("{");
+    for (const global of ["auto_https", "admin ", "email ", "debug", "storage "]) {
+      expect(body, `a fragment must not set the global option: ${global}`).not.toContain(global);
+    }
+  });
+
+  it("binds no port and names no listener", () => {
+    // `:80 {` or `:443 {` would make this fragment try to own a port the host Caddy already has.
+    expect(lines.some((l) => /^:\d+/.test(l)), "a fragment must not declare a listener").toBe(false);
+    expect(body).not.toContain("bind ");
+  });
+
+  it("proxies to loopback 3100 and to nothing else", () => {
+    const upstreams = lines.filter((l) => l.startsWith("reverse_proxy"));
+    expect(upstreams).toHaveLength(1);
+    expect(upstreams[0]).toBe("reverse_proxy 127.0.0.1:3100 {");
+  });
+
+  it("never points at a port that belongs to the neighbours", () => {
+    for (const port of ["3456", "5432", "18789"]) {
+      expect(body, `${port} belongs to another service on that host`).not.toContain(port);
+    }
+  });
+
+  it("SETS every forwarding header from the connection it received", () => {
+    for (const header of SET_HEADERS) {
+      expect(lines, `the fragment must set: ${header}`).toContain(header);
+    }
+  });
+
+  it("strips the other headers a client might pass off as proxy state", () => {
+    for (const header of STRIPPED_HEADERS) {
+      expect(lines, `the fragment must remove: ${header}`).toContain(header);
+    }
+  });
+
+  it("never carries an inbound forwarding value through", () => {
+    // An APPENDED X-Forwarded-For carries the client's forged prefix to the rate limiter, and
+    // the application is configured to believe it.
+    expect(body).not.toContain("{http.request.header.X-Forwarded-For}");
+  });
+
+  it("answers its own health path instead of proxying it", () => {
+    expect(lines).toContain("handle /healthz {");
+    expect(lines).toContain('respond "ok" 200');
+  });
+
+  it("probes the application where a database outage is visible", () => {
+    expect(lines).toContain("health_uri /api/health");
+  });
+
+  it("carries the same staging security headers as the dedicated stack", () => {
+    expect(lines.some((l) => l.startsWith('X-Robots-Tag "noindex'))).toBe(true);
+    expect(lines).toContain('X-Content-Type-Options "nosniff"');
+    expect(lines).toContain("Content-Security-Policy \"frame-ancestors 'none'\"");
+    expect(lines).toContain('X-Frame-Options "DENY"');
+    expect(lines).toContain("-Server");
+
+    const hsts = lines.find((l) => l.startsWith("Strict-Transport-Security"));
+    expect(hsts).toBeDefined();
+    // This is one subdomain of a domain used for other things; those two directives would reach
+    // every other name under it and could not be taken back quickly.
+    expect(hsts).not.toContain("includeSubDomains");
+    expect(hsts).not.toContain("preload");
   });
 });

@@ -2,6 +2,18 @@
 
 How to bring WalaaPlus up on a staging server over HTTPS, verify it, back it up, and roll it back.
 
+**Two shapes, and you must pick one before reading further.**
+
+| | Server | Compose file | Who owns 80 and 443 |
+|---|---|---|---|
+| **Dedicated** | nothing else runs on it | `docker-compose.staging.yml` | this stack, via its own Caddy container |
+| **Co-hosted** | already runs other services | `docker-compose.staging-cohost.yml` | a Caddy that is already installed on the host |
+
+Sections 1 to 12 describe the **dedicated** shape. **[Section 13](#13-co-hosted-oci-staging)** describes
+the co-hosted one and is the current target: an Oracle Linux 9.8 host already running
+OpenClaw/OpenBot behind a system-managed Caddy. Read section 13 first if that is your server;
+sections 2, 6, 7 and 12 still apply as written, and section 13 says which of the others do not.
+
 **Who runs this.** The owner, on a server the owner controls, with credentials the owner
 generates. The agent wrote this file, the Compose stack and the scripts it names; the agent has
 never run any of it against a server and holds no credential. Every step below is marked with who
@@ -411,3 +423,166 @@ them on physical phones.** Record who ran each one and what happened in
 | 7 | Arabic RTL and English LTR | Both | Layout correct in both locales at phone width |
 
 Only when 1 through 7 have been performed and recorded may Phase 1a Prompt 2 be called complete.
+
+---
+
+## 13. Co-hosted OCI staging
+
+The current staging target is **not** a dedicated box. It is an Oracle Linux 9.8 host that
+already runs OpenClaw/OpenBot behind a **system-managed Caddy service**, and that Caddy **owns
+ports 80 and 443**. Docker Engine and the Compose plugin are already installed.
+
+**This is staging. It is not production, it never becomes production by being promoted, and no
+production data may be loaded into it.** Production hosting remains owner decision B4 and is out
+of scope here.
+
+### 13.1 What changes, and what does not
+
+| | Dedicated (§1–12) | Co-hosted (this section) |
+|---|---|---|
+| Compose file | `docker-compose.staging.yml` | **`docker-compose.staging-cohost.yml`** |
+| Proxy | a Caddy container in the stack | **none.** The host's existing Caddy serves the site |
+| Published ports | `80:80` and `443:443` | **`127.0.0.1:3100:3000`, and nothing else** |
+| TLS | obtained by the stack's own Caddy | obtained by the host Caddy, from a reviewed fragment |
+| PostgreSQL | no port | no port. **Never 5432 on this host — it belongs to a neighbour** |
+| Worker | no published port | no published port |
+| `ACME_EMAIL` | required | **unused.** The host Caddy already has an ACME account |
+
+Everything else carries over unchanged: the same two database roles, the same startup order, the
+same startup validation, the same backup and restore scripts (§6), the same rollback procedure
+(§7), and the same real-device checklist (§12).
+
+### 13.2 Ports, and why only one is bound
+
+The host Caddy owns 80 and 443. A second proxy cannot bind them, and trying would either fail to
+start or take the existing sites down. So this stack runs no proxy and publishes exactly one port:
+
+```
+127.0.0.1:3100:3000
+```
+
+`127.0.0.1` is the host's own loopback interface. Not `0.0.0.0`, not the Docker bridge, not the
+VPC address, not the public one. A container in another stack on this host cannot reach it, and
+neither can the internet; only a process on the host itself can, which is exactly what the host
+Caddy is. `3100` was chosen because it is free on that host. **Ports 3456, 5432 and 18789 belong
+to OpenBot and are never bound by anything in this repository.**
+
+The Compose file writes that mapping as a literal rather than a variable on purpose. An
+interpolated host address is one typo away from `0.0.0.0`, which would publish the application to
+the internet beside the proxy that is meant to be in front of it.
+
+**One honest caveat.** On a dedicated box `web` publishes nothing, so the only way to reach it is
+through the proxy that rewrites `X-Forwarded-For`, and `TRUST_PROXY_HEADERS=true` means "trust
+the proxy". Here `web` is reachable on loopback, so that setting also trusts **any process on
+this host**. On an owner-controlled staging machine that is an acceptable price for having TLS at
+all. It would not be acceptable on production, where the application belongs on its own host or
+behind a proxy it does not share.
+
+### 13.3 DNS — before anything else
+
+**Owner.** `staging.truebiznes.com` must resolve to **84.8.119.97** before Caddy is asked to
+serve it. The ACME challenge is validated from the internet, not from the host's resolver cache,
+so a record that has not propagated fails issuance and looks like a Caddy fault:
+
+```bash
+dig +short staging.truebiznes.com A
+```
+
+Do not insert the site block until that prints `84.8.119.97`. Certificate issuance is rate
+limited per hostname, so repeated failed attempts are not free.
+
+### 13.4 Bring the stack up
+
+**Owner**, in the repository directory on the host, on the branch being staged:
+
+```bash
+cp .env.staging.example .env.staging
+chmod 600 .env.staging
+# fill it in per §2. ACME_EMAIL is not used in this shape and may be left blank.
+docker compose -f docker-compose.staging-cohost.yml --env-file .env.staging up -d --build
+```
+
+Secrets are generated on the server exactly as in §2, **hex for both database passwords**.
+
+Startup order is enforced by Compose and is the same as §3: `db` healthy, then `migrate` runs
+migrations and role grants to completion, then `web` and `worker` start. Confirm before touching
+Caddy at all:
+
+```bash
+docker compose -f docker-compose.staging-cohost.yml --env-file .env.staging ps
+curl -s http://127.0.0.1:3100/api/health        # expect {"status":"ok"}
+```
+
+If that curl does not answer, stop. A Caddy site pointing at a dead upstream serves 502s under a
+real hostname and burns certificate attempts for nothing.
+
+### 13.5 The Caddy site block — reviewed, inserted by hand
+
+The fragment is [`deploy/Caddyfile.walaaplus-staging.caddy`](../deploy/Caddyfile.walaaplus-staging.caddy).
+Nothing in this repository loads it, reloads Caddy, or requests a certificate. It contains no
+global options block, no listener address and no port binding, because the host Caddyfile already
+has all three and **a Caddyfile may contain exactly one global `{ ... }` block** — a second one is
+a parse error, and a parse error in `/etc/caddy/Caddyfile` takes the host's existing sites down
+with it, OpenBot included.
+
+The person administering the host, hereafter the OCI agent, performs these steps in this order:
+
+1. **Back up the current configuration**, so a rollback is a copy rather than a reconstruction:
+   ```bash
+   sudo cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak.$(date -u +%Y%m%dT%H%M%SZ)
+   ```
+2. **Insert the fragment** into `/etc/caddy/Caddyfile`, after the existing site blocks. Do not
+   edit the global block. Do not remove or reorder anything already there.
+3. **Validate the COMPLETE file, never the fragment alone.** What matters is whether the combined
+   configuration parses on that host:
+   ```bash
+   sudo caddy validate --config /etc/caddy/Caddyfile
+   ```
+   Expect `Valid configuration`. Anything else: restore the backup and stop. Validation loads the
+   configuration without starting listeners and without requesting a certificate, so it is safe
+   to run as often as needed.
+4. **Ask the owner.** **Reload only after explicit owner approval.** Validation proves the file
+   parses; it does not prove the change should happen now, and the reload affects a service the
+   owner is already running in front of other things.
+5. **Reload, never restart:**
+   ```bash
+   sudo systemctl reload caddy
+   ```
+   A reload keeps existing connections and sites serving. A restart drops every connection the
+   host is handling, OpenBot's included.
+6. **Verify from outside the server:**
+   ```bash
+   curl -sI https://staging.truebiznes.com/healthz
+   echo | openssl s_client -connect staging.truebiznes.com:443 -servername staging.truebiznes.com 2>/dev/null \
+     | openssl x509 -noout -subject -issuer -dates
+   ```
+   Then confirm the neighbours are still healthy. A change to a shared Caddy is not verified until
+   the services that were already there have been checked too.
+
+**Rollback:** remove the block, validate, reload. The certificate Caddy obtained stays in its data
+directory and is reused if the block returns.
+
+### 13.6 Confirming the stack stayed in its lane
+
+**OCI agent**, after the stack is up:
+
+```bash
+# Only 3100, only on loopback. Nothing of ours on 0.0.0.0.
+docker compose -f docker-compose.staging-cohost.yml --env-file .env.staging ps --format '{{.Service}} {{.Ports}}'
+sudo ss -tlnp | grep 3100                       # expect 127.0.0.1:3100 only
+
+# We publish no database port, and 5432 still belongs to whoever had it.
+sudo ss -tlnp | grep 5432                       # unchanged from before this deployment
+
+# Our networks and volumes are ours, created under our own project name.
+docker network ls --filter name=walaaplus-staging-cohost
+docker volume  ls --filter name=walaaplus-staging-cohost
+```
+
+From another machine, `nc -vz staging.truebiznes.com 3100` must be refused or time out: 3100 is
+loopback-only and must never answer from off the host.
+
+The same policy is asserted statically in `tests/unit/compose-exposure.test.ts` and
+`tests/unit/deploy-config.test.ts`, which fail the gate on every commit if the Compose file
+stops publishing exactly `127.0.0.1:3100:3000`, if a proxy service appears in it, or if the
+fragment ever points somewhere other than `127.0.0.1:3100`.

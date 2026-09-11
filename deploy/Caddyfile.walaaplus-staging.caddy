@@ -1,0 +1,105 @@
+# WalaaPlus staging — a site block for an EXISTING host Caddy.
+#
+# This file is not loaded by anything. It is a reviewed fragment, to be inserted by hand into the
+# host's /etc/caddy/Caddyfile by whoever administers that host, after the owner approves it.
+# Nothing in this repository reads it, reloads Caddy, or requests a certificate.
+#
+# WHY A FRAGMENT AND NOT A CADDYFILE. The target server already runs a system-managed Caddy that
+# owns ports 80 and 443, in front of OpenClaw/OpenBot. WalaaPlus adds one more site to that
+# Caddy instead of running a second one. So this file deliberately contains:
+#
+#   - NO global options block. The `{ ... }` block at the top of a Caddyfile may appear exactly
+#     once. A second one is a parse error, and a parse error in /etc/caddy/Caddyfile takes the
+#     EXISTING sites down, not just this one. If a global setting is ever needed, it goes in the
+#     host's own block, as a separate reviewed change.
+#   - NO port bindings, no `email`, no `auto_https`, no `admin`. Those belong to the host Caddy
+#     and are already configured there.
+#   - NO listener address. The site address below is a hostname, so Caddy serves it on the ports
+#     it already listens on and obtains a certificate for that name automatically.
+#
+# BEFORE INSERTING, in this order:
+#   1. `staging.truebiznes.com` must resolve to 84.8.119.97 from OUTSIDE the server. The ACME
+#      challenge is validated from the internet, not from the host's resolver cache:
+#        dig +short staging.truebiznes.com A
+#   2. The WalaaPlus stack must already be up and answering on loopback:
+#        curl -s http://127.0.0.1:3100/api/health      # expect {"status":"ok"}
+#   3. The COMPLETE host configuration must validate, with this block already inserted:
+#        caddy validate --config /etc/caddy/Caddyfile
+#      Validate the whole file, never this fragment alone: what matters is whether the combined
+#      configuration parses, and only the combined file can answer that.
+#   4. Reload ONLY after the owner approves, and only with a reload - never a restart:
+#        sudo systemctl reload caddy
+#      A reload keeps the existing sites serving. A restart drops every connection the host is
+#      already handling, including OpenBot's.
+#
+# ROLLBACK: remove this block, validate again, reload again. The certificate Caddy obtained stays
+# in its data directory and is reused if the block returns.
+#
+# STAGING ONLY. This is not production, and this hostname must never be pointed at production
+# data. See docs/STAGING-RUNBOOK.md §13.
+
+staging.truebiznes.com {
+	encode gzip
+
+	header {
+		# Staging serves real-looking loyalty cards at guessable-looking paths. It must never
+		# appear in a search result.
+		X-Robots-Tag "noindex, nofollow"
+
+		# Sixty days, and deliberately WITHOUT includeSubDomains or preload: this is one
+		# subdomain of a domain used for other things, and those two directives would reach
+		# every other name under it and could not be taken back quickly.
+		Strict-Transport-Security "max-age=5184000"
+
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+
+		# The card and the scanner are never legitimately framed.
+		Content-Security-Policy "frame-ancestors 'none'"
+		X-Frame-Options "DENY"
+
+		# A version banner helps nobody but a scanner.
+		-Server
+	}
+
+	# `handle` blocks are mutually exclusive and run in written order. Bare directives would be
+	# reordered by Caddy's directive order, which puts reverse_proxy BEFORE respond — /healthz
+	# would then be proxied to the application instead of answered here, and a proxy health check
+	# that depends on the application cannot tell you the application is down.
+	handle /healthz {
+		respond "ok" 200
+	}
+
+	handle {
+		# The published Docker port from docker-compose.staging-cohost.yml, on the host's own
+		# loopback. Not a container name: this Caddy runs on the host, not in the Compose
+		# network. Not 0.0.0.0, and not any other port on this machine — 3456, 5432 and 18789
+		# belong to OpenBot and are never touched.
+		reverse_proxy 127.0.0.1:3100 {
+			# The headers the application may believe, and the only reason
+			# TRUST_PROXY_HEADERS=true is defensible. Each is SET from the connection this
+			# proxy actually received, REPLACING whatever the client sent. Never append here:
+			# an appended X-Forwarded-For carries the client's forged prefix through to the
+			# rate limiter, and every per-address limit in the product silently becomes
+			# decoration.
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-Host {host}
+
+			# Anything else a client might pass off as proxy state is removed outright.
+			header_up -Forwarded
+			header_up -X-Forwarded-Server
+			header_up -X-Client-IP
+			header_up -CF-Connecting-IP
+			header_up -True-Client-IP
+
+			# /api/health runs SELECT 1 as the restricted runtime role and returns a status
+			# word only, so an application that is up but cannot reach PostgreSQL is reported
+			# unhealthy instead of left serving five-hundreds.
+			health_uri /api/health
+			health_interval 30s
+			health_timeout 5s
+		}
+	}
+}

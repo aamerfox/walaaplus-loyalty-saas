@@ -1,0 +1,162 @@
+# CO-HOSTED STAGING. For a server that ALREADY runs something else on 80 and 443.
+#
+#   docker compose -f docker-compose.staging-cohost.yml --env-file .env.staging up -d --build
+#
+# The target host (Oracle Linux 9.8) already runs OpenClaw/OpenBot and a system-managed Caddy
+# service that owns ports 80 and 443. This stack therefore ships NO proxy container, binds no
+# public port, and hands TLS to the Caddy that is already there. The host Caddy reaches this
+# stack at 127.0.0.1:3100 using the site block in deploy/Caddyfile.walaaplus-staging.caddy, which
+# a human inserts into the host configuration after review. Nothing here reloads Caddy.
+#
+# WHICH FILE TO USE
+#   docker-compose.yml                  local development
+#   docker-compose.staging.yml          a DEDICATED staging server, where this stack owns 80/443
+#                                       and runs its own Caddy. Unchanged; still the target for a
+#                                       future dedicated box
+#   docker-compose.staging-cohost.yml   THIS FILE: a shared server whose ports 80 and 443 belong
+#                                       to someone else
+# Never combine them. Each is self-contained and they publish different things.
+#
+# ISOLATION FROM THE NEIGHBOURS, which is the point of this file:
+#   - a distinct Compose project name, so the networks and volumes below are created fresh under
+#     that prefix and can never be an existing OpenBot network or volume;
+#   - no `external: true` anywhere: this stack joins nothing that already exists;
+#   - its own PostgreSQL in its own container and volume. It never connects to another database
+#     on this host, and it publishes no database port, so nothing else can connect to it either;
+#   - the only host port touched is 127.0.0.1:3100. OpenBot's ports - 3456, 5432, 18789 and any
+#     other - are never bound, and 5432 in particular is never published by this file at all.
+#
+# THE ONE PROPERTY THAT IS WEAKER HERE than in docker-compose.staging.yml, stated plainly because
+# it drives a setting below: on a dedicated box `web` publishes nothing, so the ONLY way to reach
+# it is through the proxy that rewrites X-Forwarded-For. Here `web` is reachable at
+# 127.0.0.1:3100 by any process on the host, so TRUST_PROXY_HEADERS=true means "trust every local
+# process on this machine", not "trust the proxy". On an owner-controlled staging box that is an
+# acceptable trade for having TLS at all; it would not be on production, and it is recorded as a
+# limitation in docs/evidence/phase-1a-prompt-2-cohost-config.md.
+#
+# STAGING ONLY. Not production. See docs/STAGING-RUNBOOK.md §13.
+
+name: walaaplus-staging-cohost
+
+services:
+  db:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in the env file}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the env file}
+      POSTGRES_DB: ${POSTGRES_DB:-loyalty}
+    # NO `ports`. Not 5432, not a loopback mapping, nothing. 5432 on this host belongs to another
+    # service and must never be touched; this database is reached only over the `backend` network
+    # by service name, and a backup runs inside the container (deploy/backup.sh).
+    networks: [backend]
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  # One-shot: `prisma migrate deploy` then `scripts/db-roles.mjs`, then exits 0. The only service
+  # that ever receives the migrator credential. web and worker wait for it to COMPLETE.
+  migrate:
+    build:
+      context: .
+      target: migrate
+    restart: "no"
+    environment:
+      # Both passwords are interpolated into a URL and Compose substitutes them verbatim, with no
+      # percent-encoding. Generate them with `openssl rand -hex 32`; a `/` ends the authority
+      # early and the connection string stops being a URL. src/server/env.ts and db-roles.mjs
+      # both refuse a string that does not parse, naming the variable, never printing the value.
+      MIGRATE_DATABASE_URL: postgresql://${POSTGRES_USER:?}:${POSTGRES_PASSWORD:?}@db:5432/${POSTGRES_DB:-loyalty}?schema=public
+      # db-roles.mjs reads the runtime role's NAME and PASSWORD from this URL and creates the
+      # role from them.
+      DATABASE_URL: postgresql://${APP_DB_USER:-walaaplus_app}:${APP_DB_PASSWORD:?Set APP_DB_PASSWORD in the env file}@db:5432/${POSTGRES_DB:-loyalty}?schema=public
+    networks: [backend]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    build:
+      context: .
+      target: web
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      # RUNTIME role only. This container never receives POSTGRES_PASSWORD, and `env_file` is
+      # deliberately not used: it would hand the container every variable in the file.
+      DATABASE_URL: postgresql://${APP_DB_USER:-walaaplus_app}:${APP_DB_PASSWORD:?Set APP_DB_PASSWORD in the env file}@db:5432/${POSTGRES_DB:-loyalty}?schema=public
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?Set NEXTAUTH_SECRET in the env file - generate with openssl rand -base64 48}
+      # The public origin is the hostname the HOST Caddy serves, not this port. Sessions and
+      # absolute links break if this disagrees with what the browser used.
+      NEXTAUTH_URL: https://${WALAAPLUS_DOMAIN:?Set WALAAPLUS_DOMAIN in the env file}
+      # True because the host Caddy REPLACES X-Forwarded-For and X-Real-IP with the address of
+      # the connection it received (deploy/Caddyfile.walaaplus-staging.caddy). Read the note at
+      # the top of this file: on a co-hosted box this also trusts any local process.
+      TRUST_PROXY_HEADERS: "true"
+    # THE ONLY PUBLISHED PORT IN THIS FILE, and it is deliberately a literal rather than a
+    # variable: an interpolated host IP is one typo away from 0.0.0.0, which would put the
+    # application on the public internet beside a proxy that is supposed to be in front of it.
+    # 127.0.0.1 means the host's own loopback only - not the Docker bridge, not the VPC, not the
+    # public address. A container in another stack cannot reach it.
+    ports:
+      - "127.0.0.1:3100:3000"
+    networks: [backend, edge]
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  worker:
+    build:
+      context: .
+      target: worker
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${APP_DB_USER:-walaaplus_app}:${APP_DB_PASSWORD:?Set APP_DB_PASSWORD in the env file}@db:5432/${POSTGRES_DB:-loyalty}?schema=public
+      # The worker validates the same environment as web (src/server/env.ts), so the session
+      # secret must be present even though the worker serves no session.
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?Set NEXTAUTH_SECRET in the env file}
+      NEXTAUTH_URL: https://${WALAAPLUS_DOMAIN:?Set WALAAPLUS_DOMAIN in the env file}
+      WORKER_HEALTH_PORT: 8081
+    # Container-only, and on the internal network only. Read it by hand with
+    #   docker compose -f docker-compose.staging-cohost.yml exec worker wget -qO- http://localhost:8081/health
+    expose:
+      - "8081"
+    networks: [backend]
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8081/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+networks:
+  # `internal: true` removes this network's gateway, so db, migrate and worker have no route to
+  # the internet in either direction. Both networks are created under this project's name; they
+  # are new networks, not existing ones, because nothing here is declared external.
+  backend:
+    internal: true
+  # `web` needs a routed network for its published port to be reachable from the host's loopback.
+  # Nothing else is attached to it.
+  edge:
+
+volumes:
+  db-data:
