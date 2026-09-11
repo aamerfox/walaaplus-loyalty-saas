@@ -327,10 +327,15 @@ that creates a new account: `202` with the same fixed body, no `businessId`, no 
 same header set. The service still raises `ConflictError` internally — the seed and future admin
 paths need the truth — and the route, which is the public boundary, flattens it.
 
-Two details make the paths genuinely indistinguishable rather than merely similar. The response
-carries no identifier of anything created, so there is nothing to compare; and
-`registerBusinessOwner` hashes the password **before** it opens its transaction, so both paths pay
-the same bcrypt cost and the duplicate case is not measurably faster.
+The response carries no identifier of anything created, so there is nothing to compare between
+the two outcomes. `registerBusinessOwner` also hashes the password **before** it opens its
+transaction, so the duplicate path does not skip the dominant cost of the request.
+
+That last point is a design property, not a measured one: the two paths do different amounts of
+database work after the hash, and **no statistical timing analysis has been done**. Treat response
+time as an unquantified side channel rather than a closed one. Closing it properly belongs with
+the verification-email flow in Phase 1a, where the response stops depending on the outcome at
+all.
 
 The caller is told to sign in, which works for exactly one of the two people who can see that
 response: whoever holds the password for that address. When the email provider of decision D3

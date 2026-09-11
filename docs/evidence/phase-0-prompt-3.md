@@ -417,8 +417,14 @@ the paths indistinguishable rather than merely similar:
 
 - the response carries **no identifier of anything created**. The old `201` returned `businessId`,
   which by itself was an oracle;
-- `registerBusinessOwner` hashes the password **before** opening its transaction, so both paths pay
-  the same bcrypt cost and the duplicate case is not measurably faster.
+- `registerBusinessOwner` hashes the password **before** opening its transaction, so the duplicate
+  path does not skip the dominant cost of the request.
+
+The second point is a design property, not a measured one. The two paths do different amounts of
+database work after the hash, and **no statistical timing analysis was performed**, so response
+time remains an unquantified side channel rather than a closed one — narrower than the explicit
+disclosure it replaced, but not closed. An earlier draft of this section said the duplicate case
+is "not measurably faster"; that claimed a measurement that was never taken, and is withdrawn.
 
 Malformed input keeps its own `400`: input shape describes the request, not the account. When the
 email provider of decision D3 lands, this becomes the usual "check your inbox", and the

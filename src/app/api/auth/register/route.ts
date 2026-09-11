@@ -14,10 +14,13 @@ import { registerBusinessOwner } from "@/server/registration/register";
  * service still raises ConflictError internally — the seed and the admin paths need the truth —
  * and it is this route, the public boundary, that flattens it.
  *
- * Two details make the two paths genuinely indistinguishable rather than merely similar:
- *  - the response carries no identifier of the created business, so there is nothing to compare;
- *  - `registerBusinessOwner` hashes the password BEFORE it opens its transaction, so both paths
- *    pay the same bcrypt cost and the duplicate case is not measurably faster.
+ * The response carries no identifier of the created business, so there is nothing to compare
+ * between the two outcomes, and `registerBusinessOwner` hashes the password BEFORE it opens its
+ * transaction, so the duplicate path does not skip the dominant cost of the request.
+ *
+ * Response TIME is not claimed to be indistinguishable: the two paths do different amounts of
+ * database work after the hash, and no timing analysis has been done. It is an unquantified side
+ * channel, narrower than the explicit disclosure it replaced but not closed.
  *
  * The caller is told to sign in, which works for exactly one of the two people who can see this
  * response: whoever owns the password for that address. When the email provider of decision D3
