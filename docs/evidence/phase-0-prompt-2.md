@@ -214,14 +214,14 @@ Totals: **unit 22/22, integration 57/57, 14 test files.**
 | # | Sev | Issue | Proposed handling |
 |---|---|---|---|
 | M-1 | Medium | Sidebar still links to routes deleted in this prompt (404s). Mock navigation removal is a Phase 1a gate item | **Resolved in remediation** (`3b41c0d`): sidebar shows only implemented routes |
-| M-2 | Medium | No rate limiting on `/api/auth/register` or NextAuth sign-in | **Registration resolved in remediation** (`3b41c0d`, 10 / 15 min per address, in-process). NextAuth sign-in limiting remains for 0.3 |
+| M-2 | Medium | No rate limiting on `/api/auth/register` or NextAuth sign-in | **Fully resolved in Prompt 0.3** (`81cf103`): both surfaces, database-backed and atomic; the in-process limiter is gone |
 | M-3 | Medium | No password reset flow; needs an email provider (decision D3) | Phase 1a/1.5 once provider chosen |
 | M-4 | Medium | Runtime DB role privilege `REVOKE UPDATE, DELETE, TRUNCATE ON "LoyaltyOperation"` is an owner action per environment; trigger already enforces | **Resolved in remediation** (`fb7446c`): `scripts/db-roles.mjs` creates the role in every environment; tests connect as it; owner still runs it on staging/production (§11.7) |
-| L-1 | Low | 18 lint warnings (unused imports, `<img>`) in retained static mock pages | Disappear as pages are rebuilt in 1a/1b |
+| L-1 | Low | 18 lint warnings (unused imports, `<img>`) in retained static mock pages | **Resolved in Prompt 0.3** (`f356d75`): all 18 fixed; lint now fails on warnings |
 | L-2 | Low | `tests/walaaplus.spec.ts` targets removed pages; excluded from gate | Rewritten in 1a.2 |
 | L-3 | Low | Prisma 6.19 (banner offers 8.0.0-rc); `package.json#prisma` removed to silence deprecation, `prisma db seed` therefore not wired — use `npm run db:seed` | Evaluate Prisma upgrade in 0.3; document |
 | L-4 | Low | Amount columns are 32-bit `Int` minor units (max ≈ 2.1 × 10⁹ per row) | Adequate for SYP transaction sizes; revisit if aggregates need `BigInt` |
-| L-5 | Low | Unused deps retained for later phases: `html5-qrcode`, `framer-motion`, `recharts` | Prune or use in 1a/1b |
+| L-5 | Low | Unused deps retained for later phases: `html5-qrcode`, `framer-motion`, `recharts` | **Resolved in Prompt 0.3** (`f356d75`): removed, 41 packages out of the tree |
 | L-6 | Low | pg-boss `pgboss` schema not tracked by Prisma migrations (by design) | Documented |
 | L-7 | Low | Effective permissions = role defaults ∪ explicit grants; no per-permission revoke from a role's defaults | Sufficient for Phase 0; extend when staff UI lands (1b) |
 

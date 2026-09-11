@@ -17,7 +17,7 @@ visual prototype and is not built on.
 | [docs/DECISIONS-REQUIRED.md](docs/DECISIONS-REQUIRED.md) | Decisions only the owner can make |
 | [docs/BOOMERANGME-REFERENCE.md](docs/BOOMERANGME-REFERENCE.md) | Feature reference mapped to phases |
 | [docs/PHASE-0-HYGIENE.md](docs/PHASE-0-HYGIENE.md) | Repository audit and prototype defect backlog |
-| `docs/evidence/` | Per-prompt evidence files |
+| `docs/evidence/` | Per-prompt evidence files (latest: `phase-0-prompt-3.md`) |
 
 ## Quick start
 
