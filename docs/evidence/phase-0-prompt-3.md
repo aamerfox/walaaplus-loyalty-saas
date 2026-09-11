@@ -391,7 +391,9 @@ security requirements were found unmet. Both were treated as blockers, not as de
 
 ### 11.1 Result
 
-**GATE PASSED — 13/13 steps in 66.2 s** on `78a816b`, the final code commit. Unit **42/42**,
+**GATE PASSED — 13/13 steps in 66.2 s** on `78a816b`, the final code commit. *(Review accepted
+both fixes below and found one further deployment-security item; see §12 for the re-issued
+result.)* Unit **42/42**,
 integration **197/197** against real PostgreSQL, every test connected as the restricted runtime
 role. `npm audit`, full tree and production view: **0 vulnerabilities** each. `git diff --check`
 clean; working tree clean. Nothing pushed, deployed or provisioned; no credential requested or held.
@@ -548,6 +550,156 @@ rewrite, nothing pushed (the branch has no upstream), nothing deployed or provis
 credential requested, generated, held or committed. The proxy verification used throwaway local
 containers on the project's existing Docker network, and both were removed. No Phase 1a
 functionality was built.
+
+---
+
+## 12. Network-exposure cleanup — Prompt 0.3 R2
+
+**Date:** 2026-09-11 · **Performed by:** development agent (Claude Opus 5) · **Branch:** `rebuild/phase-0-foundation`
+**Trigger:** review of §11. Both earlier blockers were confirmed fixed; one deployment-security
+item and one wording overclaim remained.
+
+### 12.1 Result
+
+**GATE PASSED — 13/13 steps in 166.0 s** on `4f98f68`, the final code commit. Unit **48/48**,
+integration **197/197** against real PostgreSQL, all as the restricted runtime role. `npm audit`,
+full tree and production view: **0 vulnerabilities** each. `git diff --check` clean; working tree
+clean; `docker compose --profile app config` valid.
+
+| Item | SHA | Subject |
+|---|---|---|
+| Network exposure | `5e9b2c2` | fix(infra): only the proxy binds a public interface |
+| Wording | `4f98f68` | docs: withdraw the timing-indistinguishability claim about duplicate registration |
+| — | recorded in the final response | docs: this section |
+
+### 12.2 Finding — three services were published on every interface
+
+§11 stated the proxy was the only publicly reachable service. It was not. `db` published
+`5433:5432`, `test-db` published `5435:5432`, and `worker` published `8081:8081`. A short-form
+Compose mapping with no host IP binds **0.0.0.0**, so on a VPS all three were reachable from the
+internet: a database nothing outside the Compose network needs, and an unauthenticated status
+endpoint.
+
+**Fix.**
+
+| Service | Before | After | Why |
+|---|---|---|---|
+| `proxy` | `${WEB_PORT:-8080}:80` | unchanged — **the only public binding** | the intended entry point |
+| `db` | `5433:5432` (0.0.0.0) | `127.0.0.1:5433:5432` | host tooling needs it; nothing off-host does. Production can drop the mapping entirely |
+| `test-db` | `5435:5432` (0.0.0.0) | `127.0.0.1:5435:5432` | the integration suite runs on the host |
+| `worker` | `8081:8081` (0.0.0.0) | `expose: 8081` | the orchestrator probes health from inside the container |
+| `web`, `migrate` | already container-only | unchanged | — |
+
+**The check that keeps it true.** `tests/unit/compose-exposure.test.ts` parses
+`docker-compose.yml` on every gate run — no Docker daemon needed — and fails if any service other
+than `proxy` gains a public binding, if a loopback service loses its `127.0.0.1` prefix, or if
+`web`, `worker` or `migrate` publish anything at all. It masks `${VAR:-default}` before splitting
+a mapping, because the colon inside the default would otherwise make a public
+`"${POSTGRES_PORT:-5433}:5432"` parse as a bound `ip:host:container` — which is precisely the bug
+being guarded against. **Negative control:** reintroducing that exact binding fails the check on
+both counts (`expected [ 'db', 'proxy' ] to deeply equal [ 'proxy' ]`, and `db must bind
+127.0.0.1`), and it passes again once reverted.
+
+### 12.3 What the loopback change exposed in the ledger
+
+Docker Desktop forwards loopback-bound ports through a slower path than `0.0.0.0`. After the
+change, three concurrency tests began failing with `Unable to start a transaction in the given
+time` — and that was a real weakness, not a test artefact. Prisma's default `maxWait` is **2 s**,
+so a burst of writes queueing for a connection **errors** rather than waiting. That is wrong on
+its own terms: a queue of scans landing on one card is the designed behaviour of the row lock, and
+the customer is standing at the counter. `appendOperationGroup` and `runIdempotent` now wait up to
+10 s for a connection, still well inside their 15 s and 20 s statement timeouts, so a genuinely
+stuck transaction still fails loudly.
+
+The cause was isolated before changing anything: reverting only the `test-db` binding to
+`0.0.0.0` made the three tests pass again, which identified the forwarder rather than the code as
+the trigger, and the fix was then chosen on the merits of the 2 s default.
+
+**Known cost:** the integration suite now takes roughly 125 s on Windows instead of roughly 25 s.
+This is a local developer cost only — CI runs a service container with no such forwarder, and
+production publishes no database port at all.
+
+### 12.4 Wording correction — the timing claim is withdrawn
+
+§11.3 said the duplicate-registration path "is not measurably faster". **No timing measurement was
+ever taken**, so that sentence claimed a result that does not exist; it has been corrected there,
+in `docs/PHASE-0-IMPLEMENTATION.md` §9 and in the route's own comment.
+
+What remains true and is still claimed: the response carries no identifier of anything created, so
+there is nothing to compare between the two outcomes, and the password is hashed before the
+transaction opens, so the duplicate path does not skip the dominant cost of the request. What is
+now stated plainly: the two paths do different amounts of database work after the hash, and
+response time is an **unquantified side channel** — narrower than the explicit disclosure it
+replaced, but not closed. Closing it properly belongs with the verification-email flow in Phase
+1a, where the response stops depending on the outcome at all.
+
+### 12.5 Verification
+
+| # | Command | Result |
+|---|---|---|
+| 1 | `npx vitest run --project unit tests/unit/compose-exposure.test.ts` | **6 passed** |
+| 2 | Same, with the public `db` binding reintroduced | **2 failed** — the check has teeth |
+| 3 | Same, reverted | **6 passed** |
+| 4 | `npx vitest run --project integration` (first run after the loopback change) | 3 concurrency tests failed on transaction-start timeouts |
+| 5 | Same, with only the `test-db` binding reverted | passed — the forwarder identified as the trigger |
+| 6 | Same, loopback restored and `maxWait` raised | **19 passed** across the three affected files |
+| 7 | `npm run gate` on `4f98f68` | **GATE PASSED 13/13 in 166.0 s** |
+| 8 | `npm audit`; `npm audit --omit=dev --audit-level=high` | **0 vulnerabilities** each |
+| 9 | `docker compose --profile app config` | valid |
+| 10 | `git diff --check`; `git status --porcelain` | clean; clean |
+
+```
+=============================================================
+GATE SUMMARY
+=============================================================
+PASS  dependency audit (prod, high+)             1136 ms
+PASS  prisma generate                            1745 ms
+PASS  lint                                       4753 ms
+PASS  typecheck                                  4577 ms
+PASS  prisma validate                            1887 ms
+PASS  unit tests                                 1522 ms
+PASS  test db up                                  950 ms
+PASS  migrate deploy (test db, migrator role)    5605 ms
+PASS  migrate status (test db)                   5677 ms
+PASS  runtime role grants (test db)               165 ms
+PASS  integration tests                        123796 ms
+PASS  worker build                                116 ms
+PASS  production build                          14102 ms
+-------------------------------------------------------------
+GATE PASSED in 166.0s (13/13 steps)
+```
+
+### 12.6 A local container was recreated
+
+Applying the new binding to the already-running development database required
+`docker compose up -d db`, which recreates that container. Recorded because it changed local
+state, and because the result looked alarming at first:
+
+The recreated container attached to the volume the current file declares, `loyalty-platform_db-data`,
+while the old container — created before the Prompt 0.2 compose rewrite — was still attached to the
+previous name, `loyalty-platform_postgres_data`. PostgreSQL therefore initialised a fresh cluster
+and the development database came up empty. **Nothing was lost:** the old volume was inspected
+read-only and is itself empty (4 KB, no cluster), and the development database never held the
+schema in the first place — every migration in this rebuild has run against the test database.
+The old volume was left in place, untouched; removing it is the owner's call.
+
+### 12.7 Remaining items
+
+Unchanged from §11.7. Nothing critical or high; no moderate item outstanding. Two Phase 1a follow-ups
+now carry an extra note:
+
+- **L-8** (no `429` on the sign-in path) and the registration timing side channel in §12.4 both
+  close naturally with the verification-email flow of decision D3.
+- **L-12** (new, low): the integration suite is roughly five times slower on Windows because of
+  Docker Desktop's loopback forwarder. Affects developer iteration only, not CI or production.
+  Revisit if it becomes a drag; the security property is not negotiable for a speed gain.
+
+### 12.8 Boundaries
+
+Unchanged from §10 and §11.8: `master` at `b9ee686`, tag `prototype-baseline` at `0aee6ee`, no
+amend, no rewrite, nothing pushed (the branch has no upstream), nothing deployed or provisioned, no
+live credential requested, generated, held or committed. The only local state changed outside the
+repository was the recreation of the development database container described in §12.6.
 
 ---
 
