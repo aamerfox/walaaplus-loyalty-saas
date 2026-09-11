@@ -28,6 +28,9 @@ export const RateLimitScope = {
   REGISTER_IDENTIFIER: "auth.register.identifier",
   SIGNIN_IP: "auth.signin.ip",
   SIGNIN_IDENTIFIER: "auth.signin.identifier",
+  /** Public customer enrollment. Welcome bonuses make this an abuse target (PRODUCT-SPEC §6.1). */
+  ENROLL_IP: "enroll.ip",
+  ENROLL_LINK: "enroll.link",
 } as const;
 export type RateLimitScopeName = (typeof RateLimitScope)[keyof typeof RateLimitScope];
 
@@ -221,6 +224,27 @@ export async function consumeSignInLimit(identifier: string, clientIp: string | 
   const identifiers: Partial<Record<RateLimitScopeName, string>> = { [RateLimitScope.SIGNIN_IDENTIFIER]: identifier };
   if (clientIp) identifiers[RateLimitScope.SIGNIN_IP] = clientIp;
   const decision = await consumeRateLimit(signInRules(), identifiers);
+  await maybePrune();
+  return decision;
+}
+
+/**
+ * Public enrollment: one window per client address, and one per enrollment LINK.
+ *
+ * The link window is what holds when no trusted proxy supplies an address, and it is also the
+ * right shape for the actual threat: a welcome bonus is worth farming, and farming it means
+ * hammering ONE merchant's link. It is deliberately generous — a café handing out QR cards at a
+ * launch event has many genuine customers joining from one network in an hour.
+ */
+export async function consumeEnrollmentLimit(clientIp: string | null, sourceToken: string): Promise<RateLimitDecision> {
+  const e = env();
+  const rules: RateLimitRule[] = [
+    { scope: RateLimitScope.ENROLL_IP, max: e.ENROLL_RATE_LIMIT_IP_MAX, windowSeconds: e.ENROLL_RATE_LIMIT_WINDOW_SECONDS },
+    { scope: RateLimitScope.ENROLL_LINK, max: e.ENROLL_RATE_LIMIT_LINK_MAX, windowSeconds: e.ENROLL_RATE_LIMIT_WINDOW_SECONDS },
+  ];
+  const identifiers: Partial<Record<RateLimitScopeName, string>> = { [RateLimitScope.ENROLL_LINK]: sourceToken };
+  if (clientIp) identifiers[RateLimitScope.ENROLL_IP] = clientIp;
+  const decision = await consumeRateLimit(rules, identifiers);
   await maybePrune();
   return decision;
 }

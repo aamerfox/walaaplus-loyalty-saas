@@ -153,3 +153,23 @@ export async function listUserBusinesses(userId: string) {
     orderBy: { createdAt: "asc" },
   });
 }
+
+/**
+ * The business's active staff, for the Phase 1a team screen.
+ *
+ * Read-only and deliberately thin: names, emails and roles. No password hash, no permission array
+ * to imply an editor that does not exist, and no other business. `VIEW_STAFF` gates it, which an
+ * owner and a manager hold and a cashier does not.
+ */
+export async function listBusinessStaff(ctx: TenantContext) {
+  requirePermission(ctx, Permission.VIEW_STAFF);
+  return prisma.businessMembership.findMany({
+    where: { businessId: ctx.businessId, active: true },
+    select: {
+      id: true,
+      role: true,
+      user: { select: { email: true, firstName: true, lastName: true } },
+    },
+    orderBy: { createdAt: "asc" },
+  });
+}

@@ -1,6 +1,6 @@
 import { CardStatus, OperationKind, OperationSource, UnitType } from "@prisma/client";
 import { prisma, type Tx } from "../db";
-import { ConflictError, NotFoundError, ValidationError } from "../errors";
+import { ConflictCode, ConflictError, NotFoundError, ValidationError } from "../errors";
 import { runIdempotent } from "../ledger/idempotency";
 import { appendOperationGroup, reverseOperationGroup } from "../ledger/ledger";
 import type { MemberActor, MemberSource } from "../ledger/actor";
@@ -149,11 +149,11 @@ async function loadLockedStampCard(tx: Tx, businessId: string, customerCardId: s
   if (!card) throw new NotFoundError("Card not found");
 
   if (!TRANSACTABLE.has(card.status)) {
-    throw new ConflictError(`Card is ${card.status.toLowerCase()} and cannot transact`);
+    throw new ConflictError(`Card is ${card.status.toLowerCase()} and cannot transact`, ConflictCode.CARD_NOT_TRANSACTABLE);
   }
   if (card.expiresAt !== null && card.expiresAt.getTime() <= now.getTime()) {
     // The scheduled expiry job is Phase 1.5; until it runs, the date on the card is what counts.
-    throw new ConflictError("Card has expired and cannot transact");
+    throw new ConflictError("Card has expired and cannot transact", ConflictCode.CARD_NOT_TRANSACTABLE);
   }
 
   const version = await tx.programVersion.findFirst({
@@ -312,7 +312,10 @@ async function assertDailyLimit(tx: Tx, loaded: LoadedCard, now: Date): Promise<
   if (limit === undefined) return;
   const { count, localDate } = await countAwardsInBusinessDay(tx, loaded.card.id, loaded.timezone, now);
   if (count >= limit) {
-    throw new ConflictError(`This card has reached its daily limit of ${limit} award(s) for ${localDate}`);
+    throw new ConflictError(
+      `This card has reached its daily limit of ${limit} award(s) for ${localDate}`,
+      ConflictCode.DAILY_LIMIT_REACHED,
+    );
   }
 }
 
@@ -410,7 +413,7 @@ export async function redeemReward(ctx: TenantContext, input: RedeemRewardInput)
     { op: "redeem", comment: input.comment ?? null },
     async (tx, loaded, actor, locationId) => {
       if (loaded.card.rewardBalance < 1) {
-        throw new ConflictError("This card has no reward to redeem");
+        throw new ConflictError("This card has no reward to redeem", ConflictCode.NO_REWARD_AVAILABLE);
       }
       const appended = await appendOperationGroup(
         {

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { env } from "./env";
-import { isAppError } from "./errors";
+import { isAppError, ValidationError } from "./errors";
 
 /**
  * Map a thrown error to an HTTP response. Domain errors carry their own status and code.
@@ -12,6 +12,38 @@ export function errorResponse(e: unknown): NextResponse {
   }
   console.error("[api] unhandled error", e instanceof Error ? { name: e.name, message: e.message } : e);
   return NextResponse.json({ error: { code: "INTERNAL", message: "Internal server error" } }, { status: 500 });
+}
+
+/**
+ * Phase 1a operates at ONE counter, so no request may name a location.
+ *
+ * The stamp engine already refuses a caller-supplied `locationId`; this repeats the check at the
+ * HTTP boundary so a request carrying one is rejected before it reaches a service, and so the rule
+ * is visible where a future route author is looking. Nested objects are checked too: a body like
+ * `{ award: { locationId } }` must not slip through a shallow test.
+ */
+export function assertNoLocationInRequest(value: unknown, depth = 0): void {
+  if (depth > 4 || value === null || typeof value !== "object") return;
+  if (Array.isArray(value)) {
+    for (const item of value) assertNoLocationInRequest(item, depth + 1);
+    return;
+  }
+  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+    if (/^location(Id)?$/i.test(key)) {
+      throw new ValidationError(
+        "Phase 1a operates only at the business's Main location; a request may not name a location",
+      );
+    }
+    assertNoLocationInRequest(nested, depth + 1);
+  }
+}
+
+/** Parse a JSON body, or refuse with the same generic 400 every route uses. */
+export async function readJsonObject(req: Request): Promise<Record<string, unknown>> {
+  const body: unknown = await req.json().catch(() => null);
+  if (!body || typeof body !== "object" || Array.isArray(body)) throw new ValidationError("JSON body required");
+  assertNoLocationInRequest(body);
+  return body as Record<string, unknown>;
 }
 
 /**

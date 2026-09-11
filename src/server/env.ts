@@ -68,6 +68,18 @@ const envSchema = z.object({
    * independently. Rotating either simply starts fresh windows.
    */
   AUTH_RATE_LIMIT_PEPPER: z.string().min(16, "must be at least 16 characters").optional(),
+
+  // ── Public enrollment (src/app/api/enroll/route.ts) ─────────────────────────
+  // Deliberately generous: a café handing out QR cards at a launch event has many genuine
+  // customers joining from one network within the hour. The limit exists to stop a script
+  // farming welcome bonuses, not to throttle a queue at the counter.
+
+  /** Enrollment attempts per client address per window. */
+  ENROLL_RATE_LIMIT_IP_MAX: z.coerce.number().int().min(1).max(100_000).default(20),
+  /** Enrollment attempts per enrollment LINK per window; holds when no address is trusted. */
+  ENROLL_RATE_LIMIT_LINK_MAX: z.coerce.number().int().min(1).max(100_000).default(200),
+  /** Enrollment window length, seconds. */
+  ENROLL_RATE_LIMIT_WINDOW_SECONDS: z.coerce.number().int().min(1).max(86_400).default(3_600),
 });
 
 export type Env = z.infer<typeof envSchema>;

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { OperationKind, Prisma, UnitType, type CardStatus, type PrismaClient } from "@prisma/client";
 import { AuditAction, recordAudit } from "../audit/audit";
 import { prisma, type DbClient, type Tx } from "../db";
-import { ConflictError, ForbiddenError, LedgerInvariantError, NotFoundError, ValidationError } from "../errors";
+import { ConflictCode, ConflictError, ForbiddenError, LedgerInvariantError, NotFoundError, ValidationError } from "../errors";
 import { requireLocationAccess } from "../tenant/context";
 import { actorBusinessId, actorUserId, assertMemberMayWrite, systemReason, validateActor, type LedgerActor } from "./actor";
 import type { AppendResult, AppendedOperation, Balances, OperationGroupInput, OperationInput } from "./types";
@@ -320,7 +320,7 @@ export async function reverseOperationGroup(input: ReverseGroupInput, db: DbClie
     const already = await tx.loyaltyOperation.count({
       where: { reversalOfOperationId: { in: originals.map((o) => o.id) } },
     });
-    if (already > 0) throw new ConflictError("This transaction group has already been reversed");
+    if (already > 0) throw new ConflictError("This transaction group has already been reversed", ConflictCode.ALREADY_REVERSED);
 
     const compensating: OperationInput[] = [...originals].reverse().map((o) => ({
       kind: OperationKind.REVERSAL,
@@ -354,7 +354,7 @@ export async function reverseOperationGroup(input: ReverseGroupInput, db: DbClie
       // Database-level backstop: the partial unique index on reversalOfOperationId refuses a
       // second reversal row for the same original even if the check above were ever bypassed.
       if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
-        throw new ConflictError("This transaction group has already been reversed");
+        throw new ConflictError("This transaction group has already been reversed", ConflictCode.ALREADY_REVERSED);
       }
       throw e;
     }

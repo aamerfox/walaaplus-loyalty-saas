@@ -39,9 +39,30 @@ export class NotFoundError extends AppError {
   }
 }
 
+/**
+ * Codes a scanner screen can act on.
+ *
+ * A 409 is not one situation: "this card has no reward to give", "this card has had its stamps
+ * for today" and "this card is paused" all need different words at a counter, and the cashier is
+ * standing in front of a customer. The message stays English for logs; the CODE is what the UI
+ * translates, so an Arabic screen never has to display a server string.
+ */
+export const ConflictCode = {
+  GENERIC: "CONFLICT",
+  /** Redemption attempted with nothing earned. */
+  NO_REWARD_AVAILABLE: "NO_REWARD_AVAILABLE",
+  /** The program's dailyAwardLimit is spent for this card today. */
+  DAILY_LIMIT_REACHED: "DAILY_LIMIT_REACHED",
+  /** Paused, expired or deleted. */
+  CARD_NOT_TRANSACTABLE: "CARD_NOT_TRANSACTABLE",
+  /** The group was already reversed, or is itself a reversal. */
+  ALREADY_REVERSED: "ALREADY_REVERSED",
+} as const;
+export type ConflictCodeName = (typeof ConflictCode)[keyof typeof ConflictCode];
+
 export class ConflictError extends AppError {
-  constructor(message = "Conflict") {
-    super("CONFLICT", message, 409);
+  constructor(message = "Conflict", code: ConflictCodeName = ConflictCode.GENERIC) {
+    super(code, message, 409);
   }
 }
 
