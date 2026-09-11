@@ -13,8 +13,9 @@
 deployed, and deploying it is not part of this task.
 
 **Round 3 (§10): a real deployment attempt failed, and the defect it found is fixed.** The
-first staging deployment reached the `migrate` container and stopped there, before Caddy was
-touched. See §10.
+first staging deployment applied its migrations successfully and then stopped inside the `migrate`
+container when role setup could not resolve a module. `web` and `worker` never started and Caddy
+was never changed. See §10.
 
 **Round 2 (§9): both review findings remediated.** Forwarded IP headers are no longer trusted in
 the co-hosted shape, and all four services now carry CPU and memory ceilings. The figures in the
@@ -504,20 +505,41 @@ This section records a **failed deployment**. Nothing in it claims staging is ru
 ### 10.1 What happened
 
 The owner attempted the first real co-hosted staging deployment from commit
-`7a95d2643fcc0eff9ad77035178ba7611bcb336a`. It reached the `migrate` container and stopped there:
+`7a95d2643fcc0eff9ad77035178ba7611bcb336a`. It reached the `migrate` container, and that container
+runs two commands in sequence:
+
+```dockerfile
+CMD ["sh", "-c", "node scripts/db-migrate.mjs deploy && node scripts/db-roles.mjs"]
+```
+
+**The first command completed successfully. The second failed at module resolution:**
+
+| Step | Outcome |
+|---|---|
+| `node scripts/db-migrate.mjs deploy` — `prisma migrate deploy` as the migrator role | **completed successfully.** The schema was applied to the staging database |
+| `node scripts/db-roles.mjs` — create/refresh the restricted runtime role and its grants | **failed**, before doing any work |
 
 ```
 Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/app/scripts/lib/db-role-membership.mjs'
 imported from /app/scripts/db-roles.mjs
 ```
 
-**It failed before Caddy was changed.** The host's `/etc/caddy/Caddyfile` was never edited, no
-site block was inserted, no reload was issued and no certificate was requested. The runbook's
-order — stack up and answering on loopback *before* touching the proxy (§13.4, §13.5) — is what
-kept the failure contained to a container that had not yet been put in front of anything.
+Because the two are chained with `&&`, the failure is in the **second** command only. Module
+resolution happens before that script's top-level code, so `db-roles.mjs` itself did nothing: the
+runtime role was not created and no grants were applied.
+
+`migrate` therefore exited non-zero. **`web` and `worker` never started**, because both wait on it
+with `condition: service_completed_successfully`. That is the depends_on condition doing exactly
+its job: an application that started here would have run against a schema with no runtime role.
+
+**Caddy was never changed.** The host's `/etc/caddy/Caddyfile` was not edited, no site block was
+inserted, no reload was issued and no certificate was requested. The runbook's order — stack up and
+answering on loopback *before* touching the proxy (§13.4, §13.5) — is what kept the failure
+contained to a container that had not yet been put in front of anything.
 
 **The WalaaPlus containers were removed without deleting volumes.** `down` was used, not
-`down -v`, so the `walaaplus-staging-cohost_db-data` volume still exists on the host.
+`down -v`, so the `walaaplus-staging-cohost_db-data` volume still exists on the host, with the
+migrated schema in it.
 
 **Nothing is claimed beyond that.** Staging is not deployed. No real-device check was performed.
 No part of §8's manual checklist moved.
@@ -536,9 +558,11 @@ The helper was in the repository the whole time, and every check in this project
 naming: a source tree cannot answer whether an image is complete, and no amount of source-tree
 testing would ever have caught this.
 
-It landed in the worst container to land in. `web` and `worker` wait on `migrate` with
-`condition: service_completed_successfully`, so a broken migrate image is not a degraded service,
-it is a deployment that cannot start at all.
+It landed in the worst container to land in, and in the worse of that container's two
+commands. `web` and `worker` wait on `migrate` with `condition: service_completed_successfully`,
+so a broken migrate image is not a degraded service, it is a deployment that cannot start at all —
+and here it stopped *after* the schema had been applied but *before* the runtime role existed, the
+one state in which the application must not be allowed to start.
 
 **Reproduced locally before anything was changed**, with no network:
 
@@ -646,22 +670,58 @@ variable without printing any value.
 
 **It can be reused, and it must not be deleted.**
 
-The deployment stopped inside `migrate`, at **module resolution** — before `prisma migrate deploy`
-ran, before a single statement reached PostgreSQL. `web` and `worker` never started, because they
-wait on `migrate` completing successfully. So the database in `walaaplus-staging-cohost_db-data`
-is in whatever state PostgreSQL's own initialisation left it: an empty database with no WalaaPlus
-schema, or a schema from an earlier successful run. Either is a valid starting point.
+**`prisma migrate deploy` completed before the failure, so the volume holds a migrated schema.**
+It is not an empty database. What it does *not* hold is the restricted runtime role and its
+grants: `db-roles.mjs` failed at module resolution, before it ran any statement of its own.
 
-Both steps that follow are idempotent by design: `prisma migrate deploy` applies only what is
-missing, and `scripts/db-roles.mjs` creates or refreshes the runtime role and its grants. Bringing
-the stack up again on the fixed image runs both against the existing volume correctly.
+Expected state of `walaaplus-staging-cohost_db-data`:
 
-There is no need to delete the volume, and doing so would destroy the database for no benefit.
-Before resuming, the runbook's §13.4 check still applies: bring the stack up, confirm
-`migrate` exits 0 and `curl http://127.0.0.1:3100/api/health` answers, and only then consider the
-Caddy block.
+| | State |
+|---|---|
+| WalaaPlus schema and `_prisma_migrations` | **applied**, by the migrator role |
+| Runtime role `walaaplus_app` and its grants | **not created** |
+| Application data | none. `web` and `worker` never started, so nothing wrote a business, a card or a ledger row |
 
-### 10.7 What this round did not do
+**Both startup steps are idempotent, which is why this state is safe to resume from.**
+`prisma migrate deploy` applies only what is missing and will report the schema is up to date;
+`scripts/db-roles.mjs` creates the role if absent and re-applies its grants either way. Running
+them again against this volume is the normal path, not a recovery procedure.
+
+**Do not delete the volume.** There is nothing to gain: the schema in it is exactly what the next
+run would produce, and deleting it destroys a database to re-create an identical one.
+
+Before resuming, the runbook's §13.4 check still applies: bring the stack up, confirm `migrate`
+exits 0 — this time reaching and completing `db-roles.mjs`, which prints `db-roles: OK role` —
+and that `curl http://127.0.0.1:3100/api/health` answers, and only then consider the Caddy block.
+
+### 10.7 Correction to this section
+
+An earlier version of §10.1 and §10.6, committed in `8b9d577`, stated that the failure happened
+"before `prisma migrate deploy` ran" and that "nothing reached PostgreSQL", and described the
+volume as possibly empty.
+
+**That was wrong, and it was wrong by reasoning rather than by evidence.** The inference was that
+module resolution precedes execution — true of `db-roles.mjs` on its own, but the container runs
+`node scripts/db-migrate.mjs deploy && node scripts/db-roles.mjs`, so the resolution failure in the
+second command says nothing about the first. The deployment record shows the migration completed.
+The corrected facts are above: migrations applied, role setup failed, `web` and `worker` never
+started, containers removed without `-v`, Caddy untouched.
+
+Two lessons worth keeping. A chained `&&` command has two failure points and the error names only
+one of them. And an operator's deployment record outranks an inference drawn from source code.
+
+This correction is documentation only. No code, Dockerfile, Compose file, Caddy configuration,
+schema or secret was changed by it, and the remediation in `bed552f` is unaffected — it fixes the
+image regardless of which of the two commands hit the missing module.
+
+**One instance of the same error is knowingly left in place, out of scope.** The failure message in
+`scripts/check-migrate-image.mjs` says the container "will die with ERR_MODULE_NOT_FOUND before it
+applies a single migration". By the same reasoning corrected above, migrations would already have
+been applied by the first command in the chain. It is a wrong sentence in an error message an
+operator would read during a future failure, and it should be corrected — but this task is scoped
+to documentation, so the script was not touched. Recorded here so it is not lost.
+
+### 10.8 What this round did not do
 
 - **It did not deploy anything.** No OCI host was contacted from this session.
 - **No Caddy file was read, written, reloaded or restarted**; no DNS record was touched; no
