@@ -5,6 +5,9 @@
 **Performed by:** development agent (Claude Opus 5)
 **Branch:** `rebuild/phase-0-foundation`
 **Predecessor:** Prompt 0.2 + remediation — PASS (`docs/evidence/phase-0-prompt-2.md`, §11)
+**Revision:** first record 2026-09-11; **the PASS below was withdrawn the same day** after review found
+two unmet security requirements, and re-issued in §11 once both were fixed. Sections 1–10 are the
+original record, corrected in place where they were wrong.
 
 ---
 
@@ -20,6 +23,15 @@ made private. No credential was requested, generated, held or committed. Owner d
 remain **open**.
 
 The only commit after the gate run is this documentation file, which contains no code.
+
+> **Correction (remediation).** This section's PASS was **premature and is withdrawn**. Review
+> found two Prompt 0.3 requirements unmet: registration still answered "an account with this
+> email already exists", which the prompt's own generic-response requirement forbids; and the
+> client address used for rate limiting came from a forgeable `X-Forwarded-For` while Compose
+> published the web container directly, so the per-address limit could be bypassed with a new
+> forged header on every request. §9 below recorded the first as accepted Phase 1a debt. That
+> was the wrong call: it was a contract failure of this prompt. Both are fixed and proven in
+> **§11**, which carries the re-issued result.
 
 ---
 
@@ -330,12 +342,16 @@ now, who owns it, and where it lands.
 
 | # | Sev | Item | Why accepted now | Owner | Follow-up |
 |---|---|---|---|---|---|
-| M-5 | Medium | Registration answers "an account with this email already exists" on conflict — an account-enumeration vector distinct from rate limiting | Suppressing it without an email-verification flow would leave a merchant unable to learn why sign-up failed. The standard fix is "if that address is new, check your inbox", which needs the email provider of decision D3 | owner (D3), then development agent | Phase 1a |
+| M-5 | Medium | Registration answers "an account with this email already exists" on conflict — an account-enumeration vector distinct from rate limiting | ~~Accepted pending an email-verification flow~~ — **that acceptance was rejected in review. Resolved in the remediation (`7f59eb1`): the route answers a duplicate exactly as it answers a new registration. See §11.** | — | closed |
 | L-8 | Low | A rate-limited sign-in returns NextAuth's generic failure, with no `429`/`Retry-After` | NextAuth owns `/api/auth/callback/credentials`; returning a status from `authorize` is not possible. The limit is still enforced, and the genericity is also the enumeration defence | development agent | Phase 1a, with the real sign-in UI |
 | L-9 | Low | Expired rate-limit windows are pruned opportunistically (2% of new windows), not on a schedule | Bounded batches behind an index; the table cannot grow without new windows being created. A scheduled job needs the job runner to take on business jobs | development agent | Phase 1.5 |
 | L-10 | Low | `LoyaltyOperation` foreign-key columns `customerId`, `templateId`, `programVersionId`, `rewardTierId`, `performedByUserId` have no index | No Phase 0 access path queries them, and each index costs write throughput on the highest-volume table. Ledger rows are never deleted and non-DRAFT parents cannot be | development agent | Phase 1b, when reporting defines the real queries |
 | L-11 | Low | `db-roles` needs a migrator that is superuser or holds CREATEROLE | Documented in the implementation guide §4; it is a provisioning fact, not a code limitation | owner | staging/production provisioning |
 | — | — | L-2, L-3, L-4, L-6, L-7 from Prompt 0.2 | unchanged | — | as recorded there |
+
+**Correction:** this table was written before review. M-5 is closed by the remediation in §11,
+and one risk it did not identify at all — trusting a forgeable `X-Forwarded-For` while the app
+was directly exposed — is recorded and fixed there too.
 
 **Closed by this prompt:** M-1 and M-2 (sidebar, registration rate limit — M-2 fully, sign-in
 included), M-4 (runtime role), L-1 (lint warnings), L-5 (unused dependencies), plus the six
@@ -359,6 +375,173 @@ architect findings from the 0.2 remediation.
 - No Phase 1a functionality was built: no scanner, no enrollment, no card mechanics, no customer
   PWA. The prototype pages remain hidden from navigation.
 - Owner decisions A1–A5, B1–B6, C1–C5 are unchanged and none is marked approved.
+
+---
+
+**Original status line, superseded by §11:** PASS — PHASE 0 PROMPT 3 ENGINEERING GATE COMPLETE.
+Withdrawn in review; see §11 for the re-issued result.
+
+---
+
+## 11. Security remediation — Prompt 0.3 R
+
+**Date:** 2026-09-11 · **Performed by:** development agent (Claude Opus 5) · **Branch:** `rebuild/phase-0-foundation`
+**Trigger:** review of the record above. Everything in §1–§8 was independently confirmed, and two
+security requirements were found unmet. Both were treated as blockers, not as debt.
+
+### 11.1 Result
+
+**GATE PASSED — 13/13 steps in 66.2 s** on `78a816b`, the final code commit. Unit **42/42**,
+integration **197/197** against real PostgreSQL, every test connected as the restricted runtime
+role. `npm audit`, full tree and production view: **0 vulnerabilities** each. `git diff --check`
+clean; working tree clean. Nothing pushed, deployed or provisioned; no credential requested or held.
+
+### 11.2 Commits
+
+| Blocker | SHA | Subject |
+|---|---|---|
+| 1 | `7f59eb1` | fix(security): registration no longer reveals whether an email has an account |
+| 2 | `78a816b` | fix(security): stop trusting forgeable forwarding headers; put the app behind a proxy |
+| — | recorded in the final response | docs: this section |
+
+### 11.3 Blocker 1 — registration revealed whether an email has an account
+
+**Finding.** `registerBusinessOwner` raised `ConflictError("An account with this email already
+exists")` and the route forwarded it verbatim, so a public endpoint answered "this address is
+registered" to anyone who asked.
+
+**Fix.** The route answers a duplicate exactly as it answers a new registration: `202` with the
+same fixed body and the same header set. The service still raises `ConflictError` internally — the
+seed and future admin paths need the truth — and the public boundary flattens it. Two details make
+the paths indistinguishable rather than merely similar:
+
+- the response carries **no identifier of anything created**. The old `201` returned `businessId`,
+  which by itself was an oracle;
+- `registerBusinessOwner` hashes the password **before** opening its transaction, so both paths pay
+  the same bcrypt cost and the duplicate case is not measurably faster.
+
+Malformed input keeps its own `400`: input shape describes the request, not the account. When the
+email provider of decision D3 lands, this becomes the usual "check your inbox", and the
+existing-account case is told by email instead of over HTTP.
+
+**Proof.** `tests/integration/register-route.test.ts`, driving the real route handler: duplicate
+and fresh submissions match on status, body and header set; the duplicate body contains no
+"already", "exists", "conflict" or "duplicate", no email, no user or business id, and no
+`businessId` property; the duplicate creates no rows while a fresh email creates exactly one
+account; malformed input still returns 400.
+
+### 11.4 Blocker 2 — the client address was forgeable, and the app was directly exposed
+
+**Finding.** `clientIp()` believed any inbound `X-Forwarded-For` while `docker-compose.yml`
+published `web` on port 3000. A caller could send a different forged header on every request and
+walk past the per-address registration limit. A limit that looks present and is not is worse than
+no limit, because it is trusted.
+
+**Fix — application.** `TRUST_PROXY_HEADERS`, accepting exactly `"true"` or `"false"`, **defaults
+to false**. With it off the forwarding headers are ignored entirely and the app reports no client
+address: no address is better than a forgeable one. With it on, the value taken is the **last** hop
+of `X-Forwarded-For` — anything earlier arrived with the request — and it must parse as an IPv4 or
+IPv6 address, with ports and brackets stripped and case normalised, so arbitrary text can never
+become a rate-limit key. NextAuth's `authorize()` carried its own copy of the old logic with the
+same flaw; it now calls the shared helper, so there is one trust decision in the codebase.
+
+**Fix — network.** A `proxy` service (Caddy, `deploy/Caddyfile`) is now the only published service,
+on `WEB_PORT` (default 8080). It **sets** `X-Forwarded-For`, `X-Real-IP`, `X-Forwarded-Proto` and
+`X-Forwarded-Host` from the connection it actually received, and strips `Forwarded`,
+`X-Forwarded-Server`, `X-Client-IP`, `CF-Connecting-IP` and `True-Client-IP`. `web` moved from
+`ports:` to `expose:`, so no path to the application bypasses the proxy — which is what makes
+`TRUST_PROXY_HEADERS=true` defensible for that service.
+
+**Fix — not depending on it.** Because a trustworthy address is not available in every deployment,
+registration no longer depends on one: it also has a per-submitted-email window, so the endpoint
+stays limited whatever the network boundary looks like.
+
+**Manual proof of the proxy.** The real `deploy/Caddyfile` was run in Caddy against an echo
+upstream on the project's Docker network:
+
+| Sent by the client | Received by the application |
+|---|---|
+| `X-Forwarded-For: 6.6.6.6` | `172.25.0.1` — the real connection |
+| `X-Real-IP: 6.6.6.6` | `172.25.0.1` |
+| `True-Client-IP`, `CF-Connecting-IP`, `X-Client-IP`, `Forwarded`, `X-Forwarded-Server` | **absent** |
+| `X-Forwarded-For: 1.1.1.1, 2.2.2.2` | `172.25.0.1` |
+
+The forged value `6.6.6.6` appears nowhere in what the application receives. Both throwaway
+containers were removed afterwards; no Compose service was left running.
+
+**Proof — tests.** `tests/unit/client-ip.test.ts` (10): untrusted ignores every header and
+collapses fifty forged addresses to one outcome; trusted takes the last hop out of two and of
+three; `x-real-ip` is a fallback only; junk, out-of-range and unterminated values are refused;
+ports and IPv6 forms normalise. `tests/integration/register-route.test.ts` (8 in total): with no
+trusted proxy, three requests carrying three forged addresses create **zero** per-address windows
+and three per-email ones; with the proxy trusted, three forged prefixes collapse to **one** window
+keyed on the real address with three attempts counted; the caller is refused once that window is
+exhausted, with a generic body naming neither window nor address; and registration stays limited
+per email when there is no address at all. The NextAuth sign-in test asserts the same boundary in
+both modes.
+
+### 11.5 Verification
+
+| # | Command | Result |
+|---|---|---|
+| 1 | Caddy + echo upstream with forged headers (table above) | forged values replaced or stripped |
+| 2 | `npx vitest run --project unit tests/unit/client-ip.test.ts` | **10 passed** |
+| 3 | `npx vitest run --project integration tests/integration/register-route.test.ts` | **8 passed** |
+| 4 | `npx vitest run --project integration` | 1 failure: the old sign-in test asserted an address window built from a raw header. The assertion, not the code, was now wrong; it was updated to assert both modes |
+| 5 | `npx vitest run --project integration tests/integration/auth-rate-limit.test.ts` | **19 passed** |
+| 6 | `npm run gate` on `78a816b` | **GATE PASSED 13/13 in 66.2 s** |
+| 7 | `npm audit`; `npm audit --omit=dev --audit-level=high` | **0 vulnerabilities** each |
+| 8 | `git diff --check`; `git status --porcelain` | clean; clean |
+| 9 | `git rev-parse master`; remote refs; branch upstream | `b9ee686`; only `origin/master`; **no upstream** |
+
+```
+=============================================================
+GATE SUMMARY
+=============================================================
+PASS  dependency audit (prod, high+)             1092 ms
+PASS  prisma generate                            1741 ms
+PASS  lint                                       4497 ms
+PASS  typecheck                                  5063 ms
+PASS  prisma validate                            1545 ms
+PASS  unit tests                                 1441 ms
+PASS  test db up                                  948 ms
+PASS  migrate deploy (test db, migrator role)    1508 ms
+PASS  migrate status (test db)                   1543 ms
+PASS  runtime role grants (test db)               158 ms
+PASS  integration tests                         32528 ms
+PASS  worker build                                186 ms
+PASS  production build                          13942 ms
+-------------------------------------------------------------
+GATE PASSED in 66.2s (13/13 steps)
+```
+
+### 11.6 What an operator must keep together
+
+`TRUST_PROXY_HEADERS` is false unless set. A deployment that exposes the application directly has
+no per-address limiting — by design and visibly, rather than a limit that looks present and is not.
+The Compose stack sets it to `true` for `web` only because `proxy` overwrites the headers and `web`
+is not published. Staging and production must keep both halves together: if the application is ever
+reachable without the proxy, `TRUST_PROXY_HEADERS` must go back to false. Documented in
+`docs/PHASE-0-IMPLEMENTATION.md` §9, "Trusting the client address".
+
+### 11.7 Remaining items after this remediation
+
+M-5 is **closed**. L-8, L-9, L-10 and L-11 from §9 stand unchanged, as do L-2, L-3, L-4, L-6 and
+L-7 from Prompt 0.2. Nothing critical or high remains, and no moderate item is outstanding.
+
+One deliberate trade-off is worth naming: the per-email registration window means a caller can
+consume another person's registration allowance for a chosen address, delaying that person's
+sign-up by one window. The alternative — no email window — leaves registration unlimited wherever
+no trusted address exists, which is the worse failure. Revisit when email verification lands in
+Phase 1a.
+
+### 11.8 Boundaries
+
+Unchanged from §10: `master` at `b9ee686`, tag `prototype-baseline` at `0aee6ee`, no amend, no
+rewrite, nothing pushed (the branch has no upstream), nothing deployed or provisioned, no live
+credential requested, generated, held or committed. The proxy verification used throwaway local
+containers on the project's existing Docker network, and both were removed. No Phase 1a
+functionality was built.
 
 ---
 
