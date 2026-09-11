@@ -240,9 +240,9 @@ deploys**.
 | Health endpoints | Configuring monitoring and backups |
 | — | Pushing to `master`; every deployment |
 
-Container topology: `caddy/nginx (TLS)` → `web` (Next standalone) + `worker` (compiled pg-boss bundle)
-→ `postgres`, with a one-shot `migrate` container that must **complete successfully before web and
-worker start** (`depends_on: condition: service_completed_successfully`). It runs `db-migrate deploy`
+Container topology: `proxy` (Caddy, `deploy/Caddyfile`, the only published service) → `web` (Next
+standalone) + `worker` (compiled pg-boss bundle) → `postgres`, with a one-shot `migrate` container
+that must **complete successfully before web and worker start** (`depends_on: condition: service_completed_successfully`). It runs `db-migrate deploy`
 then `db-roles` as the migrator; it is the only container that ever receives `MIGRATE_DATABASE_URL`.
 Web and worker therefore cannot start against an unmigrated database, and never hold owner credentials.
 Service workers, installability and web push require HTTPS, so **staging needs a real certificate
@@ -271,8 +271,11 @@ per replica, and the staging design must not depend on there being exactly one w
 
 | Surface | Windows | Response when exhausted |
 |---|---|---|
-| `POST /api/auth/register` | per client address | `429` with `Retry-After`, fixed body text |
-| Credential sign-in | per identifier **and** per client address | NextAuth's generic sign-in failure |
+| `POST /api/auth/register` | per submitted email, **and** per client address where one is trustworthy | `429` with `Retry-After`, fixed body text |
+| Credential sign-in | per identifier, **and** per client address where one is trustworthy | NextAuth's generic sign-in failure |
+
+The email window exists because the address window cannot be relied upon everywhere: see
+"Trusting the client address" below. Registration stays limited either way.
 
 One row per `(scope, keyHash)` in `AuthRateLimit` holds a fixed window. Enforcement is a single
 `INSERT … ON CONFLICT (scope, keyHash) DO UPDATE … RETURNING` statement: PostgreSQL takes a row
@@ -317,10 +320,46 @@ into a flood of password hashes. Consequences, accepted deliberately:
   (first entry — the app sits behind one reverse proxy) or `x-real-ip`. When no address is
   present the identifier window still applies, so a missing header is not a bypass.
 
-**Known residual, carried to Phase 1a:** registration still answers "an account with this email
-already exists" on conflict, which is an enumeration vector distinct from rate limiting. The
-standard fix is the verification-email flow ("if that address is new, check your inbox"), which
-needs the email provider of decision D3. Tracked in `docs/evidence/phase-0-prompt-3.md` §9.
+### Registration does not reveal whether an account exists
+
+`POST /api/auth/register` answers a submission for an **existing** email exactly as it answers one
+that creates a new account: `202` with the same fixed body, no `businessId`, no `Location`, the
+same header set. The service still raises `ConflictError` internally — the seed and future admin
+paths need the truth — and the route, which is the public boundary, flattens it.
+
+Two details make the paths genuinely indistinguishable rather than merely similar. The response
+carries no identifier of anything created, so there is nothing to compare; and
+`registerBusinessOwner` hashes the password **before** it opens its transaction, so both paths pay
+the same bcrypt cost and the duplicate case is not measurably faster.
+
+The caller is told to sign in, which works for exactly one of the two people who can see that
+response: whoever holds the password for that address. When the email provider of decision D3
+arrives in Phase 1a this becomes the usual "check your inbox", and the existing-account case is
+told so by email rather than over HTTP. Malformed input keeps its own `400`: input shape describes
+the request, not the account.
+
+### Trusting the client address
+
+`X-Forwarded-For` and `X-Real-IP` are ordinary request headers. If the application is reachable
+directly, a caller sets a different value on every request, and any per-address limit becomes
+decoration rather than a control. The boundary is therefore explicit on both sides:
+
+- **`TRUST_PROXY_HEADERS` defaults to `false`.** With it off, the headers are ignored *entirely*
+  and the application reports **no** client address. No address is better than a forgeable one,
+  because a forgeable one silently converts a per-address limit into no limit at all. This is why
+  registration and sign-in both carry an identifier window that needs no address.
+- **With it on, the value taken is the LAST hop** of `X-Forwarded-For`. Anything earlier in the
+  list arrived with the request and is attacker-controlled; the final entry is the one our own
+  proxy appended or set. The value must parse as an IPv4 or IPv6 address — junk is discarded, so
+  arbitrary text can never become a rate-limit key.
+- **Only the Compose `proxy` service justifies turning it on.** `deploy/Caddyfile` SETS
+  `X-Forwarded-For`, `X-Real-IP`, `X-Forwarded-Proto` and `X-Forwarded-Host` from the connection
+  it actually received, and strips `Forwarded`, `X-Forwarded-Server`, `X-Client-IP`,
+  `CF-Connecting-IP` and `True-Client-IP` outright. `web` is **not** published to the host — only
+  `proxy` is (`WEB_PORT`, default 8080) — so there is no path to the application that bypasses it.
+
+A deployment that exposes the app directly must leave `TRUST_PROXY_HEADERS` unset. It then has no
+per-address limiting, by design and visibly, rather than a limit that looks present and is not.
 ---
 
 ## 10. Removed in this phase

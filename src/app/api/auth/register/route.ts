@@ -24,7 +24,9 @@ import { registerBusinessOwner } from "@/server/registration/register";
  * lands in Phase 1a, this becomes the usual "check your inbox" confirmation and the existing-
  * account case is told so by email rather than by HTTP.
  *
- * Rate limited per client address.
+ * Rate limited per submitted email and, where a trusted proxy supplies one, per client address.
+ * Forwarding headers are ignored unless TRUST_PROXY_HEADERS is set, so a forged X-Forwarded-For
+ * cannot mint fresh windows (src/server/http.ts, docs/PHASE-0-IMPLEMENTATION.md §9).
  */
 
 /** The single answer both outcomes get. Fixed shape, fixed status, no identifiers. */
@@ -39,17 +41,23 @@ function accepted(): NextResponse {
 
 export async function POST(req: Request) {
   const ip = clientIp(req);
-  const limit = await consumeRegisterLimit(ip);
+
+  const body: unknown = await req.json().catch(() => null);
+  if (!body || typeof body !== "object") {
+    return NextResponse.json({ error: { code: "VALIDATION_ERROR", message: "JSON body required" } }, { status: 400 });
+  }
+
+  // Key the email window on the raw submission, normalised by the limiter. Reading it here does
+  // not validate it: an unparseable body was already rejected above, and a malformed email is
+  // refused by the service with the same 400 any other invalid field would produce.
+  const submittedEmail = typeof (body as { email?: unknown }).email === "string" ? (body as { email: string }).email : null;
+
+  const limit = await consumeRegisterLimit(ip, submittedEmail);
   if (!limit.allowed) {
     return NextResponse.json(
       { error: { code: "RATE_LIMITED", message: "Too many attempts. Please try again later." } },
       { status: 429, headers: { "retry-after": String(limit.retryAfterSeconds) } },
     );
-  }
-
-  const body: unknown = await req.json().catch(() => null);
-  if (!body || typeof body !== "object") {
-    return NextResponse.json({ error: { code: "VALIDATION_ERROR", message: "JSON body required" } }, { status: 400 });
   }
 
   try {

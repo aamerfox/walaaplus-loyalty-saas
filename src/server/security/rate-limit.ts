@@ -25,6 +25,7 @@ import { env } from "../env";
 
 export const RateLimitScope = {
   REGISTER_IP: "auth.register.ip",
+  REGISTER_IDENTIFIER: "auth.register.identifier",
   SIGNIN_IP: "auth.signin.ip",
   SIGNIN_IDENTIFIER: "auth.signin.identifier",
 } as const;
@@ -45,12 +46,13 @@ export interface RateLimitRule {
 
 export function registerRules(): RateLimitRule[] {
   const e = env();
+  const max = e.AUTH_RATE_LIMIT_REGISTER_MAX;
+  const windowSeconds = e.AUTH_RATE_LIMIT_REGISTER_WINDOW_SECONDS;
   return [
-    {
-      scope: RateLimitScope.REGISTER_IP,
-      max: e.AUTH_RATE_LIMIT_REGISTER_MAX,
-      windowSeconds: e.AUTH_RATE_LIMIT_REGISTER_WINDOW_SECONDS,
-    },
+    // Per submitted email. This window does not depend on a client address, so registration stays
+    // limited even where no trusted proxy supplies one (see docs/PHASE-0-IMPLEMENTATION.md §9).
+    { scope: RateLimitScope.REGISTER_IDENTIFIER, max, windowSeconds },
+    { scope: RateLimitScope.REGISTER_IP, max, windowSeconds },
   ];
 }
 
@@ -200,9 +202,16 @@ async function maybePrune(): Promise<void> {
   await pruneExpiredRateLimits().catch(() => undefined);
 }
 
-/** Registration: one window per client address. A missing address simply has no window to key on. */
-export async function consumeRegisterLimit(clientIp: string | null): Promise<RateLimitDecision> {
-  const decision = await consumeRateLimit(registerRules(), clientIp ? { [RateLimitScope.REGISTER_IP]: clientIp } : {});
+/**
+ * Registration: one window per submitted email, and one per client address when a trusted proxy
+ * supplied one. An untrusted or absent address contributes no window rather than a forgeable one,
+ * which is why the email window exists: it holds regardless of the network boundary.
+ */
+export async function consumeRegisterLimit(clientIp: string | null, identifier?: string | null): Promise<RateLimitDecision> {
+  const identifiers: Partial<Record<RateLimitScopeName, string>> = {};
+  if (identifier) identifiers[RateLimitScope.REGISTER_IDENTIFIER] = identifier;
+  if (clientIp) identifiers[RateLimitScope.REGISTER_IP] = clientIp;
+  const decision = await consumeRateLimit(registerRules(), identifiers);
   await maybePrune();
   return decision;
 }

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { env } from "./env";
 import { isAppError } from "./errors";
 
 /**
@@ -13,9 +14,76 @@ export function errorResponse(e: unknown): NextResponse {
   return NextResponse.json({ error: { code: "INTERNAL", message: "Internal server error" } }, { status: 500 });
 }
 
-/** Best-effort client address for audit rows. Trusts proxy headers only because the app sits behind one. */
+/**
+ * IPv4, optionally with a port, and IPv6, optionally bracketed with a port. Deliberately strict:
+ * a value that is not an address is not a usable rate-limit key, and letting arbitrary text
+ * through would let a caller mint unlimited distinct keys out of one connection.
+ */
+const IPV4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+const IPV6 = /^[0-9a-f:]+$/i;
+
+/**
+ * Reduce one forwarded-for entry to a bare address, or null if it is not one.
+ * Handles `1.2.3.4:5678`, `[::1]:5678`, `::1` and the `unknown` placeholder proxies emit.
+ */
+export function normalizeClientIp(raw: string | null | undefined): string | null {
+  let value = (raw ?? "").trim();
+  if (!value || value.toLowerCase() === "unknown") return null;
+
+  if (value.startsWith("[")) {
+    // [2001:db8::1]:443 → 2001:db8::1
+    const close = value.indexOf("]");
+    if (close < 0) return null;
+    value = value.slice(1, close);
+  } else if ((value.match(/:/g) ?? []).length === 1) {
+    // 1.2.3.4:443 → 1.2.3.4 (a single colon cannot be IPv6)
+    value = value.slice(0, value.indexOf(":"));
+  }
+  if (!value) return null;
+
+  const v4 = IPV4.exec(value);
+  if (v4) return v4.slice(1).every((o) => Number(o) <= 255) ? value : null;
+  if (value.includes(":") && IPV6.test(value)) return value.toLowerCase();
+  return null;
+}
+
+/**
+ * Client address from forwarding headers — pure, so the trust decision is explicit and testable.
+ *
+ * When `trustProxyHeaders` is false the headers are ignored ENTIRELY: no address is better than a
+ * forgeable one, because a forgeable address turns a per-address limit into no limit at all.
+ *
+ * When it is true, the value taken is the LAST entry of `X-Forwarded-For`. Anything earlier in
+ * the list arrived with the request and is attacker-controlled; the final entry is the hop our
+ * own proxy appended or replaced. This is correct for a proxy that replaces the header (one
+ * entry) and for one that appends to it (client-supplied values first, real client last).
+ */
+export function clientIpFrom(get: (name: string) => string | null | undefined, trustProxyHeaders: boolean): string | null {
+  if (!trustProxyHeaders) return null;
+
+  const forwarded = get("x-forwarded-for");
+  if (forwarded) {
+    const hops = forwarded
+      .split(",")
+      .map((h) => h.trim())
+      .filter(Boolean);
+    const nearest = normalizeClientIp(hops[hops.length - 1]);
+    if (nearest) return nearest;
+  }
+  return normalizeClientIp(get("x-real-ip"));
+}
+
+/** Client address for rate limiting and audit rows. Null unless a trusted proxy supplied one. */
 export function clientIp(req: Request): string | null {
-  const fwd = req.headers.get("x-forwarded-for");
-  if (fwd) return fwd.split(",")[0]?.trim() || null;
-  return req.headers.get("x-real-ip");
+  return clientIpFrom((name) => req.headers.get(name), env().TRUST_PROXY_HEADERS);
+}
+
+/** Same, for the plain header record NextAuth hands to `authorize`. */
+export function clientIpFromHeaderRecord(headers: Record<string, unknown> | undefined): string | null {
+  return clientIpFrom((name) => {
+    const v = headers?.[name];
+    if (typeof v === "string") return v;
+    if (Array.isArray(v) && typeof v[0] === "string") return v[0];
+    return null;
+  }, env().TRUST_PROXY_HEADERS);
 }

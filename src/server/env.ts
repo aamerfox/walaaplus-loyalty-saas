@@ -31,6 +31,23 @@ const envSchema = z.object({
   /** Port for the worker's /health endpoint. 0 = OS-assigned (tests). */
   WORKER_HEALTH_PORT: z.coerce.number().int().min(0).max(65535).default(8081),
 
+  /**
+   * Whether `X-Forwarded-For` / `X-Real-IP` may be believed.
+   *
+   * These headers are client-supplied unless something in front of the app overwrites them.
+   * If the app is reachable directly, an attacker sets a different value on every request and
+   * any per-address limit becomes decoration. So the default is **false**: without a trusted
+   * proxy the app reports NO client address at all rather than a forgeable one.
+   *
+   * Set it to true ONLY when every request passes through a proxy that REPLACES the header
+   * (docker-compose.yml's `proxy` service does) and the app's own port is not published.
+   * Accepts exactly "true" or "false" so a typo cannot quietly enable trust.
+   */
+  TRUST_PROXY_HEADERS: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((v) => v === "true"),
+
   // ── Authentication rate limiting (src/server/security/rate-limit.ts) ────────
   // Defaults are deliberately usable as-is: a real merchant retypes a password a handful of
   // times, an attacker does not. Every value is validated, so a typo cannot silently disable

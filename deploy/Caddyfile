@@ -1,0 +1,56 @@
+# Reverse proxy in front of the Next.js server.
+#
+# Its security job in Phase 0 is narrow and specific: make the client address REAL.
+#
+# `X-Forwarded-For` is just a request header. If the app is reachable directly, a caller sets it
+# to a different value on every request and every per-address rate limit becomes decoration. So
+# this proxy OVERWRITES it (and X-Real-IP) with the address of the connection it actually
+# received, discarding whatever the client sent, and docker-compose.yml no longer publishes the
+# app's own port — the app is reachable only through here, on the Compose network.
+#
+# `header_up` with a value SETS the header, replacing any inbound value. That is the whole point:
+# do not use `{http.request.header.X-Forwarded-For}` or Caddy's default append behaviour here,
+# because either one would carry the client's forged prefix through to the application.
+#
+# TLS: this file is the HTTP form used by `docker compose --profile app up` locally. Staging and
+# production terminate TLS here too (decision B3); replace the `:80` site address with the real
+# hostname and Caddy obtains a certificate automatically. Nothing else in this file changes.
+
+{
+	# Local/compose default. In staging and production remove this block so Caddy manages
+	# certificates, and set an email for the ACME account.
+	auto_https off
+	admin off
+}
+
+:80 {
+	encode gzip
+
+	# `handle` blocks are mutually exclusive and evaluated in written order. Bare directives
+	# would be reordered by Caddy's default directive order, which puts reverse_proxy BEFORE
+	# respond — /healthz would then be proxied to the app instead of answered here.
+	handle /healthz {
+		respond "ok" 200
+	}
+
+	handle {
+		reverse_proxy web:3000 {
+			# The headers the application may believe. Each is SET, never appended.
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-Host {host}
+
+			# Anything else a client might pass off as proxy state is removed outright.
+			header_up -Forwarded
+			header_up -X-Forwarded-Server
+			header_up -X-Client-IP
+			header_up -CF-Connecting-IP
+			header_up -True-Client-IP
+
+			health_uri /api/auth/providers
+			health_interval 30s
+			health_timeout 5s
+		}
+	}
+}

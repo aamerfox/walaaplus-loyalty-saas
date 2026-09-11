@@ -10,7 +10,10 @@
 #
 #   docker compose up -d db          # application database
 #   docker compose up -d test-db     # disposable integration-test database (tmpfs, wiped on stop)
-#   docker compose --profile app up  # migrate (one-shot) -> web + worker containers (requires a build)
+#   docker compose --profile app up  # migrate (one-shot) -> proxy + web + worker (requires a build)
+#
+# Only `proxy` is published to the host (WEB_PORT, default 8080). `web` is deliberately NOT:
+# see the note on that service and deploy/Caddyfile.
 #
 # Start order under --profile app: db healthy -> migrate runs to completion (migrations + runtime
 # role grants, as the migrator) -> web and worker start. Web and worker therefore can never run
@@ -78,8 +81,14 @@ services:
       # Inside the Compose network the database host is the service name, not localhost.
       # RUNTIME role only: web never holds the migrator credentials.
       DATABASE_URL: postgresql://${APP_DB_USER:-walaaplus_app}:${APP_DB_PASSWORD:?Set APP_DB_PASSWORD in .env (runtime role)}@db:5432/${POSTGRES_DB:-loyalty}?schema=public
-    ports:
-      - "3000:3000"
+      # Forwarding headers may be believed HERE and only here, because `proxy` overwrites them
+      # and this service is not published to the host. See deploy/Caddyfile.
+      TRUST_PROXY_HEADERS: "true"
+    # NOT published. The app is reachable only through `proxy` on the Compose network: a caller
+    # who could reach port 3000 directly could forge X-Forwarded-For and walk past every
+    # per-address rate limit.
+    expose:
+      - "3000"
     depends_on:
       db:
         condition: service_healthy
@@ -110,5 +119,29 @@ services:
       timeout: 3s
       retries: 5
 
+  # The public entry point, and the reason the app may believe X-Forwarded-For at all: it
+  # replaces that header with the address of the connection it received. Nothing else is
+  # published to the host.
+  proxy:
+    profiles: ["app"]
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      web:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
 volumes:
   db-data:
+  caddy-data:
+  caddy-config:

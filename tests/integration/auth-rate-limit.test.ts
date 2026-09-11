@@ -12,7 +12,7 @@ import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { getAuthOptions } from "@/server/auth/options";
 import { AuditAction } from "@/server/audit/audit";
 import { prisma } from "@/server/db";
-import { env } from "@/server/env";
+import { env, resetEnvCacheForTests } from "@/server/env";
 import {
   RateLimitScope,
   clearSignInLimit,
@@ -27,8 +27,30 @@ import { registerTestOwner, resetDatabase, TEST_PASSWORD } from "../setup/fixtur
 const REGISTER_MAX = env().AUTH_RATE_LIMIT_REGISTER_MAX;
 const SIGNIN_MAX = env().AUTH_RATE_LIMIT_SIGNIN_MAX;
 
-/** A fresh, unique client address per test, so tests never share a window. */
+/** Run one assertion as if the app sat behind the trusted proxy, then restore the default. */
+function withProxyTrust<T>(trusted: boolean, fn: () => Promise<T>): Promise<T> {
+  const previous = process.env.TRUST_PROXY_HEADERS;
+  process.env.TRUST_PROXY_HEADERS = trusted ? "true" : "false";
+  resetEnvCacheForTests();
+  return fn().finally(() => {
+    if (previous === undefined) delete process.env.TRUST_PROXY_HEADERS;
+    else process.env.TRUST_PROXY_HEADERS = previous;
+    resetEnvCacheForTests();
+  });
+}
+
+/**
+ * A fresh, unique limiter KEY per test, so tests never share a window. Opaque on purpose: the
+ * limiter hashes whatever string it is given.
+ */
 const ip = () => `203.0.113.${Math.floor(Math.random() * 200) + 1}:${randomUUID().slice(0, 8)}`;
+
+/**
+ * A unique, syntactically VALID client address, for the tests that go through the header path.
+ * Those normalise the value, so an opaque key would not survive the trip.
+ */
+const octet = () => Math.floor(Math.random() * 254) + 1;
+const realIp = () => `10.${octet()}.${octet()}.${octet()}`;
 
 function rateLimitAudits() {
   return prisma.auditLog.findMany({ where: { action: AuditAction.AUTH_RATE_LIMITED }, orderBy: { createdAt: "asc" } });
@@ -229,12 +251,18 @@ describe("authentication rate limiting", () => {
       return fn;
     };
 
-    const headers = (client: string) => ({ headers: { "x-forwarded-for": `${client}, 10.0.0.1` } });
+    /**
+     * What the proxy in deploy/Caddyfile produces, with a forged hop in front of it: the value
+     * the application may believe is the LAST one. Putting the attacker's value first is the
+     * point of the helper — a test that only ever sent one hop would not notice if the code
+     * started trusting the client-supplied end of the list.
+     */
+    const headers = (client: string) => ({ headers: { "x-forwarded-for": `6.6.6.6, ${client}` } });
 
     it("signs in with correct credentials and clears that identifier's window", async () => {
       const reg = await registerTestOwner();
       const { email } = await prisma.user.findUniqueOrThrow({ where: { id: reg.userId }, select: { email: true } });
-      const client = ip();
+      const client = realIp();
 
       const user = await authorize()({ email, password: TEST_PASSWORD }, headers(client));
       expect(user?.id).toBe(reg.userId);
@@ -243,18 +271,32 @@ describe("authentication rate limiting", () => {
           where: { scope: RateLimitScope.SIGNIN_IDENTIFIER, keyHash: hashKey(RateLimitScope.SIGNIN_IDENTIFIER, email) },
         }),
       ).toBe(0);
-      // The attempt was still counted against the client address before the password was checked.
-      expect(
-        await prisma.authRateLimit.count({
-          where: { scope: RateLimitScope.SIGNIN_IP, keyHash: hashKey(RateLimitScope.SIGNIN_IP, client) },
-        }),
-      ).toBe(1);
+    });
+
+    it("counts the address window only when a proxy is trusted, never from a raw header", async () => {
+      const reg = await registerTestOwner();
+      const { email } = await prisma.user.findUniqueOrThrow({ where: { id: reg.userId }, select: { email: true } });
+      const countFor = (client: string) =>
+        prisma.authRateLimit.count({ where: { scope: RateLimitScope.SIGNIN_IP, keyHash: hashKey(RateLimitScope.SIGNIN_IP, client) } });
+
+      // Default: the header is a client-supplied string and is ignored, so no window is keyed on it.
+      const untrusted = realIp();
+      await authorize()({ email, password: TEST_PASSWORD }, headers(untrusted));
+      expect(await countFor(untrusted)).toBe(0);
+
+      // Behind the proxy of deploy/Caddyfile the value is real, and the attempt is counted
+      // against it before the password is ever checked.
+      const trusted = realIp();
+      await withProxyTrust(true, async () => {
+        await authorize()({ email, password: TEST_PASSWORD }, headers(trusted));
+      });
+      expect(await countFor(trusted)).toBe(1);
     });
 
     it("refuses once the window is exhausted, even for the correct password", async () => {
       const reg = await registerTestOwner();
       const { email } = await prisma.user.findUniqueOrThrow({ where: { id: reg.userId }, select: { email: true } });
-      const client = ip();
+      const client = realIp();
 
       for (let i = 0; i < SIGNIN_MAX; i++) await consumeSignInLimit(email, client);
 
