@@ -5,11 +5,16 @@ import { describe, expect, it } from "vitest";
 /**
  * The migrate image must contain every local module its entrypoint imports.
  *
- * A staging deployment reached the `migrate` container and died before applying a single
- * migration:
+ * A staging deployment reached the `migrate` container and died there:
  *
  *   Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/app/scripts/lib/db-role-membership.mjs'
  *   imported from /app/scripts/db-roles.mjs
+ *
+ * The container runs `node scripts/db-migrate.mjs deploy && node scripts/db-roles.mjs`. In that
+ * deployment the migrations had already completed successfully and it was the second command,
+ * role setup, that failed to resolve its import — so the result was a migrated schema with no
+ * runtime role, not an untouched database. `web` and `worker` stayed blocked regardless, because
+ * the migrate service exited non-zero.
  *
  * The helper was in the repository the whole time. The Dockerfile's migrate target copied
  * `scripts/db-migrate.mjs` and `scripts/db-roles.mjs` and nothing else under `scripts/`, so the
@@ -89,8 +94,10 @@ describe("Dockerfile migrate target — local module dependencies", () => {
         expect(
           covered,
           `${entry} imports ${specifier}, which resolves to ${resolved}. No COPY line in the ` +
-            "migrate stage brings it into the image, so the container will die with " +
-            `ERR_MODULE_NOT_FOUND. Copied: ${copied.join(", ")}`,
+            `migrate stage brings it into the image, so ${entry} will die with ` +
+            "ERR_MODULE_NOT_FOUND. In the `db-migrate deploy && db-roles` chain the earlier " +
+            "command may already have completed, and the migrate service exits non-zero either " +
+            `way, so web and worker stay blocked. Copied: ${copied.join(", ")}`,
         ).toBe(true);
       }
     }

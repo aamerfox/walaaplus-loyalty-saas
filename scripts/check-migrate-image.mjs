@@ -11,6 +11,12 @@
  *   Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/app/scripts/lib/db-role-membership.mjs'
  *   imported from /app/scripts/db-roles.mjs
  *
+ * The container runs `node scripts/db-migrate.mjs deploy && node scripts/db-roles.mjs`, so the
+ * two commands fail independently. In that deployment the migrations had ALREADY been applied
+ * successfully; it was the second command, role setup, that could not resolve its import. The
+ * damage is therefore not "no migrations" but "a migrated schema with no runtime role" — and the
+ * service exits non-zero either way, which is what keeps `web` and `worker` from starting.
+ *
  * The file was in the repository, every test passed, the gate was green, and the image was still
  * broken: the Dockerfile copied `scripts/db-migrate.mjs` and `scripts/db-roles.mjs` and nothing
  * else under `scripts/`. Every check we had ran against the SOURCE TREE, where the helper exists.
@@ -77,8 +83,12 @@ const listing = inImage(["sh", "-c", `ls -1 ${HELPER}`], { allowFailure: true })
 if (listing.status !== 0) {
   fail(
     `${HELPER} is missing from the migrate image. ` +
-      "scripts/db-roles.mjs imports it, so the container will die with ERR_MODULE_NOT_FOUND " +
-      "before it applies a single migration. Check the COPY lines in the Dockerfile's migrate target.",
+      "scripts/db-roles.mjs imports it, so ROLE SETUP will die with ERR_MODULE_NOT_FOUND and the " +
+      "restricted runtime role will not be created. The container runs " +
+      "`db-migrate deploy && db-roles`, so migrations may already have completed before this " +
+      "second command fails, leaving a migrated schema with no runtime role. The migrate service " +
+      "exits non-zero either way, so web and worker stay blocked. " +
+      "Check the COPY lines in the Dockerfile's migrate target.",
     listing.stderr,
   );
 }
