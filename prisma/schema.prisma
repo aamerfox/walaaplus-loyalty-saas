@@ -1,3 +1,22 @@
+// WalaaPlus foundation schema — Phase 0.
+//
+// Authoritative design: docs/PRODUCT-SPEC.md §3–§4.
+//
+// Rules encoded here and in prisma/migrations/*/migration.sql:
+//  * Global User + per-business BusinessMembership. Never staff embedded in a business.
+//  * Customer is a global phone identity; names live on CustomerBusinessProfile.
+//  * ProgramTemplate = live presentation. ProgramVersion = immutable mechanics, pinned by cards.
+//  * LoyaltyOperation is APPEND-ONLY; a PostgreSQL trigger rejects UPDATE/DELETE.
+//  * Card balance columns are projections. The ledger is the source of truth.
+//  * IdempotencyRecord owns idempotency, unique on (businessId, key).
+//
+// Constraints Prisma cannot express live in raw SQL inside the migration:
+//  * exactly one ACTIVE ProgramVersion per template (partial unique index)
+//  * exactly one default Location per business (partial unique index)
+//  * append-only LoyaltyOperation (trigger)
+//  * ProgramVersion mechanics frozen once not DRAFT (trigger)
+// Integration tests assert every one of them exists.
+
 generator client {
   provider = "prisma-client-js"
 }
@@ -7,275 +26,571 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-enum Role {
-  SUPER_ADMIN     // SaaS Provider
-  AGENCY_OWNER    // White-label Agency
-  BUSINESS_OWNER  // End Business 
-  MANAGER         // Store Manager
-  CASHIER         // Standard Cashier
-  CUSTOMER        // End User
+// ─────────────────────────────────────────────────────────────────────────────
+// Enums
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum MembershipRole {
+  OWNER
+  MANAGER
+  CASHIER
 }
 
+enum Permission {
+  VIEW_DASHBOARD
+  VIEW_TEMPLATES
+  EDIT_TEMPLATES
+  VIEW_CUSTOMERS
+  EDIT_CUSTOMERS
+  VIEW_OPERATIONS
+  MAKE_ACCRUALS
+  MAKE_REDEMPTIONS
+  VIEW_LOCATIONS
+  EDIT_LOCATIONS
+  VIEW_STAFF
+  EDIT_STAFF
+  VIEW_PUSHES
+  EDIT_PUSHES
+  VIEW_SEGMENTS
+  EDIT_SEGMENTS
+  VIEW_INTEGRATIONS
+  EDIT_INTEGRATIONS
+  VIEW_BILLING
+  EDIT_BILLING
+  VIEW_AGENCY
+  EDIT_AGENCY
+}
+
+enum TemplateStatus {
+  DRAFT
+  ACTIVE
+  PAUSED // blocks new enrollment; existing cards keep working
+  ARCHIVED
+}
+
+enum ProgramVersionStatus {
+  DRAFT
+  ACTIVE
+  RETIRED
+}
+
+/// MVP program types. Later types are added by migration when their phase arrives.
 enum CardType {
   STAMP
-  CASHBACK
-  DISCOUNT
+  POINTS
+}
+
+enum CardStatus {
+  ISSUED
+  ACTIVE
+  PAUSED
+  EXPIRED
+  DELETED
+}
+
+enum DeviceChannel {
+  UNKNOWN
+  PWA
+  APPLE_WALLET
+  GOOGLE_WALLET
+}
+
+enum OperationKind {
+  CARD_ISSUED
+  WELCOME_BONUS
+  BIRTHDAY_BONUS
+  MANUAL_AWARD
+  VISIT_AWARD
+  PURCHASE_AWARD
+  STAMP_CONVERTED
+  REWARD_EARNED
+  REWARD_REDEEMED
+  BALANCE_REDEEMED
+  BALANCE_EXPIRED
+  IMPORT_ADJUSTMENT
+  REVERSAL
+  REFERRAL_BONUS
+  PROMOTION_REDEEMED
+  INTEGRATION_AWARD
+  INTEGRATION_REVERSAL
+}
+
+enum UnitType {
+  STAMP
+  POINT
   REWARD
-  MULTIPASS
-  COUPON
-  CERTIFICATE
-  SUBSCRIPTION
+  CASH
+  VISIT
 }
 
-// Global user model serving every role (multi-tenant safe)
+enum OperationSource {
+  SCANNER
+  DASHBOARD
+  ENROLLMENT
+  AUTOMATION
+  IMPORT
+  API
+  SYSTEM
+}
+
+enum PushMessageKind {
+  MANUAL
+  TRANSACTIONAL
+  AUTOMATION
+}
+
+enum PushMessageStatus {
+  DRAFT
+  SCHEDULED
+  SENDING
+  SENT
+  FAILED
+  CANCELLED
+}
+
+enum PushDeliveryStatus {
+  PENDING
+  SENT
+  FAILED
+  EXPIRED
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Identity and tenancy
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Global merchant-side identity. Roles live on BusinessMembership, never here.
 model User {
-  id            String    @id @default(uuid())
-  email         String?   @unique
-  passwordHash  String?
-  name          String?
-  phone         String?   @unique
-  birthday      DateTime? // Core CRM feature
-  gender        String?
-  role          Role      @default(CUSTOMER)
-  
-  // Referrals (Boomerangme viral loop)
-  referralCode  String?   @unique
-  referredById  String?
-  referredBy    User?     @relation("Referrals", fields: [referredById], references: [id])
-  referrals     User[]    @relation("Referrals")
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String
+  firstName    String?
+  lastName     String?
+  phone        String?
+  platformRole String   @default("USER") // reserved: SUPER_ADMIN in a later phase
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
-
-  // SaaS and Tenancy Relations
-  ownedAgency       Agency?   @relation("AgencyOwner")
-  ownedBusiness     Business? @relation("BusinessOwner")
-  
-  // Staff bindings (Managers/Cashiers)
-  staffAtLocationId String?
-  staffAtLocation   Location? @relation("LocationStaff", fields: [staffAtLocationId], references: [id])
-
-  // End User Data
-  customerCards CustomerCard[]
-  transactions  Transaction[]
-  pushTokens    PushToken[]
-  feedbacks     Feedback[]
+  memberships  BusinessMembership[]
+  operations   LoyaltyOperation[]   @relation("OperationActor")
+  auditLogs    AuditLog[]           @relation("AuditActor")
+  pushMessages PushMessage[]        @relation("PushAuthor")
 }
 
-// White-label Agencies (Resellers)
-model Agency {
-  id          String   @id @default(uuid())
-  name        String
-  domain      String?  @unique // Custom domain routing
-  branding    Json?    // White-label logos, colors, favicons
-  status      String   @default("ACTIVE") // ACTIVE, SUSPENDED
-
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-
-  ownerId     String   @unique
-  owner       User     @relation("AgencyOwner", fields: [ownerId], references: [id])
-  
-  businesses  Business[]
-  subscriptions Subscription[]
-}
-
-// End Businesses (Cafes, Salons, etc.)
 model Business {
-  id          String   @id @default(uuid())
-  name        String
-  currency    String   @default("SYP")
-  website     String?
-  status      String   @default("ACTIVE")
-  
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id            String   @id @default(uuid())
+  agencyId      String? // reserved for Phase 5; no relation yet
+  name          String
+  legalName     String?
+  phone         String?
+  email         String?
+  currency      String   @default("SYP") // ISO 4217; all amounts are integer minor units
+  defaultLocale String   @default("ar")
+  timezone      String   @default("Asia/Damascus") // IANA; day boundaries for limits and birthdays
+  logoUrl       String?
+  active        Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
-  agencyId    String
-  agency      Agency   @relation(fields: [agencyId], references: [id])
-
-  ownerId     String   @unique
-  owner       User     @relation("BusinessOwner", fields: [ownerId], references: [id])
-
-  feedbackSettings Json? // {"enabled": true, "googleMapsUrl": "...", "negativeMessage": "..."}
-  formSettings     Json? // {"firstName": { "enabled": true, "required": true }, ...}
-  apiToken         String?  @unique
-  webhookSettings  Json?    // {"cardIssued": { "url": "...", "active": true }, ...}
-
-  locations     Location[]
-  cardTemplates CardTemplate[]
-  automations   Automation[]
-  integrations  Integration[]
-  notifications Notification[]
-  feedbacks     Feedback[]
+  memberships        BusinessMembership[]
+  locations          Location[]
+  templates          ProgramTemplate[]
+  customerProfiles   CustomerBusinessProfile[]
+  cards              CustomerCard[]
+  operations         LoyaltyOperation[]
+  idempotencyRecords IdempotencyRecord[]
+  auditLogs          AuditLog[]
+  pushMessages       PushMessage[]
+  pushSubscriptions  PushSubscription[]
 }
 
-// Multi-location Support (Franchises)
-model Location {
-  id          String   @id @default(uuid())
-  name        String
-  address     String?
-  lat         Float?   // Geofencing for Apple/Google Wallet lock screen Push
-  lng         Float?
-  radius            Int      @default(100) // Meters for geofence trigger
-  lockscreenMessage String?  // "Welcome to Walaa Cafe!"
-
+/// A user's role inside one business. Resolved from the database on EVERY request.
+model BusinessMembership {
+  id          String         @id @default(uuid())
   businessId  String
-  business    Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
-
-  staff       User[]   @relation("LocationStaff")
-}
-
-// Card Design & Reward Rules
-model CardTemplate {
-  id          String   @id @default(uuid())
-  name        String
-  type        CardType
-  description String?
-  terms       String?
-  
-  design      Json     // Colors, logo, icon, hero image, Apple Wallet layout
-  rules       Json     // {"stamps": 10, "cashbackPercent": 5, "welcomePoints": 50, "expirationDays": 365}
-  
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-
-  businessId  String
-  business    Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
-
-  issuedCards CustomerCard[]
-  rewards     Reward[]
-}
-
-// Tiered Rewards (e.g. 5 stamps = drink, 10 = meal)
-model Reward {
-  id             String   @id @default(uuid())
-  name           String
-  description    String?
-  pointsRequired Int
-  
-  templateId     String
-  template       CardTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
-}
-
-// The Actual Digital Card in Apple/Google/PWA
-model CustomerCard {
-  id              String   @id @default(uuid())
-  status          String   @default("ACTIVE") // ACTIVE, REVOKED, EXPIRED
-  currentBalance  Int      @default(0) // Stamps/Points/Money
-  
-  // Wallet Identifiers
-  applePassId     String?  @unique
-  googlePassId    String?  @unique
-  pwaToken        String   @unique @default(cuid()) // Unique link for PWA access
-
-  lastVisitAt     DateTime?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-
-  customerId      String
-  customer        User     @relation(fields: [customerId], references: [id])
-
-  templateId      String
-  template        CardTemplate @relation(fields: [templateId], references: [id])
-
-  transactions    Transaction[]
-  feedbacks       Feedback[]
-}
-
-// Audit Trail & CRM Data Engine
-model Transaction {
-  id              String   @id @default(uuid())
-  amount          Int      // Positive (Earn), Negative (Redeem)
-  type            String   @default("VISIT") // VISIT, REWARD_REDEMPTION, WELCOME_BONUS, REFERRAL_BONUS
-  description     String?
-  createdAt       DateTime @default(now())
-
-  cardId          String
-  card            CustomerCard @relation(fields: [cardId], references: [id], onDelete: Cascade)
-
-  cashierId       String?
-  cashier         User?        @relation(fields: [cashierId], references: [id])
-}
-
-// Push Notifications & SMS Triggers (Boomerangme Richie AI equivalent)
-model Automation {
-  id          String   @id @default(uuid())
-  name        String
-  triggerType String   // BIRTHDAY, INACTIVE_30_DAYS, AFTER_VISIT, SIGN_UP, GEOFENCE
-  actionType  String   // PUSH_NOTIFICATION, SMS
-  messageBody String   // "We miss you! Come back for 20% off."
-  delayHours  Int      @default(0)
-  isActive    Boolean  @default(true)
-
-  businessId  String
-  business    Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
-}
-
-// PWA Browser Push Notification Subs
-model PushToken {
-  id          String   @id @default(uuid())
-  token       String   @unique
-  deviceType  String?  // iOS, Android, Desktop
-  createdAt   DateTime @default(now())
-
   userId      String
-  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role        MembershipRole
+  permissions Permission[]   @default([])
+  active      Boolean        @default(true)
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  business  Business        @relation(fields: [businessId], references: [id])
+  user      User            @relation(fields: [userId], references: [id])
+  locations StaffLocation[]
+
+  @@unique([businessId, userId])
+  @@index([userId])
 }
 
-// API Keys / POS Webhooks (Boomerangme integrations)
-model Integration {
+/// Which locations a membership may operate at. Empty = no location restriction (owners/managers).
+model StaffLocation {
+  membershipId String
+  locationId   String
+  createdAt    DateTime @default(now())
+
+  membership BusinessMembership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+  location   Location           @relation(fields: [locationId], references: [id], onDelete: Cascade)
+
+  @@id([membershipId, locationId])
+  @@index([locationId])
+}
+
+/// Every business has exactly one default "Main" location, created atomically at registration.
+model Location {
+  id         String   @id @default(uuid())
+  businessId String
+  name       String
+  address    String?
+  latitude   Decimal? @db.Decimal(9, 6) // reserved for geo-push
+  longitude  Decimal? @db.Decimal(9, 6)
+  isDefault  Boolean  @default(false)
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  business   Business           @relation(fields: [businessId], references: [id])
+  staff      StaffLocation[]
+  operations LoyaltyOperation[]
+
+  @@index([businessId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Customers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Global person identity keyed by normalized phone. No names here: those are per business.
+model Customer {
+  id              String    @id @default(uuid())
+  normalizedPhone String    @unique // E.164 canonical form
+  email           String?
+  birthDate       DateTime? @db.Date
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  profiles   CustomerBusinessProfile[]
+  operations LoyaltyOperation[]
+}
+
+/// The tenant-scoped view of a customer. Business A never sees Business B's profile.
+model CustomerBusinessProfile {
+  id                     String    @id @default(uuid())
+  businessId             String
+  customerId             String
+  firstName              String?
+  lastName               String?
+  marketingConsent       Boolean   @default(false)
+  privacyConsentAt       DateTime?
+  consentTextVersion     String?
+  customFields           Json?
+  utmSource              String?
+  utmMedium              String?
+  utmCampaign            String?
+  referrerCustomerCardId String? // reserved for referrals (Phase 3a)
+  firstSeenAt            DateTime  @default(now())
+  lastSeenAt             DateTime?
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+
+  business   Business           @relation(fields: [businessId], references: [id])
+  customer   Customer           @relation(fields: [customerId], references: [id])
+  cards      CustomerCard[]
+  operations LoyaltyOperation[]
+
+  @@unique([businessId, customerId])
+  @@index([businessId, lastSeenAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Programs: live presentation vs pinned mechanics
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Live, always-editable presentation and legal content. cardType locks at first activation (service rule).
+model ProgramTemplate {
+  id               String         @id @default(uuid())
+  businessId       String
+  name             String
+  status           TemplateStatus @default(DRAFT)
+  cardType         CardType
+  defaultLocale    String         @default("ar")
+  livePresentation Json           @default("{}") // logo, colours, labels, links
+  liveLegal        Json           @default("{}") // terms, privacy, consent text
+  liveIssuer       Json           @default("{}") // issuer name/email/phone
+  livePlatform     Json           @default("{}") // pwa/apple/google toggles, enrollment page
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  business     Business           @relation(fields: [businessId], references: [id])
+  versions     ProgramVersion[]
+  cards        CustomerCard[]
+  utmLinks     UtmSourceLink[]
+  operations   LoyaltyOperation[]
+  pushMessages PushMessage[]
+
+  @@index([businessId, status])
+}
+
+/// Immutable mechanics. Exactly one ACTIVE per template (partial unique index in SQL).
+/// A trigger rejects changes to `mechanics` once status leaves DRAFT, and rejects deletion of non-DRAFT rows.
+model ProgramVersion {
+  id            String               @id @default(uuid())
+  templateId    String
+  versionNumber Int
+  status        ProgramVersionStatus @default(DRAFT)
+  mechanics     Json                 @default("{}") // earn rules, thresholds, limits, expiry, countRewardRedemptionAsVisit
+  createdAt     DateTime             @default(now())
+  activatedAt   DateTime?
+
+  template    ProgramTemplate    @relation(fields: [templateId], references: [id])
+  rewardTiers RewardTier[]
+  cards       CustomerCard[]
+  operations  LoyaltyOperation[]
+
+  @@unique([templateId, versionNumber])
+}
+
+/// Reward tiers are rows, not JSON: the ledger references them by id.
+model RewardTier {
+  id               String   @id @default(uuid())
+  programVersionId String
+  name             String
+  description      String?
+  requiredPoints   Int
+  rewardValueMinor Int? // merchant cost/value, for ROI reporting
+  usageLimit       Int?
+  sortOrder        Int      @default(0)
+  createdAt        DateTime @default(now())
+
+  programVersion ProgramVersion     @relation(fields: [programVersionId], references: [id])
+  operations     LoyaltyOperation[]
+
+  @@index([programVersionId])
+}
+
+/// Named enrollment sources. Every template gets a default `direct` link; every card carries attribution.
+model UtmSourceLink {
+  id                           String   @id @default(uuid())
+  templateId                   String
+  name                         String
+  publicToken                  String   @unique // high-entropy, appears in QR/URL
+  utmSource                    String
+  utmMedium                    String?
+  utmCampaign                  String?
+  welcomeUnitQuantity          Int?
+  welcomeBonusExpiresAfterDays Int?
+  enrollmentTitle              String?
+  enrollmentImageUrl           String?
+  active                       Boolean  @default(true)
+  createdAt                    DateTime @default(now())
+  updatedAt                    DateTime @updatedAt
+
+  template ProgramTemplate @relation(fields: [templateId], references: [id])
+  cards    CustomerCard[]
+
+  @@unique([templateId, utmSource])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cards and ledger
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// One card per customer per program. Balance columns are PROJECTIONS of the ledger.
+model CustomerCard {
+  id                        String        @id @default(uuid())
+  businessId                String
+  templateId                String
+  programVersionId          String // pinned forever; the engine reads mechanics from here
+  customerBusinessProfileId String
+  serialNumber              String        @unique
+  qrToken                   String        @unique // opaque; never the card id or customer id
+  shareToken                String        @unique // separate from qrToken; page access ≠ scan access
+  status                    CardStatus    @default(ISSUED)
+  deviceChannel             DeviceChannel @default(UNKNOWN)
+
+  // Projections. Three are needed: a stamp card holds stamps AND unredeemed rewards.
+  stampBalance     Int @default(0)
+  pointBalance     Int @default(0)
+  rewardBalance    Int @default(0)
+  cashBalanceMinor Int @default(0) // reserved: gift/cashback
+  visitBalance     Int @default(0) // reserved: multipass/membership
+
+  issuedAt        DateTime  @default(now())
+  firstOpenedAt   DateTime?
+  lastOpenedAt    DateTime?
+  pwaDetectedAt   DateTime? // best-effort telemetry: "opened as app", never "installed"
+  expiresAt       DateTime?
+  lastActivityAt  DateTime?
+  utmSourceLinkId String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  business          Business                @relation(fields: [businessId], references: [id])
+  template          ProgramTemplate         @relation(fields: [templateId], references: [id])
+  programVersion    ProgramVersion          @relation(fields: [programVersionId], references: [id])
+  profile           CustomerBusinessProfile @relation(fields: [customerBusinessProfileId], references: [id])
+  utmSourceLink     UtmSourceLink?          @relation(fields: [utmSourceLinkId], references: [id])
+  operations        LoyaltyOperation[]
+  pushSubscriptions PushSubscription[]
+  pushDeliveries    PushDelivery[]
+
+  @@unique([customerBusinessProfileId, templateId])
+  @@index([businessId, status])
+  @@index([templateId])
+}
+
+/// APPEND-ONLY. UPDATE and DELETE are rejected by trigger `loyalty_operation_append_only`.
+/// There is deliberately no updatedAt. Corrections are new rows referencing `reversalOfOperationId`.
+model LoyaltyOperation {
+  id                        String  @id @default(uuid())
+  transactionGroupId        String // groups atomic rows (e.g. award + conversion + reward earned)
+  businessId                String
+  locationId                String
+  customerId                String
+  customerBusinessProfileId String
+  customerCardId            String
+  templateId                String
+  programVersionId          String
+  performedByUserId         String? // null for ENROLLMENT/SYSTEM/AUTOMATION
+  rewardTierId              String?
+
+  kind                 OperationKind
+  unitType             UnitType
+  quantity             Int // signed; negative = redemption/reversal/expiry
+  purchaseAmountMinor  Int? // customer spend in this transaction
+  monetaryDeltaMinor   Int? // money moved for cash-based programs (later)
+  redemptionValueMinor Int? // merchant cost of a redeemed reward
+  balanceAfter         Int // projection snapshot for `unitType` after this row
+  countsAsVisit        Boolean // frozen at write time; see PRODUCT-SPEC §5.4
+  source               OperationSource
+  comment              String? // internal, never shown to the customer
+  reason               String? // required on reversals/corrections
+  reversalOfOperationId String?
+  externalProvider     String?
+  externalEventId      String?
+  createdAt            DateTime        @default(now())
+
+  business       Business                @relation(fields: [businessId], references: [id])
+  location       Location                @relation(fields: [locationId], references: [id])
+  customer       Customer                @relation(fields: [customerId], references: [id])
+  profile        CustomerBusinessProfile @relation(fields: [customerBusinessProfileId], references: [id])
+  card           CustomerCard            @relation(fields: [customerCardId], references: [id])
+  template       ProgramTemplate         @relation(fields: [templateId], references: [id])
+  programVersion ProgramVersion          @relation(fields: [programVersionId], references: [id])
+  performedBy    User?                   @relation("OperationActor", fields: [performedByUserId], references: [id])
+  rewardTier     RewardTier?             @relation(fields: [rewardTierId], references: [id])
+  reversalOf     LoyaltyOperation?       @relation("Reversal", fields: [reversalOfOperationId], references: [id])
+  reversals      LoyaltyOperation[]      @relation("Reversal")
+
+  @@unique([externalProvider, externalEventId])
+  @@index([businessId, createdAt])
+  @@index([customerCardId, createdAt])
+  @@index([locationId, createdAt])
+  @@index([customerBusinessProfileId, createdAt])
+  @@index([transactionGroupId])
+}
+
+/// Owns idempotency for every write that may be retried. Lives OUTSIDE the ledger because one
+/// request can produce several ledger rows. Stores the response so a retry returns the original.
+model IdempotencyRecord {
+  id                 String   @id @default(uuid())
+  businessId         String
+  key                String
+  payloadHash        String // sha256 of canonical JSON; same key + different hash = conflict
+  transactionGroupId String?
+  response           Json
+  createdAt          DateTime @default(now())
+
+  business Business @relation(fields: [businessId], references: [id])
+
+  @@unique([businessId, key])
+  @@index([createdAt])
+}
+
+/// Non-ledger security and business events: registration, membership changes, template activation,
+/// restore-link generation, exports.
+model AuditLog {
   id          String   @id @default(uuid())
-  provider    String   // ZAPIER, REST_API, STRIPE, CUSTOM_POS
-  apiKey      String?  
-  webhookUrl  String?
-  settings    Json?
-  
-  businessId  String
-  business    Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
-}
-
-// SaaS Billing
-model Subscription {
-  id          String   @id @default(uuid())
-  planId      String   // STRIPE_PRICE_ID or LOCAL_PLAN
-  status      String   @default("TRIAL") // TRIAL, ACTIVE, PAST_DUE, CANCELED
-  currentPeriodEnd DateTime
-
-  // Billing applies to Agencies (which buy bulk) or direct Businesses
-  agencyId    String?
-  agency      Agency?  @relation(fields: [agencyId], references: [id])
-}
-// Push Notifications & SMS History
-model Notification {
-  id              String   @id @default(uuid())
-  title           String
-  message         String
-  type            String   // PUSH, SMS
-  status          String   @default("SENT")
-  externalId      String?  // OneSignal ID, Twilio SID, etc.
-  recipientCount  Int      @default(0)
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-
-  businessId      String
-  business        Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
-}
-
-// Post-visit customer reviews
-model Feedback {
-  id          String   @id @default(uuid())
-  rating      Int      @default(5) // 1 to 5 stars
-  comment     String?
+  businessId  String?
+  actorUserId String?
+  action      String
+  entityType  String
+  entityId    String?
+  metadata    Json?
+  ipAddress   String?
   createdAt   DateTime @default(now())
 
-  businessId  String
-  business    Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  business Business? @relation(fields: [businessId], references: [id])
+  actor    User?     @relation("AuditActor", fields: [actorUserId], references: [id])
 
-  customerId  String
-  customer    User     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  @@index([businessId, createdAt])
+  @@index([actorUserId, createdAt])
+}
 
-  cardId      String
-  card        CustomerCard @relation(fields: [cardId], references: [id], onDelete: Cascade)
+// ─────────────────────────────────────────────────────────────────────────────
+// Push (schema reservation; delivery logic arrives in Phase 1.5)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// One per service-worker registration, i.e. per card (cards are registered with per-card scope).
+model PushSubscription {
+  id             String   @id @default(uuid())
+  businessId     String
+  customerCardId String
+  endpoint       String   @unique
+  p256dh         String
+  auth           String
+  userAgent      String?
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  business   Business       @relation(fields: [businessId], references: [id])
+  card       CustomerCard   @relation(fields: [customerCardId], references: [id])
+  deliveries PushDelivery[]
+
+  @@index([customerCardId])
+}
+
+/// One campaign or single message. Recipients are PushDelivery rows.
+model PushMessage {
+  id              String            @id @default(uuid())
+  businessId      String
+  templateId      String?
+  title           String
+  body            String
+  targetUrl       String?
+  kind            PushMessageKind
+  status          PushMessageStatus @default(DRAFT)
+  scheduledAt     DateTime?
+  createdByUserId String?
+  createdAt       DateTime          @default(now())
+
+  business   Business         @relation(fields: [businessId], references: [id])
+  template   ProgramTemplate? @relation(fields: [templateId], references: [id])
+  createdBy  User?            @relation("PushAuthor", fields: [createdByUserId], references: [id])
+  deliveries PushDelivery[]
+
+  @@index([businessId, createdAt])
+}
+
+/// One row per recipient subscription per message, carrying its own status and retries.
+model PushDelivery {
+  id                 String             @id @default(uuid())
+  pushMessageId      String
+  pushSubscriptionId String
+  customerCardId     String
+  status             PushDeliveryStatus @default(PENDING)
+  attemptCount       Int                @default(0)
+  providerStatusCode Int?
+  failureReason      String?
+  sentAt             DateTime?
+  failedAt           DateTime?
+  createdAt          DateTime           @default(now())
+
+  message      PushMessage      @relation(fields: [pushMessageId], references: [id])
+  subscription PushSubscription @relation(fields: [pushSubscriptionId], references: [id])
+  card         CustomerCard     @relation(fields: [customerCardId], references: [id])
+
+  @@index([pushMessageId, status])
 }
