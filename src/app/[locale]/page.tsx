@@ -69,7 +69,7 @@ export default function LandingPage() {
                   </>
                ) : (
                   <>
-                     Loyalty Cards natively in your <span className="text-transparent bg-clip-text bg-gradient-to-r from-indigo-600 to-rose-500">Customers' Wallets.</span>
+                     Loyalty Cards natively in your <span className="text-transparent bg-clip-text bg-gradient-to-r from-indigo-600 to-rose-500">Customers&apos; Wallets.</span>
                   </>
                )}
             </h1>

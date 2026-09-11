@@ -1,23 +1,20 @@
-import NextAuth, { DefaultSession } from "next-auth";
-import { JWT } from "next-auth/jwt";
+import type { DefaultSession } from "next-auth";
 
+/**
+ * The session carries ONLY the user id. Roles and permissions are deliberately absent:
+ * they are resolved from BusinessMembership on every request (src/server/tenant/context.ts).
+ */
 declare module "next-auth" {
   interface Session {
-    user: {
-      id: string;
-      role: string;
-    } & DefaultSession["user"]
+    user: { id: string } & DefaultSession["user"];
   }
-
   interface User {
     id: string;
-    role: string;
   }
 }
 
 declare module "next-auth/jwt" {
   interface JWT {
-    id: string;
-    role: string;
+    sub: string;
   }
 }

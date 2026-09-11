@@ -1,11 +1,13 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 
+// NOTE: prototype smoke suite. Targets pages removed in the Phase 0 rebuild; it is NOT part of
+// `npm run gate` and is rewritten in Phase 1a against the real café loop.
 const BASE = 'http://localhost:3000';
 const EMAIL = 'test@walaaplus.com';
 const PASSWORD = 'password123';
 
 // Helper to log in before each test
-async function login(page: any) {
+async function login(page: Page) {
   await page.goto(`${BASE}/ar/auth/login`);
   await page.waitForLoadState('networkidle');
   await page.locator('input[type="email"]').fill(EMAIL);

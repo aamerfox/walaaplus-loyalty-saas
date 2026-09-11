@@ -67,5 +67,15 @@
     "lastVisit": "Last Visit",
     "points": "Points",
     "status": "Status"
+  },
+  "BusinessHome": {
+    "title": "Your businesses",
+    "subtitle": "Businesses where you hold an active membership",
+    "empty": "You do not belong to any business yet.",
+    "role": {
+      "OWNER": "Owner",
+      "MANAGER": "Manager",
+      "CASHIER": "Cashier"
+    }
   }
 }
