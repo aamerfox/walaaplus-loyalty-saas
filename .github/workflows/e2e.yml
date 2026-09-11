@@ -1,0 +1,84 @@
+# End-to-end browser tests.
+#
+# A separate workflow from `gate.yml` on purpose. The gate is the fast loop a developer runs
+# before every commit and finishes in minutes; a browser run needs a production build, a server
+# and a real database, and folding it into the gate would make the fast loop unusable. Both run on
+# the same events, so a rebuild branch still gets both signals.
+#
+# Secrets: none. The database password and NEXTAUTH_SECRET below are ephemeral fixtures for a
+# throwaway CI database and a server that never serves real traffic. They are not credentials.
+name: e2e
+
+on:
+  push:
+    branches: ["rebuild/**"]
+  pull_request:
+    branches: ["master", "rebuild/**"]
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci-ephemeral-not-a-secret
+          POSTGRES_DB: loyalty_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ci -d loyalty_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
+      E2E_PORT: "3100"
+      # Migrator (owner) role: applies migrations and creates the runtime role.
+      TEST_MIGRATE_DATABASE_URL: postgresql://ci:ci-ephemeral-not-a-secret@localhost:5432/loyalty_test?schema=public
+      # Restricted runtime role, created by scripts/db-roles.mjs in the e2e global setup.
+      TEST_DATABASE_URL: postgresql://walaaplus_app:ci-app-role-ephemeral-not-a-secret@localhost:5432/loyalty_test?schema=public
+      NEXTAUTH_URL: http://127.0.0.1:3100
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Generate an ephemeral NEXTAUTH_SECRET for this run
+        run: echo "NEXTAUTH_SECRET=$(openssl rand -base64 48)" >> "$GITHUB_ENV"
+
+      - name: Prisma client
+        run: npx prisma generate
+
+      - name: Install the browser
+        run: npx playwright install --with-deps chromium
+
+      # The config's globalSetup migrates the database and creates the runtime role, then the
+      # webServer builds and serves the standalone output — the same artifact the Dockerfile ships.
+      - name: End-to-end tests
+        run: npm run test:e2e
+
+      - name: Upload the report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            playwright-report
+            playwright-results
+          if-no-files-found: ignore
+          retention-days: 7
