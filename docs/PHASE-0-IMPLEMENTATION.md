@@ -40,11 +40,15 @@ Browser ──► Next.js 16 (App Router, standalone)          src/app/**, src/p
 | Session token holds only `sub` (user id) | `src/server/auth/options.ts`, `src/types/next-auth.d.ts` |
 | Membership, role, permissions, location scope resolved from DB every request | `src/server/tenant/context.ts` |
 | Every business-scoped query includes `businessId` | services in `src/server/**`; tests in `tests/integration/tenant-guard.test.ts` |
-| Ledger rows are never updated or deleted | PostgreSQL triggers in `prisma/migrations/*/migration.sql` |
+| Ledger rows are never updated or deleted — two layers | runtime role has no `UPDATE/DELETE/TRUNCATE` privilege (`scripts/db-roles.mjs`, proved by `tests/integration/runtime-role.test.ts`); PostgreSQL triggers refuse even the owner (`prisma/migrations/*/migration.sql`) |
+| Ledger writes carry a verified actor: business and user are derived from `TenantContext` or an explicit system actor, never from input | `src/server/ledger/actor.ts`, `appendOperationGroup` |
+| Cashiers write only at assigned locations; an unassigned cashier has no access; OWNER/MANAGER unrestricted | `src/server/tenant/context.ts` (`requireLocationAccess` inside the ledger transaction) |
+| One reversal per original operation, even under concurrency | card lock before the reversal check + partial unique index on `reversalOfOperationId` |
+| RewardTier frozen with its ProgramVersion; `cardType` locked after activation or issued card; a group's tiers must belong to the card's pinned version | triggers `reward_tier_protect`, `program_template_protect_card_type`; tier check in `appendOperationGroup` |
 | Card balances are projections refreshed in the same transaction as the ledger insert, under `SELECT … FOR UPDATE` | `src/server/ledger/ledger.ts` |
 | Corrections are compensating rows; negative balances rejected | `reverseOperationGroup` |
 | Idempotency reserved BEFORE the work, in the same transaction | `src/server/ledger/idempotency.ts` |
-| `countsAsVisit` frozen at write time | `src/server/ledger/visits.ts` |
+| `countsAsVisit` decided from kind × source × version setting × explicit intent, frozen at write time; API/automation awards and every integration award must state intent | `src/server/ledger/visits.ts` |
 | Privileged changes audited in the same transaction | `src/server/audit/audit.ts` |
 
 ### Routing protection
@@ -111,9 +115,10 @@ that schema and `prisma migrate status` ignores it.
 
 ## 4. Migration policy
 
-- One migration, `20260911000000_foundation`, generated with `prisma migrate diff --from-empty` and
-  extended by hand with the triggers and partial unique indexes Prisma cannot express.
-- **Until the Phase 1a engineering gate passes, migrations may be squashed** into this single file.
+- Migrations: `20260911000000_foundation` (generated with `prisma migrate diff --from-empty` and extended
+  by hand with the triggers and partial unique indexes Prisma cannot express), `20260911120000_reversal_unique`,
+  `20260911120100_program_integrity`, `20260911120200_utm_unique_name` (Prompt 0.2 remediation).
+- **Until the Phase 1a engineering gate passes, migrations may be squashed** into one file.
   There is no deployed database to protect.
 - **After the first pilot database is deployed, migrations are forward-only.** Never edit an applied
   migration; add a new one.
