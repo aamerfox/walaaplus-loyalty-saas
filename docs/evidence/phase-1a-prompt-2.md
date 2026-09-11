@@ -58,7 +58,8 @@ amend, no force-push, no history rewritten.
 | 4 | `bd729bf` | feat(web): scanner, customer list, card history and the minimal cashier screen |
 | 5 | `5a7186f` | test(web): route, card, scanner and browser coverage for the café loop |
 | 6 | `60d392e` | docs: the Phase 1a screens, the PWA boundary and what is not claimed |
-| — | recorded in the final response | docs: this evidence file |
+| 7 | `3028bf0` | docs: the Prompt 2 evidence, and the one thing it cannot claim |
+| 8 | (this commit) | docs: fill in the evidence commit SHA, which row 7 could not know while it was being written |
 
 ---
 
