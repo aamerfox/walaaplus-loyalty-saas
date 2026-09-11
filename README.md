@@ -1,36 +1,41 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# WalaaPlus
 
-## Getting Started
+Arabic-first, Syria-first digital loyalty platform for local businesses. The customer product is an
+installable PWA loyalty card; the staff product is a QR and phone-lookup scanner; every change of
+loyalty value is an immutable ledger row.
 
-First, run the development server:
+**Status:** Phase 0 (foundation) on branch `rebuild/phase-0-foundation`. `master` holds the original
+visual prototype and is not built on.
+
+## Documents
+
+| Document | Purpose |
+|---|---|
+| [docs/PRODUCT-SPEC.md](docs/PRODUCT-SPEC.md) | Architecture and product rules — the source of truth |
+| [docs/PHASE-PLAN.md](docs/PHASE-PLAN.md) | Phases 0–6, engineering gates and pilot gates |
+| [docs/PHASE-0-IMPLEMENTATION.md](docs/PHASE-0-IMPLEMENTATION.md) | Local setup, worker, migrations, tests, gate, deployment boundary |
+| [docs/DECISIONS-REQUIRED.md](docs/DECISIONS-REQUIRED.md) | Decisions only the owner can make |
+| [docs/BOOMERANGME-REFERENCE.md](docs/BOOMERANGME-REFERENCE.md) | Feature reference mapped to phases |
+| [docs/PHASE-0-HYGIENE.md](docs/PHASE-0-HYGIENE.md) | Repository audit and prototype defect backlog |
+| `docs/evidence/` | Per-prompt evidence files |
+
+## Quick start
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+cp .env.example .env        # fill in values; see the file for every variable name
+npm ci
+docker compose up -d db
+npx prisma migrate deploy
+npm run dev                 # web
+npm run worker:dev          # background worker, separate terminal
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Engineering gate
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+npm run gate
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Lint, typecheck, Prisma validation, unit tests, integration tests against a disposable PostgreSQL,
+migration status, production build. CI runs the same command. Playwright end-to-end tests are
+separate (`npm run test:e2e`) and start in Phase 1a.
