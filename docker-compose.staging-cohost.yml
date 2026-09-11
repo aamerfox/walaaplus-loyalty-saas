@@ -2,9 +2,9 @@
 #
 #   docker compose -f docker-compose.staging-cohost.yml --env-file .env.staging up -d --build
 #
-# The target host (Oracle Linux 9.8) already runs OpenClaw/OpenBot and a system-managed Caddy
-# service that owns ports 80 and 443. This stack therefore ships NO proxy container, binds no
-# public port, and hands TLS to the Caddy that is already there. The host Caddy reaches this
+# The target host (Oracle Linux 9.8, ONE vCPU) already runs OpenClaw/OpenBot and a system-managed
+# Caddy service that owns ports 80 and 443. This stack therefore ships NO proxy container, binds
+# no public port, and hands TLS to the Caddy that is already there. The host Caddy reaches this
 # stack at 127.0.0.1:3100 using the site block in deploy/Caddyfile.walaaplus-staging.caddy, which
 # a human inserts into the host configuration after review. Nothing here reloads Caddy.
 #
@@ -24,15 +24,43 @@
 #   - its own PostgreSQL in its own container and volume. It never connects to another database
 #     on this host, and it publishes no database port, so nothing else can connect to it either;
 #   - the only host port touched is 127.0.0.1:3100. OpenBot's ports - 3456, 5432, 18789 and any
-#     other - are never bound, and 5432 in particular is never published by this file at all.
+#     other - are never bound, and 5432 in particular is never published by this file at all;
+#   - every service has an explicit CPU and memory ceiling, so this stack cannot starve the
+#     neighbours on a one-vCPU box. See the RESOURCE BUDGET note below.
 #
-# THE ONE PROPERTY THAT IS WEAKER HERE than in docker-compose.staging.yml, stated plainly because
-# it drives a setting below: on a dedicated box `web` publishes nothing, so the ONLY way to reach
-# it is through the proxy that rewrites X-Forwarded-For. Here `web` is reachable at
-# 127.0.0.1:3100 by any process on the host, so TRUST_PROXY_HEADERS=true means "trust every local
-# process on this machine", not "trust the proxy". On an owner-controlled staging box that is an
-# acceptable trade for having TLS at all; it would not be on production, and it is recorded as a
-# limitation in docs/evidence/phase-1a-prompt-2-cohost-config.md.
+# FORWARDED HEADERS ARE NOT TRUSTED HERE. On a dedicated box `web` publishes nothing, so the only
+# way to reach it is through the proxy that rewrites X-Forwarded-For, and TRUST_PROXY_HEADERS=true
+# means exactly "trust the proxy". On THIS host `web` answers on 127.0.0.1:3100, which every local
+# process can reach - so the same setting would mean "trust every process on this machine", and
+# any one of them could forge a different client address on every request. A per-address limit
+# built on a forgeable address is worse than no limit: it looks like protection. So the setting is
+# "false" here, and the windows that do not depend on the network boundary carry the load. The
+# trade-off is written out in docs/STAGING-RUNBOOK.md §13.2.
+#
+# RESOURCE BUDGET, for a one-vCPU host shared with OpenClaw/OpenBot:
+#
+#   service   cpus    mem_limit   when
+#   db        0.25    384m        always
+#   web       0.35    512m        always
+#   worker    0.15    256m        always
+#   migrate   0.50    512m        startup only, then it exits
+#
+# Steady state is therefore capped at 0.75 vCPU and 1152 MiB, leaving at least a quarter of the
+# single core for the host and its other services. During startup `migrate` runs while `web` and
+# `worker` do not, so the transient ceiling is db + migrate = 0.75 vCPU, the same number.
+#
+# These are LIMITS, not reservations: nothing is held back from the neighbours when this stack is
+# idle. `mem_reservation` is set well below each limit so the kernel reclaims from these
+# containers first under pressure rather than from OpenBot.
+#
+# ASSUMPTION: the host has at least 2 GiB of RAM. Check with `free -m` BEFORE the first start and
+# scale these numbers down if it has less; `docker stats` after the first start is a required
+# step, not an optional one (runbook §13.7).
+#
+# The keys used are `cpus`, `mem_limit` and `mem_reservation`, which plain `docker compose up`
+# enforces. `deploy.resources` is deliberately not used: it is the Swarm spelling, and it is
+# silently ignored by parts of the non-Swarm toolchain - a limit that is quietly ignored on a
+# one-vCPU box is the worst of both worlds.
 #
 # STAGING ONLY. Not production. See docs/STAGING-RUNBOOK.md §13.
 
@@ -42,6 +70,14 @@ services:
   db:
     image: postgres:15-alpine
     restart: unless-stopped
+    # PostgreSQL 15 defaults to 128 MB shared_buffers plus per-connection backends. Prisma's pool
+    # on this box is a handful of connections, so 384m is roughly triple the expected resident
+    # size - deliberately loose, because an OOM-killed database is a corrupted staging run, not a
+    # tidy failure. If it is ever killed, `docker inspect` reports OOMKilled: raise this, do not
+    # lower the others.
+    cpus: 0.25
+    mem_limit: 384m
+    mem_reservation: 128m
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in the env file}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the env file}
@@ -66,6 +102,14 @@ services:
       context: .
       target: migrate
     restart: "no"
+    # The most generous allowance in the file, on purpose, and it costs nothing in steady state
+    # because this container exits before web and worker start. The Prisma CLI is a Node process
+    # that loads a schema and a query engine; an OOM kill here does not merely fail a request, it
+    # halts the whole startup - web and worker wait on this completing successfully. Its memory
+    # ceiling is therefore never lower than web's, which a test enforces.
+    cpus: 0.50
+    mem_limit: 512m
+    mem_reservation: 128m
     environment:
       # Both passwords are interpolated into a URL and Compose substitutes them verbatim, with no
       # percent-encoding. Generate them with `openssl rand -hex 32`; a `/` ends the authority
@@ -85,6 +129,12 @@ services:
       context: .
       target: web
     restart: unless-stopped
+    # The Next.js standalone server for this app sits well under 200 MB resident; 512m leaves
+    # room for a build-free restart, a burst of requests and the V8 heap without ever being the
+    # reason the host swaps.
+    cpus: 0.35
+    mem_limit: 512m
+    mem_reservation: 160m
     environment:
       NODE_ENV: production
       # RUNTIME role only. This container never receives POSTGRES_PASSWORD, and `env_file` is
@@ -94,10 +144,16 @@ services:
       # The public origin is the hostname the HOST Caddy serves, not this port. Sessions and
       # absolute links break if this disagrees with what the browser used.
       NEXTAUTH_URL: https://${WALAAPLUS_DOMAIN:?Set WALAAPLUS_DOMAIN in the env file}
-      # True because the host Caddy REPLACES X-Forwarded-For and X-Real-IP with the address of
-      # the connection it received (deploy/Caddyfile.walaaplus-staging.caddy). Read the note at
-      # the top of this file: on a co-hosted box this also trusts any local process.
-      TRUST_PROXY_HEADERS: "true"
+      # FALSE, and it must stay false in this file. The host Caddy does replace X-Forwarded-For
+      # correctly (deploy/Caddyfile.walaaplus-staging.caddy), but it is not the only thing that
+      # can reach 127.0.0.1:3100 - every local process on this shared host can. Believing the
+      # header here would let any one of them present a fresh client address per request and walk
+      # through every per-address limit in the product. With it false the application reports NO
+      # client address, the per-address windows simply do not open, and the windows that do not
+      # depend on the network boundary - per submitted email, per sign-in identifier, per
+      # enrolment link - carry the load. tests/unit/compose-exposure.test.ts fails the gate if
+      # this ever reads "true" again.
+      TRUST_PROXY_HEADERS: "false"
     # THE ONLY PUBLISHED PORT IN THIS FILE, and it is deliberately a literal rather than a
     # variable: an interpolated host IP is one typo away from 0.0.0.0, which would put the
     # application on the public internet beside a proxy that is supposed to be in front of it.
@@ -123,6 +179,11 @@ services:
       context: .
       target: worker
     restart: unless-stopped
+    # The smallest allowance: a compiled pg-boss loop that wakes, polls and sleeps. It has no
+    # request path and no user waiting on it, so it is the right service to squeeze first.
+    cpus: 0.15
+    mem_limit: 256m
+    mem_reservation: 64m
     environment:
       NODE_ENV: production
       DATABASE_URL: postgresql://${APP_DB_USER:-walaaplus_app}:${APP_DB_PASSWORD:?Set APP_DB_PASSWORD in the env file}@db:5432/${POSTGRES_DB:-loyalty}?schema=public

@@ -19,9 +19,14 @@ import { describe, expect, it } from "vitest";
  *
  * **docker-compose.staging-cohost.yml** is the same application on a SHARED server whose ports 80
  * and 443 already belong to another service. It ships no proxy at all and publishes exactly one
- * port, on loopback. The thing that must never regress here is the host IP: a mapping that lost
- * its `127.0.0.1:` prefix would put the application straight onto the public internet, beside the
- * proxy that is supposed to be in front of it, with `TRUST_PROXY_HEADERS` already true.
+ * port, on loopback. Two things must never regress here. The host IP: a mapping that lost its
+ * `127.0.0.1:` prefix would put the application straight onto the public internet, beside the
+ * proxy that is supposed to be in front of it. And `TRUST_PROXY_HEADERS`, which is false in this
+ * shape precisely because loopback is reachable by every local process on a shared host.
+ *
+ * The co-hosted file also carries CPU and memory ceilings, because that host has one vCPU and
+ * shares it with OpenClaw/OpenBot. Those are asserted as a budget, not as exact numbers: the
+ * numbers may be tuned, the headroom left for the neighbours may not disappear.
  *
  * All three are also checked for CREDENTIAL REACH. `env_file: .env` on `web` used to hand the
  * application container every variable in the file, including the migrator password, both test
@@ -45,6 +50,9 @@ interface ComposeService {
   networks?: unknown;
   image?: string;
   build?: unknown;
+  cpus?: number | string;
+  mem_limit?: number | string;
+  mem_reservation?: number | string;
 }
 interface ComposeFile {
   name?: string;
@@ -101,6 +109,34 @@ function envNames(service: ComposeService): string[] {
   const env = service.environment;
   if (Array.isArray(env)) return env.map((e) => String(e).split("=")[0]);
   return Object.keys(env ?? {});
+}
+
+/**
+ * A Compose memory value (`384m`, `1g`, a bare byte count) as bytes.
+ *
+ * Written without a regular expression so the suffix handling is obvious: a limit read wrongly
+ * here would let a budget test pass while the real ceiling was a thousand times larger.
+ */
+function bytesOf(value: number | string | undefined): number {
+  if (value === undefined) return 0;
+  const text = String(value).trim().toLowerCase();
+  const unit = text.slice(-1);
+  const scale = unit === "g" ? 1024 ** 3 : unit === "m" ? 1024 ** 2 : unit === "k" ? 1024 : 1;
+  const digits = ["k", "m", "g", "b"].includes(unit) ? text.slice(0, -1) : text;
+  return Number(digits) * scale;
+}
+
+const MIB = 1024 ** 2;
+
+/** Variable value a service receives, by name. Used only for settings, never for secrets. */
+function envValue(service: ComposeService, name: string): string | undefined {
+  const env = service.environment;
+  if (Array.isArray(env)) {
+    const hit = env.map(String).find((e) => e.split("=")[0] === name);
+    return hit === undefined ? undefined : hit.split("=").slice(1).join("=");
+  }
+  const raw = (env ?? {})[name];
+  return raw === undefined ? undefined : String(raw);
 }
 
 /** Names that carry, or build, the owner/migrator credential. */
@@ -278,6 +314,85 @@ describe("docker-compose.staging-cohost.yml — a shared server", () => {
     const compose = load(COHOST);
     expect(compose.name).toBe("walaaplus-staging-cohost");
     expect(compose.name).not.toBe(load(STAGING).name);
+  });
+
+  it("does not believe forwarded IP headers on a shared host", () => {
+    /*
+     * The single most important line in that file after the port binding.
+     *
+     * On a dedicated box `web` publishes nothing, so the proxy is the only possible path and
+     * TRUST_PROXY_HEADERS=true means "trust the proxy". Here `web` answers on 127.0.0.1:3100,
+     * which EVERY local process on the shared host can reach, so the same setting would mean
+     * "trust every process on this machine" — and any one of them could present a different
+     * client address on every request. A per-address limit built on a forgeable address is worse
+     * than no limit, because it looks like protection.
+     */
+    const web = load(COHOST).services.web;
+    expect(envValue(web, "TRUST_PROXY_HEADERS")).toBe("false");
+    expect(envValue(web, "TRUST_PROXY_HEADERS")).not.toBe("true");
+  });
+
+  it("differs from the dedicated stack here on purpose, not by accident", () => {
+    // The dedicated file publishes no application port, so it may and does trust its proxy.
+    // If that ever changes, the reasoning above stops holding and both files need re-reading.
+    expect(envValue(load(STAGING).services.web, "TRUST_PROXY_HEADERS")).toBe("true");
+    expect(load(STAGING).services.web.ports).toBeUndefined();
+    expect(load(COHOST).services.web.ports).toBeDefined();
+  });
+
+  it("gives every service an explicit CPU and memory ceiling", () => {
+    // One vCPU, shared with OpenClaw/OpenBot. A service with no ceiling can take the whole core.
+    const compose = load(COHOST);
+    for (const name of ["db", "migrate", "web", "worker"]) {
+      const service = compose.services[name];
+      expect(Number(service.cpus), `${name} needs a cpus limit`).toBeGreaterThan(0);
+      expect(bytesOf(service.mem_limit), `${name} needs a mem_limit`).toBeGreaterThan(0);
+    }
+  });
+
+  it("leaves at least a quarter of the single core, and under 1.5 GiB, to the neighbours", () => {
+    const compose = load(COHOST);
+    // `migrate` exits before web and worker start, so it is not part of the steady state.
+    const steady = ["db", "web", "worker"].map((n) => compose.services[n]);
+    const cpu = steady.reduce((sum, s) => sum + Number(s.cpus ?? 0), 0);
+    const mem = steady.reduce((sum, s) => sum + bytesOf(s.mem_limit), 0);
+
+    expect(cpu).toBeLessThanOrEqual(0.8);
+    expect(mem).toBeLessThanOrEqual(1536 * MIB);
+
+    // The transient startup ceiling must be no worse than the steady one.
+    const startup = Number(compose.services.db.cpus ?? 0) + Number(compose.services.migrate.cpus ?? 0);
+    expect(startup).toBeLessThanOrEqual(0.8);
+  });
+
+  it("never squeezes the migration tighter than the application it gates", () => {
+    // web and worker wait on `migrate` completing successfully. An OOM kill there does not fail
+    // one request, it halts the entire startup — so the one-shot container gets the most room.
+    const compose = load(COHOST);
+    expect(bytesOf(compose.services.migrate.mem_limit)).toBeGreaterThanOrEqual(
+      bytesOf(compose.services.web.mem_limit),
+    );
+    expect(Number(compose.services.migrate.cpus)).toBeGreaterThanOrEqual(Number(compose.services.web.cpus));
+  });
+
+  it("reserves far less than it limits, so the kernel reclaims from us first", () => {
+    // A reservation is a floor the kernel tries to protect. Setting it near the limit would make
+    // this stack the last thing reclaimed under pressure, which is backwards on someone else's
+    // host.
+    const compose = load(COHOST);
+    for (const name of ["db", "web", "worker"]) {
+      const service = compose.services[name];
+      expect(bytesOf(service.mem_reservation), `${name} needs a mem_reservation`).toBeGreaterThan(0);
+      expect(bytesOf(service.mem_reservation)).toBeLessThan(bytesOf(service.mem_limit) / 2);
+    }
+  });
+
+  it("uses the plain Compose resource keys, not the Swarm spelling", () => {
+    // `deploy.resources` is the Swarm form and is silently ignored by parts of the non-Swarm
+    // toolchain. A limit that is quietly ignored on a one-vCPU box is the worst of both worlds.
+    const raw = readFileSync(COHOST, "utf8");
+    expect(raw).not.toContain("deploy:");
+    expect(raw).not.toContain("resources:");
   });
 
   it("still orders the database, then the migration, then the application", () => {

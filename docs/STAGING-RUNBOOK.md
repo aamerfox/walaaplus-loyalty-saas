@@ -447,6 +447,8 @@ of scope here.
 | PostgreSQL | no port | no port. **Never 5432 on this host — it belongs to a neighbour** |
 | Worker | no published port | no published port |
 | `ACME_EMAIL` | required | **unused.** The host Caddy already has an ACME account |
+| Forwarded IP headers | trusted: the proxy is the only path | **not trusted.** Loopback is reachable by every local process (§13.2) |
+| Resource limits | none: the box is ours | **explicit CPU and memory ceilings** on all four services (§13.2) |
 
 Everything else carries over unchanged: the same two database roles, the same startup order, the
 same startup validation, the same backup and restore scripts (§6), the same rollback procedure
@@ -471,12 +473,92 @@ The Compose file writes that mapping as a literal rather than a variable on purp
 interpolated host address is one typo away from `0.0.0.0`, which would publish the application to
 the internet beside the proxy that is meant to be in front of it.
 
-**One honest caveat.** On a dedicated box `web` publishes nothing, so the only way to reach it is
-through the proxy that rewrites `X-Forwarded-For`, and `TRUST_PROXY_HEADERS=true` means "trust
-the proxy". Here `web` is reachable on loopback, so that setting also trusts **any process on
-this host**. On an owner-controlled staging machine that is an acceptable price for having TLS at
-all. It would not be acceptable on production, where the application belongs on its own host or
-behind a proxy it does not share.
+### Why forwarded IP headers are not trusted here
+
+`TRUST_PROXY_HEADERS` is **`false`** in `docker-compose.staging-cohost.yml`, and it must stay
+false in that file.
+
+On a dedicated box `web` publishes nothing, so the proxy is the only possible path to it and
+`TRUST_PROXY_HEADERS=true` means precisely "trust the proxy". Here `web` answers on
+`127.0.0.1:3100`, which **every local process on this shared host can reach** — not only Caddy.
+Any of them could send a request with a different `X-Forwarded-For` on every attempt. A per-address
+limit built on an address the caller chooses is worse than no limit at all, because it looks like
+protection while providing none.
+
+The host Caddy still replaces the headers correctly, and the fragment keeps doing so; the
+application simply declines to believe them in this shape.
+
+**What that costs, stated plainly:**
+
+| | In co-hosted staging |
+|---|---|
+| Per-IP window on registration | **unavailable** |
+| Per-IP window on sign-in | **unavailable** |
+| Per-IP window on public enrolment | **unavailable** |
+| Per-submitted-email window on registration | **active** |
+| Per-identifier window on sign-in | **active** — this is the one that stops credential stuffing against one account |
+| **Per-enrolment-link window**, database-backed | **active** — and it is the right shape for the real threat anyway: farming a welcome bonus means hammering one merchant's link |
+| Enrolment honeypot, idempotency, tenant isolation, append-only ledger | unaffected |
+
+The application reports no client address at all rather than a forgeable one, so the windows above
+simply do not open. Nothing silently degrades to a weaker limit.
+
+**This is the safer of the two options**, not a reluctant compromise: trusting the header would not
+have protected against a local process anyway — it would have handed that process an unlimited
+supply of distinct identities and made the per-address windows useless while still appearing on
+the dashboard.
+
+**A dedicated server restores the trusted-proxy behaviour**, unchanged, by using
+`docker-compose.staging.yml`, where `web` publishes nothing and the proxy really is the only path.
+That file already sets `TRUST_PROXY_HEADERS=true` and is untouched by this shape.
+
+### Resource limits, because the box is shared
+
+One vCPU, shared with OpenClaw/OpenBot. Every service has an explicit ceiling so this stack cannot
+take the core:
+
+| Service | `cpus` | `mem_limit` | `mem_reservation` | When |
+|---|---|---|---|---|
+| `db` | 0.25 | 384m | 128m | always |
+| `web` | 0.35 | 512m | 160m | always |
+| `worker` | 0.15 | 256m | 64m | always |
+| `migrate` | 0.50 | 512m | 128m | startup only, then it exits |
+
+**Steady state is capped at 0.75 vCPU and 1152 MiB**, leaving at least a quarter of the single
+core and the rest of memory to the host and its other services. During startup `migrate` runs
+while `web` and `worker` do not, so the transient ceiling is `db` + `migrate` = 0.75 vCPU as well.
+
+Why each one:
+
+- **`db` 384m** is roughly triple PostgreSQL's expected resident size here (128 MB of shared
+  buffers plus a handful of Prisma connections). Deliberately loose: an OOM-killed database is a
+  corrupted staging run, not a tidy failure. If it is ever killed — `docker inspect` reports
+  `OOMKilled` — raise this one rather than lowering the others.
+- **`web` 512m** against a standalone Next.js server that sits well under 200 MB, leaving room for
+  a restart, a burst of requests and the V8 heap without making this stack the reason the host
+  swaps.
+- **`worker` 256m and 0.15 CPU** is the smallest allowance, because a pg-boss loop that wakes,
+  polls and sleeps has no user waiting on it. It is the right service to squeeze first.
+- **`migrate` 512m and 0.50 CPU** is the most generous, and costs nothing in steady state because
+  the container exits before `web` and `worker` start. `web` and `worker` wait on it completing
+  **successfully**, so an OOM kill there does not fail one request — it halts the entire startup.
+  Its memory ceiling is never lower than `web`'s, which a test enforces.
+
+`mem_reservation` is set well below each limit on purpose. A reservation is a floor the kernel
+tries to protect; setting it near the limit would make this stack the *last* thing reclaimed under
+pressure, which is backwards on someone else's host.
+
+These use the plain Compose keys `cpus`, `mem_limit` and `mem_reservation`, which `docker compose
+up` enforces directly. `deploy.resources` is not used: it is the Swarm spelling, and a limit that
+is silently ignored on a one-vCPU box is the worst of both worlds.
+
+**Assumption: the host has at least 2 GiB of RAM.** Check before the first start, and scale the
+numbers down if it has less:
+
+```bash
+free -m
+nproc
+```
 
 ### 13.3 DNS — before anything else
 
@@ -586,3 +668,40 @@ The same policy is asserted statically in `tests/unit/compose-exposure.test.ts` 
 `tests/unit/deploy-config.test.ts`, which fail the gate on every commit if the Compose file
 stops publishing exactly `127.0.0.1:3100:3000`, if a proxy service appears in it, or if the
 fragment ever points somewhere other than `127.0.0.1:3100`.
+
+### 13.7 First startup: watch what it does to the host — required, not optional
+
+**OCI agent.** Immediately after the first `up`, and again after the Caddy block goes live, watch
+the host for **at least five minutes** before walking away. This stack is a guest on a one-vCPU
+machine; the limits in §13.2 are ceilings, not predictions.
+
+```bash
+# Live view. Leave it running for a few minutes; watch OUR containers and OpenBot's together.
+docker stats
+
+# One-shot snapshot, easier to paste into a report:
+docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}'
+
+# Host pressure. si/so are swap in and out: sustained non-zero means the host is thrashing.
+vmstat 1 10
+free -m
+uptime            # load average on ONE core: sustained > 2.0 is trouble
+```
+
+Then check the neighbours are still healthy, by whatever means the owner normally uses for
+OpenClaw/OpenBot — their own health endpoint, their logs, or simply that they still answer.
+
+**STOP THE DEPLOYMENT if any of these is true:**
+
+| Signal | What to do |
+|---|---|
+| OpenClaw/OpenBot becomes unhealthy, unresponsive, or starts erroring | `docker compose -f docker-compose.staging-cohost.yml --env-file .env.staging down` and report before doing anything else |
+| `vmstat` shows sustained swap in/out, or `free -m` shows available memory near zero | Same. Heavy swapping on one vCPU degrades every service on the host, not just this one |
+| Load average stays above ~2.0 on the single core with no work being done | Same |
+| A WalaaPlus container is repeatedly restarting, or `docker inspect <container>` reports `OOMKilled` | Stop, raise that one service's `mem_limit`, and report which service and what it was doing |
+
+Stopping is cheap and reversible: `down` removes the containers and leaves the database volume,
+the images and the certificate alone. Bringing it back up later is another `up -d`.
+
+Record the `docker stats --no-stream` snapshot and the neighbours' status in the deployment
+report. "It seemed fine" is not a result; the table is.
