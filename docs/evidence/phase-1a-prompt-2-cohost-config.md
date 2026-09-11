@@ -12,10 +12,15 @@
 **PASS — the configuration is written, validated locally, and ready for review.** It has not been
 deployed, and deploying it is not part of this task.
 
-**Round 3 (§10): a real deployment attempt failed, and the defect it found is fixed.** The
-first staging deployment applied its migrations successfully and then stopped inside the `migrate`
-container when role setup could not resolve a module. `web` and `worker` never started and Caddy
-was never changed. See §10.
+**Round 4 (§11): the second deployment attempt got further and found the next defect, also
+fixed.** Database healthy, migrations applied, runtime role created, `web` and `worker` started,
+and then the deployment correctly stopped before Caddy because the `web` container was unhealthy:
+the standalone server was not listening on its own loopback. See §11.
+
+**Round 3 (§10): the first deployment attempt failed, and the defect it found is fixed.** It
+applied its migrations successfully and then stopped inside the `migrate` container when role
+setup could not resolve a module. `web` and `worker` never started and Caddy was never changed.
+See §10.
 
 **Round 2 (§9): both review findings remediated.** Forwarded IP headers are no longer trusted in
 the co-hosted shape, and all four services now carry CPU and memory ceilings. The figures in the
@@ -50,7 +55,11 @@ nothing was pushed.
 | 6 | `7a95d26` | docs: fill in row 5 |
 | 7 | `bed552f` | fix(docker): ship the module the migrate entrypoint imports |
 | 8 | `8b9d577` | docs: the migrate-image remediation |
-| 9 | (this commit) | docs: fill in row 8 |
+| 9 | `9d8d1c8` | docs: fill in row 8 |
+| 10 | `354694a` | docs: correct the deployment record - migrations completed, role setup failed |
+| 11 | `6f0c270` | docs(ops): correct the migrate failure message an operator will read |
+| 12 | `887d18a` | fix(deploy): bind the standalone server on container loopback, and prove it in a real container |
+| 13 | (this commit) | docs: the web container health remediation |
 
 Files in commit 1:
 
@@ -308,7 +317,7 @@ Every item here was in reach and was left alone on purpose.
 | # | Sev | Item | Follow-up |
 |---|---|---|---|
 | ~~C-1~~ | **CLOSED in round 2 (§9.1)** | ~~`TRUST_PROXY_HEADERS=true` trusts every local process here.~~ The setting is now `false` and a test prevents its return. The residual is that per-IP rate limiting is unavailable in this shape, which is a documented consequence rather than a defect | Recoverable by moving to a dedicated server (`docker-compose.staging.yml`) |
-| C-2 | Low | ~~The co-hosted stack has never been run.~~ **It has now: the first attempt failed inside `migrate` (§10) and is fixed.** The stack still has not completed a full start on that host | Owner/OCI agent, resume at runbook §13.4 |
+| C-2 | Low | ~~The co-hosted stack has never been run.~~ **Two attempts: the first failed inside `migrate` (§10), the second reached a started application and failed its web healthcheck (§11). Both are fixed.** The stack still has not completed a full healthy start on that host | Owner/OCI agent, resume at runbook §13.4 |
 | C-3 | Low | `staging.truebiznes.com` is now hardcoded in the fragment | Correct for a reviewed fragment naming one site. If the hostname changes, the fragment changes with it |
 | C-4 | Low | Backups (§6) write to the same host they protect | Unchanged from before; owner decision C2 |
 | C-5 | Low | The real-device checklist (§12) is still unperformed | Blocked until staging is live; unchanged by this work |
@@ -733,4 +742,186 @@ to documentation, so the script was not touched. Recorded here so it is not lost
 
 ---
 
-**PASS — MIGRATE IMAGE REMEDIATION COMPLETE — READY TO RESUME STAGING DEPLOYMENT**
+---
+
+## 11. Round 4 — the second deployment attempt, and the web healthcheck defect it found
+
+This section records a **second failed deployment**. It got considerably further than the first.
+Nothing in it claims staging is running.
+
+### 11.1 What happened, step by step
+
+| Step | Outcome |
+|---|---|
+| `db` starts and reports healthy | **passed** |
+| `prisma migrate deploy` as the migrator role | **completed.** Migrations applied |
+| `scripts/db-roles.mjs` — restricted runtime role and grants | **completed.** The runtime role was created. This is the step that failed in round 3; the fix in `bed552f` worked |
+| `migrate` exits 0 | **passed** |
+| `web` and `worker` start | **both started** |
+| Worker health, from inside its container | **OK** |
+| Host request to `http://127.0.0.1:3100/api/health` | **`{"status":"ok"}`** |
+| `web` container healthcheck | **FAILED**: `wget: can't connect to remote host (127.0.0.1): Connection refused` |
+| Deployment halted before touching Caddy | **correct** |
+
+**The WalaaPlus containers were removed without deleting volumes.** `down` was used, not
+`down -v`. The `walaaplus-staging-cohost_db-data` volume still exists, now holding a migrated
+schema **and** the runtime role.
+
+**Caddy was untouched.** No site block inserted, no reload, no certificate requested.
+
+**Nothing is claimed beyond that.** Staging is not deployed. No real-device check was performed.
+
+### 11.2 The defect
+
+Two observations that look contradictory were both correct:
+
+```
+from the host      GET http://127.0.0.1:3100/api/health   ->  {"status":"ok"}
+inside the container  wget http://127.0.0.1:3000/...      ->  Connection refused
+```
+
+The Next standalone server begins with:
+
+```js
+const hostname = process.env.HOSTNAME || "0.0.0.0"
+```
+
+**Docker sets `HOSTNAME` to the container ID** unless it is overridden. So the server did not fall
+back to `0.0.0.0`; it bound the container's **bridge address alone**. A published port forwards to
+that bridge address, which is why the host got a healthy answer. Nothing was listening on the
+container's own loopback, which is why its healthcheck was refused.
+
+**The healthcheck was right and the binding was wrong.** That is worth stating plainly, because
+the tempting fix — point the healthcheck somewhere else — would have hidden a real problem: a
+process that is not on loopback is also not reachable by anything else that expects the
+conventional binding.
+
+This is a property of a **running container in Docker's default environment**. The application
+code is correct, the Compose file was valid, the image built and started. No source-tree check
+could have seen it.
+
+### 11.3 The fix — `887d18a`
+
+Every Compose file that runs this image now sets, on the `web` service:
+
+```yaml
+HOSTNAME: "0.0.0.0"
+```
+
+That restores the server's own documented default: listen on every interface **inside the
+container**, loopback included.
+
+**It publishes nothing new.** What a process listens on inside its container is not what Docker
+exposes to the host; the `ports` and `expose` lines are untouched. A test asserts that too,
+because it is the obvious misreading of this change.
+
+**Every security constraint is preserved**, verified from the resolved configuration:
+
+```
+docker-compose.yml                   HOSTNAME=0.0.0.0 | ports=[]                        | TRUST=true
+docker-compose.staging.yml           HOSTNAME=0.0.0.0 | ports=[]                        | TRUST=true
+docker-compose.staging-cohost.yml    HOSTNAME=0.0.0.0 | ports=["127.0.0.1:3100->3000"]  | TRUST=false
+```
+
+Loopback-only publishing for co-hosted staging, no database host port, no proxy container,
+`TRUST_PROXY_HEADERS=false` in the co-hosted shape, the resource limits, and no external networks
+or volumes: all unchanged.
+
+The local file has no loopback healthcheck today — the proxy reaches `web:3000` by service name,
+which works on the bridge address — so its override is preventive, so that adding one later does
+not rediscover this.
+
+### 11.4 The regression test runs a real container
+
+`scripts/check-web-image.mjs`, a new gate step. It builds `--target web` and runs **two real
+containers**:
+
+| | Binding observed | Loopback probe |
+|---|---|---|
+| Docker's default `HOSTNAME` | `172.17.0.2:3000` | **ECONNREFUSED** — the incident, reproduced |
+| `HOSTNAME=0.0.0.0` | `0.0.0.0:3000` | **HTTP 503** |
+
+It reads the bound address from `netstat` inside the container, because "is it listening" is not
+the question here — "listening on what" is.
+
+HTTP 503 is the correct and expected answer: the containers get an obviously-placeholder database
+URL pointing at nothing, and `/api/health` runs `SELECT 1`. Any status proves what matters, that
+something on loopback is speaking HTTP, which is exactly what the healthcheck needs and exactly
+what was missing.
+
+It then requires every Compose file to carry the override, and **fails if one loses it**.
+
+The reproduction step is **reported, not asserted**. If a future Next release binds `0.0.0.0`
+regardless of `HOSTNAME`, that step stops reproducing and the override becomes harmless rather
+than required; failing a gate because upstream fixed a bug would be absurd. The load-bearing
+assertions are the positive probe and the configuration check.
+
+A fast static guard in `tests/unit/compose-exposure.test.ts` complements it and **cannot replace
+it** — a YAML file cannot tell you what a server binds. It also rejects an *interpolated*
+`HOSTNAME`, which is how this would silently come back.
+
+**Mutation-tested**, with every file restored byte-identical afterwards (sha256 verified):
+
+| Mutation | Result |
+|---|---|
+| Remove the override from the co-hosted file, run the container check | **FAIL**, naming the file and explaining the consequence |
+| Remove it, run the static guard | **FAIL** on two assertions |
+| Change it to `"${WEB_BIND:-0.0.0.0}"` | **FAIL** on two assertions |
+
+### 11.5 Verification, on `887d18a`
+
+```
+GATE SUMMARY
+PASS  dependency audit (prod, high+)             1141 ms
+PASS  prisma generate                            1991 ms
+PASS  lint                                       6485 ms
+PASS  typecheck                                  2979 ms
+PASS  prisma validate                            1574 ms
+PASS  unit tests                                 1788 ms
+PASS  test db up                                 1143 ms
+PASS  migrate deploy (test db, migrator role)    5756 ms
+PASS  migrate status (test db)                   5615 ms
+PASS  runtime role grants (test db)               179 ms
+PASS  integration tests                        195234 ms
+PASS  worker build                                138 ms
+PASS  production build                          16133 ms
+PASS  migrate image dependencies                 2847 ms
+PASS  web image container health                26278 ms
+GATE PASSED in 269.3s (15/15 steps)
+```
+
+| Check | Result |
+|---|---|
+| unit / integration | **209** (13 files) / **368** (31 files) |
+| `npm run test:e2e` | **3 passed (34.0 s)** |
+| `npm audit --omit=dev --audit-level=high` | **0 vulnerabilities** |
+| `npm audit` (full tree) | **0 vulnerabilities** |
+| `docker compose config --quiet` — all three, non-secret placeholders | **all valid** |
+| `node scripts/check-web-image.mjs` standalone | **OK** |
+| `git diff --check` | clean |
+
+### 11.6 The staging volume, again
+
+Unchanged advice, with one addition: the volume now holds a migrated schema **and** the runtime
+role, because round 4 got past the step that failed in round 3. It still holds no application
+data — `web` never became healthy, so nothing wrote a business, a card or a ledger row.
+
+**Do not delete it.** Both startup steps remain idempotent: `prisma migrate deploy` will report
+the schema is up to date, and `db-roles.mjs` will re-apply the grants it already applied.
+
+### 11.7 What this round did not do
+
+- **It did not deploy anything.** No OCI host was contacted from this session.
+- **No Caddy file was read, written, reloaded or restarted**; no DNS record touched; no
+  certificate requested.
+- **No real-device check was performed.** §8's checklist remains entirely unperformed.
+- **No application behaviour was changed.** The fix is deployment configuration: three Compose
+  files, one new check script, one gate step, and static guards. No application code, no
+  Dockerfile, no schema, no Caddy configuration, no secret.
+- **No claim is made that staging works.** Two containers were proven to behave correctly; the
+  deployment has not been re-attempted.
+- `master` is untouched at `b9ee686`.
+
+---
+
+**PASS — WEB CONTAINER HEALTH REMEDIATION COMPLETE — READY TO RESUME STAGING DEPLOYMENT**
