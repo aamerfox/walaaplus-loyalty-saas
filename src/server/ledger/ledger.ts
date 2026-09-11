@@ -59,10 +59,22 @@ function isRootClient(db: DbClient): db is PrismaClient {
   return "$transaction" in db;
 }
 
-/** Run `fn` inside `db` if it is already a transaction, otherwise open one. */
+/**
+ * Run `fn` inside `db` if it is already a transaction, otherwise open one.
+ *
+ * `maxWait` is how long a caller waits for a free connection before the write FAILS. Prisma's
+ * default is 2 s, which is short for this workload: a busy branch at closing time, or a queue of
+ * scans landing on one card, makes writes queue behind the row lock by design. A burst should
+ * wait and then succeed, not error — the customer is standing at the counter. 10 s is still well
+ * inside the 15 s statement timeout, so a genuinely stuck transaction still fails loudly.
+ */
 async function inTransaction<T>(db: DbClient, fn: (tx: Tx) => Promise<T>): Promise<T> {
   if (isRootClient(db)) {
-    return db.$transaction(fn, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted, timeout: 15_000 });
+    return db.$transaction(fn, {
+      isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+      timeout: 15_000,
+      maxWait: 10_000,
+    });
   }
   return fn(db);
 }

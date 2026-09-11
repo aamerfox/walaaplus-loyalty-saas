@@ -67,7 +67,7 @@ Prerequisites: Node 24 (`.nvmrc`), Docker Desktop, npm 11.
 ```bash
 cp .env.example .env            # then fill values; nothing in .env.example is a real value
 npm ci
-docker compose up -d db         # application database on ${POSTGRES_PORT:-5433}
+docker compose up -d db         # application database on 127.0.0.1:${POSTGRES_PORT:-5433}
 npm run db:migrate              # apply committed migrations AS THE MIGRATOR (MIGRATE_DATABASE_URL)
 npm run db:roles                # create/refresh the restricted runtime role named in DATABASE_URL
 npm run db:seed                 # optional dev owner; refuses NODE_ENV=production
@@ -96,7 +96,7 @@ process never schedules work itself.
 | `npm run build:worker` | compile `src/worker/index.ts` to `dist/worker/index.mjs` with esbuild (ESM bundle; pg-boss, pg and Prisma stay external) |
 | `npm run worker` | start the compiled bundle — what the container runs, no TypeScript loader |
 | `npm run worker:dev` | tsx watch, restart on change (development only) |
-| `GET :8081/health`, `/ready` | 200 once pg-boss started, 503 while connecting |
+| `GET :8081/health`, `/ready` | 200 once pg-boss started, 503 while connecting. Served on the container's own port, **not published**: probe it from inside with `docker compose exec worker wget -qO- http://localhost:8081/health` |
 | `docker compose --profile app up worker` | containerised (needs a build) |
 
 The worker image (`Dockerfile --target worker`) contains production `node_modules`, the generated
@@ -240,7 +240,7 @@ deploys**.
 | Health endpoints | Configuring monitoring and backups |
 | — | Pushing to `master`; every deployment |
 
-Container topology: `proxy` (Caddy, `deploy/Caddyfile`, the only published service) → `web` (Next
+Container topology: `proxy` (Caddy, `deploy/Caddyfile`, the only service on a public interface) → `web` (Next
 standalone) + `worker` (compiled pg-boss bundle) → `postgres`, with a one-shot `migrate` container
 that must **complete successfully before web and worker start** (`depends_on: condition: service_completed_successfully`). It runs `db-migrate deploy`
 then `db-roles` as the migrator; it is the only container that ever receives `MIGRATE_DATABASE_URL`.
@@ -357,6 +357,26 @@ decoration rather than a control. The boundary is therefore explicit on both sid
   it actually received, and strips `Forwarded`, `X-Forwarded-Server`, `X-Client-IP`,
   `CF-Connecting-IP` and `True-Client-IP` outright. `web` is **not** published to the host — only
   `proxy` is (`WEB_PORT`, default 8080) — so there is no path to the application that bypasses it.
+
+#### What each service publishes
+
+A Compose mapping written `"5433:5432"` binds **0.0.0.0**, which on a VPS is every interface
+including the public one. Only the proxy may do that.
+
+| Service | Binding | Why |
+|---|---|---|
+| `proxy` | `${WEB_PORT:-8080}:80` — **public** | the entry point; the only thing meant to be reachable |
+| `db` | `127.0.0.1:${POSTGRES_PORT:-5433}:5432` — loopback | host tooling: `prisma migrate`, `psql`, `npm run db:seed`. Production can drop this mapping entirely, since `web`, `worker` and `migrate` reach the database over the Compose network |
+| `test-db` | `127.0.0.1:${TEST_POSTGRES_PORT:-5435}:5432` — loopback | the integration suite runs on the host |
+| `web` | `expose: 3000` — container only | reached through `proxy`; see above |
+| `worker` | `expose: 8081` — container only | the health endpoint exists for the orchestrator, which probes it from inside the container |
+| `migrate` | none | runs to completion and exits |
+
+`tests/unit/compose-exposure.test.ts` parses `docker-compose.yml` on every gate run and fails if
+any service other than `proxy` gains a public binding, if a loopback service loses its
+`127.0.0.1` prefix, or if `web`, `worker` or `migrate` publish anything at all. It needs no Docker
+daemon, and it masks `${VAR:-default}` before splitting a mapping — the colon inside the default
+would otherwise make a public `"${POSTGRES_PORT:-5433}:5432"` look like a bound `ip:host:container`.
 
 A deployment that exposes the app directly must leave `TRUST_PROXY_HEADERS` unset. It then has no
 per-address limiting, by design and visibly, rather than a limit that looks present and is not.

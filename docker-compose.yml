@@ -27,8 +27,12 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env (see .env.example)}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env (see .env.example)}
       POSTGRES_DB: ${POSTGRES_DB:-loyalty}
+    # LOOPBACK ONLY. Host tooling (prisma migrate, psql, the seed) connects over this, but
+    # "5433:5432" would bind 0.0.0.0 and publish the database to every interface of the host —
+    # on a VPS that means the internet. Production can drop this mapping entirely: `web`,
+    # `worker` and `migrate` reach the database over the Compose network, not through the host.
     ports:
-      - "${POSTGRES_PORT:-5433}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
     volumes:
       - db-data:/var/lib/postgresql/data
     healthcheck:
@@ -45,8 +49,10 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env (see .env.example)}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env (see .env.example)}
       POSTGRES_DB: loyalty_test
+    # LOOPBACK ONLY, same reasoning as `db`. The integration suite runs on the host and needs
+    # this; nothing else may reach it.
     ports:
-      - "${TEST_POSTGRES_PORT:-5435}:5432"
+      - "127.0.0.1:${TEST_POSTGRES_PORT:-5435}:5432"
     tmpfs:
       - /var/lib/postgresql/data
     healthcheck:
@@ -106,8 +112,12 @@ services:
       # RUNTIME role only. pg-boss owns the `pgboss` schema; it needs nothing in `public`.
       DATABASE_URL: postgresql://${APP_DB_USER:-walaaplus_app}:${APP_DB_PASSWORD:?Set APP_DB_PASSWORD in .env (runtime role)}@db:5432/${POSTGRES_DB:-loyalty}?schema=public
       WORKER_HEALTH_PORT: 8081
-    ports:
-      - "8081:8081"
+    # NOT published: the health endpoint exists for the container orchestrator, which probes it
+    # from inside (see healthcheck below). Publishing it would put an unauthenticated status
+    # endpoint on the host for no benefit. To read it by hand:
+    #   docker compose exec worker wget -qO- http://localhost:8081/health
+    expose:
+      - "8081"
     depends_on:
       db:
         condition: service_healthy
@@ -126,6 +136,9 @@ services:
     profiles: ["app"]
     image: caddy:2-alpine
     restart: unless-stopped
+    # THE ONLY PUBLIC BINDING IN THIS FILE. Everything else is either container-only (`web`,
+    # `worker`, `migrate`) or bound to 127.0.0.1 for host tooling (`db`, `test-db`).
+    # tests/unit/compose-exposure.test.ts fails the gate if that stops being true.
     ports:
       - "${WEB_PORT:-8080}:80"
     volumes:

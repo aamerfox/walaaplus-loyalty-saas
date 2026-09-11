@@ -82,7 +82,9 @@ export async function runIdempotent<T extends Prisma.InputJsonValue>(args: RunId
         });
         return out.result;
       },
-      { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted, timeout: 20_000 },
+      // maxWait: see the note in ledger.ts. Concurrent first attempts on one key deliberately
+      // serialise on the unique index, so waiting for a connection is the normal path here.
+      { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted, timeout: 20_000, maxWait: 10_000 },
     );
     return { result, replayed: false };
   } catch (e) {
