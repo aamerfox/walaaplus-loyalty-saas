@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { ConflictError } from "@/server/errors";
 import { clientIp, errorResponse } from "@/server/http";
 import { consumeRegisterLimit } from "@/server/security/rate-limit";
 import { registerBusinessOwner } from "@/server/registration/register";
@@ -7,11 +8,35 @@ import { registerBusinessOwner } from "@/server/registration/register";
  * POST /api/auth/register
  * Creates User + Business + OWNER membership + Main location atomically (service layer).
  *
- * Public by nature, so it is rate limited per client address in the DATABASE
- * (src/server/security/rate-limit.ts), not in process memory: the limit must survive a restart
- * and hold across web processes. The refusal body is fixed text — it never says which window
- * was exhausted, and it is identical whether or not the submitted email belongs to an account.
+ * **This route never reveals whether an email already has an account.** A submission that
+ * conflicts with an existing account and one that creates a new one produce the SAME status and
+ * the SAME body, so the endpoint cannot be used to enumerate customers of the platform. The
+ * service still raises ConflictError internally — the seed and the admin paths need the truth —
+ * and it is this route, the public boundary, that flattens it.
+ *
+ * Two details make the two paths genuinely indistinguishable rather than merely similar:
+ *  - the response carries no identifier of the created business, so there is nothing to compare;
+ *  - `registerBusinessOwner` hashes the password BEFORE it opens its transaction, so both paths
+ *    pay the same bcrypt cost and the duplicate case is not measurably faster.
+ *
+ * The caller is told to sign in, which works for exactly one of the two people who can see this
+ * response: whoever owns the password for that address. When the email provider of decision D3
+ * lands in Phase 1a, this becomes the usual "check your inbox" confirmation and the existing-
+ * account case is told so by email rather than by HTTP.
+ *
+ * Rate limited per client address.
  */
+
+/** The single answer both outcomes get. Fixed shape, fixed status, no identifiers. */
+const ACCEPTED = {
+  status: "accepted",
+  message: "If this email can be registered, the account is ready. Please sign in to continue.",
+} as const;
+
+function accepted(): NextResponse {
+  return NextResponse.json(ACCEPTED, { status: 202 });
+}
+
 export async function POST(req: Request) {
   const ip = clientIp(req);
   const limit = await consumeRegisterLimit(ip);
@@ -26,10 +51,13 @@ export async function POST(req: Request) {
   if (!body || typeof body !== "object") {
     return NextResponse.json({ error: { code: "VALIDATION_ERROR", message: "JSON body required" } }, { status: 400 });
   }
+
   try {
-    const result = await registerBusinessOwner(body as Parameters<typeof registerBusinessOwner>[0], { ipAddress: ip });
-    return NextResponse.json({ businessId: result.businessId }, { status: 201 });
+    await registerBusinessOwner(body as Parameters<typeof registerBusinessOwner>[0], { ipAddress: ip });
   } catch (e) {
-    return errorResponse(e);
+    // A duplicate email is answered exactly like a successful registration. Every other failure
+    // (validation, database) keeps its own status: those describe the request, not the account.
+    if (!(e instanceof ConflictError)) return errorResponse(e);
   }
+  return accepted();
 }
