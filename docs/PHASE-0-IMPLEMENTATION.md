@@ -89,10 +89,16 @@ process never schedules work itself.
 
 | Command | Purpose |
 |---|---|
-| `npm run worker` | start (tsx) |
-| `npm run worker:dev` | restart on change |
+| `npm run build:worker` | compile `src/worker/index.ts` to `dist/worker/index.mjs` with esbuild (ESM bundle; pg-boss, pg and Prisma stay external) |
+| `npm run worker` | start the compiled bundle — what the container runs, no TypeScript loader |
+| `npm run worker:dev` | tsx watch, restart on change (development only) |
 | `GET :8081/health`, `/ready` | 200 once pg-boss started, 503 while connecting |
 | `docker compose --profile app up worker` | containerised (needs a build) |
+
+The worker image (`Dockerfile --target worker`) contains production `node_modules`, the generated
+Prisma client and the bundle — no source tree, no `tsx`, no dev dependencies. The gate builds the
+bundle on every run. The worker connects as the runtime role and never needs `CREATE` on the
+database: the `pgboss` schema is created for it by `npm run db:roles` (`createSchema: false`).
 
 Registered queues in Phase 0: `system.smoke` only — a harmless job proving connectivity and
 processing. Business jobs (expiry, birthday, reconciliation, push) arrive with their phases, each
@@ -214,13 +220,17 @@ deploys**.
 
 | The agent produces | The owner performs |
 |---|---|
-| `Dockerfile` (targets `web`, `worker`), `docker-compose.yml`, CI workflow | Provisioning servers, domains, TLS certificates |
+| `Dockerfile` (targets `migrate`, `web`, `worker`), `docker-compose.yml`, CI workflow | Provisioning servers, domains, TLS certificates |
 | Scripts, runbooks, variable names | Creating and storing every real secret |
 | Migration files, `scripts/db-migrate.mjs`, `scripts/db-roles.mjs` | Running `npm run db:migrate && npm run db:roles` against staging/production |
 | Health endpoints | Configuring monitoring and backups |
 | — | Pushing to `master`; every deployment |
 
-Container topology: `caddy/nginx (TLS)` → `web` (Next standalone) + `worker` (pg-boss) → `postgres`.
+Container topology: `caddy/nginx (TLS)` → `web` (Next standalone) + `worker` (compiled pg-boss bundle)
+→ `postgres`, with a one-shot `migrate` container that must **complete successfully before web and
+worker start** (`depends_on: condition: service_completed_successfully`). It runs `db-migrate deploy`
+then `db-roles` as the migrator; it is the only container that ever receives `MIGRATE_DATABASE_URL`.
+Web and worker therefore cannot start against an unmigrated database, and never hold owner credentials.
 Service workers, installability and web push require HTTPS, so **staging needs a real certificate
 before Phase 1a Prompt 2** (decision B3).
 
@@ -246,3 +256,11 @@ schema and seed, `src/lib/auth.ts`, `src/lib/prisma.ts`, `src/middleware.ts`, ev
 `src/app/api/**` except NextAuth, and the mock pages that called those routes. Static marketing and
 shell pages remain as visual reference until Phase 1a rebuilds them. Dependencies used only by the
 wallet stubs (`google-auth-library`, `passkit-generator`) were removed.
+
+The dashboard sidebar (`src/components/dashboard/Sidebar.tsx`) lists only routes in its
+`IMPLEMENTED_ROUTES` set — currently the dashboard home. The remaining mock pages are unreachable
+from navigation until the commit that implements each one adds its route.
+
+`POST /api/auth/register` is rate limited per client address (10 attempts / 15 minutes, HTTP 429
+with `Retry-After`) by an in-process fixed-window limiter (`src/server/rate-limit.ts`). It is
+per web replica; a shared store replaces it when the platform runs more than one replica.

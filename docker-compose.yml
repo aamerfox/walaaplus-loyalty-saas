@@ -10,7 +10,11 @@
 #
 #   docker compose up -d db          # application database
 #   docker compose up -d test-db     # disposable integration-test database (tmpfs, wiped on stop)
-#   docker compose --profile app up  # web + worker containers (requires a build)
+#   docker compose --profile app up  # migrate (one-shot) -> web + worker containers (requires a build)
+#
+# Start order under --profile app: db healthy -> migrate runs to completion (migrations + runtime
+# role grants, as the migrator) -> web and worker start. Web and worker therefore can never run
+# against an unmigrated database or without their role, and never hold the migrator credentials.
 
 services:
   db:
@@ -48,6 +52,21 @@ services:
       timeout: 3s
       retries: 15
 
+  # One-shot migrator: `prisma migrate deploy` + `scripts/db-roles.mjs`, then exits 0.
+  # The ONLY service that receives the migrator credentials.
+  migrate:
+    profiles: ["app"]
+    build:
+      context: .
+      target: migrate
+    environment:
+      MIGRATE_DATABASE_URL: postgresql://${POSTGRES_USER:?Set POSTGRES_USER in .env}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-loyalty}?schema=public
+      DATABASE_URL: postgresql://${APP_DB_USER:-walaaplus_app}:${APP_DB_PASSWORD:?Set APP_DB_PASSWORD in .env (runtime role)}@db:5432/${POSTGRES_DB:-loyalty}?schema=public
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+
   # Next.js standalone server. Opt-in via `--profile app`.
   web:
     profiles: ["app"]
@@ -64,6 +83,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
   # pg-boss background worker. A SEPARATE process from web; it never runs inside a request.
   worker:
@@ -81,6 +102,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8081/health || exit 1"]
       interval: 10s

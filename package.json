@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "build:worker": "node scripts/build-worker.mjs",
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
@@ -21,7 +22,7 @@
     "db:seed": "tsx prisma/seed.ts",
     "db:test:up": "docker compose up -d --wait test-db",
     "db:test:down": "docker compose down test-db",
-    "worker": "tsx src/worker/index.ts",
+    "worker": "node dist/worker/index.mjs",
     "worker:dev": "tsx watch src/worker/index.ts",
     "gate": "node scripts/gate.mjs"
   },
@@ -51,6 +52,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "dotenv": "^17.4.2",
+    "esbuild": "^0.28.2",
     "eslint": "^9",
     "eslint-config-next": "^16.3.4",
     "prisma": "^6.19.2",

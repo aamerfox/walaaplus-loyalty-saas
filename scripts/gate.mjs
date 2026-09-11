@@ -13,7 +13,8 @@
  *   8. prisma migrate status  → must report "up to date"
  *   9. runtime role grants    → scripts/db-roles.mjs creates the restricted role in TEST_DATABASE_URL
  *  10. integration tests      (real PostgreSQL, connected as the RUNTIME role)
- *  11. production build
+ *  11. worker build           (esbuild bundle the worker container runs)
+ *  12. production build
  *
  * Playwright end-to-end tests are intentionally excluded; they are slow and belong to
  * `npm run test:e2e` from Phase 1a onwards.
@@ -69,6 +70,7 @@ const steps = [
     expectOutput: /db-roles: OK role/,
   },
   { name: "integration tests", cmd: "npx vitest run --project integration" },
+  { name: "worker build", cmd: "node scripts/build-worker.mjs" },
   { name: "production build", cmd: "npx next build" },
 ];
 

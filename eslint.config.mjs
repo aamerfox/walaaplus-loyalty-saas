@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Compiled worker bundle (scripts/build-worker.mjs)
+    "dist/**",
     // Generated / scratch / test output
     "playwright-results/**",
     "playwright-report/**",
