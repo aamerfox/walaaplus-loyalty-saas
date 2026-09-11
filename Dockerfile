@@ -40,6 +40,13 @@ COPY --from=deps --chown=app:app /app/node_modules ./node_modules
 COPY --chown=app:app package.json ./
 COPY --chown=app:app prisma ./prisma
 COPY --chown=app:app scripts/db-migrate.mjs scripts/db-roles.mjs ./scripts/
+# scripts/db-roles.mjs imports ./lib/db-role-membership.mjs. Copying only the two entry scripts
+# built an image that passed every source-tree check and then died on a real deployment with
+# ERR_MODULE_NOT_FOUND, inside the one container that runs before web and worker start. The whole
+# lib directory is copied, not that one file, so a helper added later arrives with it.
+# scripts/check-migrate-image.mjs builds this target and proves the module graph resolves INSIDE
+# the image; it is a gate step, because a source tree cannot answer this question.
+COPY --chown=app:app scripts/lib ./scripts/lib
 USER app
 CMD ["sh", "-c", "node scripts/db-migrate.mjs deploy && node scripts/db-roles.mjs"]
 

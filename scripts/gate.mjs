@@ -74,6 +74,11 @@ const steps = [
   { name: "integration tests", cmd: "npx vitest run --project integration" },
   { name: "worker build", cmd: "node scripts/build-worker.mjs" },
   { name: "production build", cmd: "npx next build" },
+  // Builds the `migrate` target and checks INSIDE the image. A staging deployment once died in
+  // that container with ERR_MODULE_NOT_FOUND while every source-tree check here was green: the
+  // Dockerfile copied two scripts and not the lib directory one of them imports. A source tree
+  // cannot answer whether an image is complete, so this step asks the image.
+  { name: "migrate image dependencies", cmd: "node scripts/check-migrate-image.mjs" },
 ];
 
 const results = [];
