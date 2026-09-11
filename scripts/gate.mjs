@@ -41,6 +41,9 @@ if (!testDbUrl) {
 const testEnv = { ...process.env, DATABASE_URL: testDbUrl, NODE_ENV: "test" };
 
 const steps = [
+  // Zero critical/high vulnerabilities in PRODUCTION dependencies. Dev-only tooling is audited
+  // separately by `npm audit` (full) and tracked in docs; nothing is allowlisted here.
+  { name: "dependency audit (prod, high+)", cmd: "npm audit --omit=dev --audit-level=high" },
   { name: "prisma generate", cmd: "npx prisma generate" },
   { name: "lint", cmd: "npx eslint ." },
   { name: "typecheck", cmd: "npx tsc --noEmit" },
