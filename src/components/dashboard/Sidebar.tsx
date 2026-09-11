@@ -2,7 +2,7 @@
 
 import { useTranslations } from "next-intl";
 import { Link, usePathname } from "@/i18n/routing";
-import { LayoutDashboard, Users, CreditCard, Settings, LogOut, QrCode, PieChart, ShieldCheck, MapPin, BellRing, Star, Share2, FileText, Server, Layers } from "lucide-react";
+import { LayoutDashboard, Users, CreditCard, Settings, LogOut, QrCode, PieChart, ShieldCheck, MapPin, BellRing, Star, Share2, FileText, Server, Layers, ScanLine } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 /**
@@ -10,7 +10,12 @@ import { cn } from "@/lib/utils";
  * from the original mock-up and stays HIDDEN until its phase lands (docs/PHASE-PLAN.md), so no one
  * mistakes a mock for a feature. Add a route here in the same commit that implements it.
  */
-const IMPLEMENTED_ROUTES: ReadonlySet<string> = new Set(["/business"]);
+const IMPLEMENTED_ROUTES: ReadonlySet<string> = new Set([
+  "/business",
+  "/business/customers",
+  "/business/team",
+  "/scanner",
+]);
 
 export default function Sidebar() {
   const t = useTranslations("Navigation");
@@ -18,6 +23,7 @@ export default function Sidebar() {
   
   const navItems = [
     { name: t("dashboard"), href: "/business", icon: LayoutDashboard },
+    { name: t("scanner"), href: "/scanner", icon: ScanLine },
     { name: t("customers"), href: "/business/customers", icon: Users },
     { name: t("rfm"), href: "/business/rfm", icon: PieChart },
     { name: t("cards"), href: "/business/cards/templates", icon: CreditCard },

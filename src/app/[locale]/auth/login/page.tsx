@@ -1,11 +1,11 @@
 "use client";
 
-import { useLocale } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import { Link } from "@/i18n/routing";
 import { Lock, Eye, EyeOff } from "lucide-react";
 import { useState } from "react";
 import { signIn } from "next-auth/react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 
 export default function LoginPage() {
   const locale = useLocale();
@@ -16,6 +16,22 @@ export default function LoginPage() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const router = useRouter();
+  const tc = useTranslations('Common');
+  const searchParams = useSearchParams();
+
+  /**
+   * Where to go after signing in.
+   *
+   * Only a path within this site is accepted — a `callbackUrl` of `https://elsewhere/` would turn
+   * the login form into an open redirect, which is worth more to a phisher than the form itself.
+   * The scanner's public login uses this to land a cashier on the scanner rather than the
+   * merchant dashboard.
+   */
+  const destination = (() => {
+    const requested = searchParams.get('callbackUrl');
+    if (requested && requested.startsWith('/') && !requested.startsWith('//')) return requested;
+    return `/${locale}/business`;
+  })();
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -29,10 +45,10 @@ export default function LoginPage() {
     });
 
     if (res?.error) {
-      setError(locale === 'ar' ? 'بيانات الاعتماد غير صحيحة' : 'Invalid credentials');
+      setError(tc('invalidCredentials'));
       setLoading(false);
     } else {
-      router.push(`/${locale}/business`);
+      router.push(destination);
       router.refresh();
     }
   };
