@@ -13,9 +13,17 @@ export interface TenantContext {
   readonly membershipId: string;
   readonly role: MembershipRole;
   readonly permissions: ReadonlySet<Permission>;
-  /** Location ids this member may operate at. `null` = unrestricted (owners, managers). */
+  /**
+   * Location scope.
+   *  - `null`  → unrestricted: every active location of the business (OWNER, MANAGER).
+   *  - `[]`    → NO location access (a CASHIER with nothing assigned). Never treated as unrestricted.
+   *  - `[...]` → exactly these locations (assigned CASHIER).
+   */
   readonly locationIds: readonly string[] | null;
 }
+
+/** Roles that may operate at any business location without explicit assignment. */
+const UNRESTRICTED_LOCATION_ROLES: ReadonlySet<MembershipRole> = new Set<MembershipRole>(["OWNER", "MANAGER"]);
 
 /**
  * Resolve the caller's ACTIVE membership in a business. Returns null when the user has no
@@ -48,7 +56,7 @@ export async function resolveMembership(
     membershipId: m.id,
     role: m.role,
     permissions: effectivePermissions(m.role, m.permissions),
-    locationIds: m.locations.length === 0 ? null : m.locations.map((l) => l.locationId),
+    locationIds: UNRESTRICTED_LOCATION_ROLES.has(m.role) ? null : m.locations.map((l) => l.locationId),
   };
 }
 
@@ -85,9 +93,9 @@ export async function requireLocationAccess(
     select: { id: true },
   });
   if (!location) throw new NotFoundError("Location not found");
-  if (ctx.locationIds !== null && !ctx.locationIds.includes(locationId)) {
-    throw new ForbiddenError("Not assigned to this location");
-  }
+  if (ctx.locationIds === null) return; // OWNER / MANAGER
+  if (ctx.locationIds.length === 0) throw new ForbiddenError("No locations assigned to this member");
+  if (!ctx.locationIds.includes(locationId)) throw new ForbiddenError("Not assigned to this location");
 }
 
 /** Convenience: the tenant filter every business-scoped query must include. */

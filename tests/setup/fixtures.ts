@@ -4,9 +4,11 @@
  * Production code must never do this (docs/PRODUCT-SPEC.md §2.6).
  */
 import { randomBytes, randomUUID } from "node:crypto";
-import { CardType, ProgramVersionStatus, TemplateStatus, type Prisma } from "@prisma/client";
+import { CardType, MembershipRole, OperationSource, ProgramVersionStatus, TemplateStatus, type Prisma } from "@prisma/client";
 import { prisma } from "@/server/db";
+import type { MemberActor, SystemActor } from "@/server/ledger/actor";
 import { registerBusinessOwner, type RegisterInput } from "@/server/registration/register";
+import { requireBusinessMembership, type TenantContext } from "@/server/tenant/context";
 
 const APP_TABLES = [
   "PushDelivery",
@@ -77,10 +79,20 @@ export interface CardFixture {
   cardId: string;
 }
 
-/** Owner + business + ACTIVE stamp template/version + customer + profile + card, all in one business. */
+export interface RewardTierFixture {
+  name: string;
+  requiredPoints: number;
+  rewardValueMinor?: number;
+}
+
+/**
+ * Owner + business + ACTIVE stamp template/version + customer + profile + card, all in one business.
+ * Reward tiers are created while the version is still DRAFT (the trigger forbids adding them later),
+ * then the version is activated — the same order production services will follow.
+ */
 export async function createBusinessWithCard(
-  opts: { mechanics?: Prisma.InputJsonObject; cardType?: CardType } = {},
-): Promise<CardFixture> {
+  opts: { mechanics?: Prisma.InputJsonObject; cardType?: CardType; rewardTiers?: RewardTierFixture[] } = {},
+): Promise<CardFixture & { rewardTierIds: string[] }> {
   const reg = await registerTestOwner();
 
   const template = await prisma.programTemplate.create({
@@ -92,15 +104,22 @@ export async function createBusinessWithCard(
       versions: {
         create: {
           versionNumber: 1,
-          status: ProgramVersionStatus.ACTIVE,
+          status: ProgramVersionStatus.DRAFT,
           mechanics: opts.mechanics ?? { stampsRequiredPerReward: 10, countRewardRedemptionAsVisit: false },
-          activatedAt: new Date(),
+          rewardTiers: {
+            create: (opts.rewardTiers ?? []).map((t, i) => ({ ...t, sortOrder: i })),
+          },
         },
       },
     },
-    include: { versions: true },
+    include: { versions: { include: { rewardTiers: true } } },
   });
-  const version = template.versions[0];
+  const draft = template.versions[0];
+  const version = await prisma.programVersion.update({
+    where: { id: draft.id },
+    data: { status: ProgramVersionStatus.ACTIVE, activatedAt: new Date() },
+  });
+  const rewardTierIds = draft.rewardTiers.map((t) => t.id);
 
   const customer = await prisma.customer.create({ data: { normalizedPhone: uniquePhone() } });
   const profile = await prisma.customerBusinessProfile.create({
@@ -128,5 +147,45 @@ export async function createBusinessWithCard(
     customerId: customer.id,
     profileId: profile.id,
     cardId: card.id,
+    rewardTierIds,
   };
+}
+
+/** Verified owner context for the fixture business, resolved from the database like production. */
+export async function ownerCtx(fx: { userId: string; businessId: string }): Promise<TenantContext> {
+  return requireBusinessMembership(prisma, fx.userId, fx.businessId);
+}
+
+/** Member actor (scanner by default) for the fixture owner. */
+export async function ownerActor(fx: { userId: string; businessId: string }, source: MemberActor["source"] = OperationSource.SCANNER): Promise<MemberActor> {
+  return { kind: "member", ctx: await ownerCtx(fx), source };
+}
+
+/** Explicit system actor for the fixture business. */
+export function systemActor(fx: { businessId: string }, source: SystemActor["source"] = OperationSource.SYSTEM, reason = "test fixture"): SystemActor {
+  return { kind: "system", businessId: fx.businessId, source, reason };
+}
+
+/** Create a staff user with the given role and location assignments; returns a verified context. */
+export async function createStaff(
+  fx: { businessId: string },
+  role: MembershipRole,
+  locationIds: string[] = [],
+): Promise<{ userId: string; membershipId: string; ctx: TenantContext }> {
+  const user = await prisma.user.create({ data: { email: uniqueEmail(role.toLowerCase()), passwordHash: "x", firstName: role } });
+  const m = await prisma.businessMembership.create({
+    data: {
+      businessId: fx.businessId,
+      userId: user.id,
+      role,
+      locations: { create: locationIds.map((locationId) => ({ locationId })) },
+    },
+  });
+  const ctx = await requireBusinessMembership(prisma, user.id, fx.businessId);
+  return { userId: user.id, membershipId: m.id, ctx };
+}
+
+export async function createLocation(fx: { businessId: string }, name: string): Promise<string> {
+  const l = await prisma.location.create({ data: { businessId: fx.businessId, name } });
+  return l.id;
 }
