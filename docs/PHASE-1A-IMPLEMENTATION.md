@@ -13,7 +13,7 @@ Phase 0 material it builds on: [PHASE-0-IMPLEMENTATION.md](PHASE-0-IMPLEMENTATIO
 | In Phase 1a Prompt 1 | Deliberately not |
 |---|---|
 | Stamp cards only | Points, cashback, discount, coupon, gift, membership |
-| One default `Main` location | Multi-location programs, geo rules |
+| One default `Main` location, **resolved by the server** | Multi-location programs, a location picker, geo rules |
 | Owner + cashiers | Managers as staff administrators, permission editor |
 | The `direct` enrollment source | Named UTM campaigns, referrals, promotions |
 | Enrollment by Syrian mobile number | Email or social identity, OTP restore |
@@ -87,7 +87,8 @@ the "already has a program" check.
 constraint, because Phase 1b lifts it and a constraint would then have to be dropped.
 
 **One location.** The program resolves the business's default `Main` location at creation and the
-whole phase operates there. `availableLocations` is not part of the contract.
+whole phase operates there. `availableLocations` is not part of the contract. §7.1 explains how
+that is enforced at write time.
 
 ---
 
@@ -188,6 +189,23 @@ Every one of them:
 3. reads mechanics from the version **pinned to the card**, never the program's current version;
 4. writes one atomic group through `appendOperationGroup`, which derives business and acting user
    from the verified actor and refuses a caller-supplied `transactionGroupId`.
+
+### 7.1 The location is not an input
+
+Phase 1a is one café at one counter, so **no verb accepts a `locationId`**. Every award,
+redemption and reversal attributes to the business's default `Main` location, resolved inside the
+transaction from the business itself. Supplying one anyway — which untyped JavaScript can still
+do — is refused before anything is validated or written, including when the value supplied is the
+correct one: the rule is about who decides, not about which id arrives.
+
+This is a **scope boundary, not a security boundary**. `requireLocationAccess` already stops a
+cashier acting outside their assignment, but an `OWNER` is unrestricted across their own
+locations, so without this rule a second counter could appear in the ledger and Phase 1b's
+multi-location work would begin by accident, underneath screens that were never designed for it.
+
+Phase 1b adds the parameter back deliberately, together with the program's `availableLocations`
+and a location picker. Until then, a second `Location` row may exist in the database and simply
+receives no operations.
 
 ### Conversion
 

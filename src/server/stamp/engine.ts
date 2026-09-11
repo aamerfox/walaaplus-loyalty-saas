@@ -46,6 +46,28 @@ export type StampOperationResult = {
   operations: { id: string; kind: OperationKind; unitType: UnitType; quantity: number; balanceAfter: number }[];
 };
 
+/**
+ * Phase 1a runs ONE café at ONE counter.
+ *
+ * The location is therefore not an input. Every award, redemption and reversal attributes to the
+ * business's default `Main` location, resolved inside the transaction from the business itself.
+ * A caller — a screen, a route handler, a script — cannot choose it, and supplying it anyway is
+ * REFUSED before anything is validated or written, rather than quietly honoured.
+ *
+ * This is a scope boundary, not a security boundary. `requireLocationAccess` already stops a
+ * cashier acting outside their assignment, but an OWNER is unrestricted across their own
+ * locations, so nothing else would stop a second counter appearing in the ledger and Phase 1b's
+ * multi-location work starting by accident. Phase 1b adds the parameter back deliberately, with
+ * the program's `availableLocations` and a location picker behind it.
+ */
+function assertNoCallerLocation(input: object): void {
+  if ("locationId" in input) {
+    throw new ValidationError(
+      "Phase 1a operates only at the business's Main location; locationId is resolved by the server and cannot be supplied",
+    );
+  }
+}
+
 /** Fields every counter action shares. */
 export interface StampActionInput {
   customerCardId: string;
@@ -56,8 +78,6 @@ export interface StampActionInput {
   idempotencyKey: string;
   /** SCANNER for a counter scan, DASHBOARD for a merchant acting from the back office. */
   source: MemberSource;
-  /** Defaults to the business's Main location, which is all Phase 1a has. */
-  locationId?: string;
   /** Internal note. Stored on the operation and never shown to the customer. */
   comment?: string;
 }
@@ -85,7 +105,6 @@ export interface ReverseGroupActionInput {
   reason: string;
   idempotencyKey: string;
   source: MemberSource;
-  locationId?: string;
 }
 
 /** One visit award grants one stamp. Phase 1a has no per-visit multiplier. */
@@ -263,6 +282,7 @@ async function runCardAction(
   payload: Record<string, unknown>,
   action: (tx: Tx, loaded: LoadedCard, actor: MemberActor, locationId: string, now: Date) => Promise<StampOperationResult>,
 ): Promise<StampOperationResult> {
+  assertNoCallerLocation(input);
   if (typeof input.idempotencyKey !== "string" || input.idempotencyKey.trim().length < 8) {
     throw new ValidationError("An idempotency key of at least 8 characters is required");
   }
@@ -276,7 +296,8 @@ async function runCardAction(
     payload: { ...payload, customerCardId: input.customerCardId, source: input.source },
     execute: async (tx) => {
       const now = new Date();
-      const locationId = input.locationId ?? (await getDefaultLocationId(tx, ctx.businessId));
+      // Always Main. Not a default the caller can override — the only location Phase 1a has.
+      const locationId = await getDefaultLocationId(tx, ctx.businessId);
       const loaded = await loadLockedStampCard(tx, ctx.businessId, input.customerCardId, now);
       const result = await action(tx, loaded, actor, locationId, now);
       return { result, transactionGroupId: result.transactionGroupId };
@@ -439,6 +460,7 @@ export async function redeemReward(ctx: TenantContext, input: RedeemRewardInput)
  * and then redeemed cannot be un-earned, and the error says to correct it manually instead.
  */
 export async function reverseStampOperation(ctx: TenantContext, input: ReverseGroupActionInput): Promise<StampOperationResult> {
+  assertNoCallerLocation(input);
   if (typeof input.idempotencyKey !== "string" || input.idempotencyKey.trim().length < 8) {
     throw new ValidationError("An idempotency key of at least 8 characters is required");
   }
@@ -449,13 +471,10 @@ export async function reverseStampOperation(ctx: TenantContext, input: ReverseGr
     key: input.idempotencyKey,
     payload: { op: "reverse", transactionGroupId: input.transactionGroupId, reason: input.reason },
     execute: async (tx) => {
+      // The compensating rows land at Main, like everything else this phase writes.
+      const locationId = await getDefaultLocationId(tx, ctx.businessId);
       const appended = await reverseOperationGroup(
-        {
-          actor,
-          transactionGroupId: input.transactionGroupId,
-          reason: input.reason,
-          locationId: input.locationId,
-        },
+        { actor, transactionGroupId: input.transactionGroupId, reason: input.reason, locationId },
         tx,
       );
       const loaded = await tx.customerCard.findFirstOrThrow({

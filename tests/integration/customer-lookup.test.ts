@@ -7,7 +7,7 @@
  * QR code to confirm that a person is their customer.
  */
 import { randomUUID } from "node:crypto";
-import { MembershipRole, OperationSource } from "@prisma/client";
+import { MembershipRole, OperationKind, OperationSource, UnitType } from "@prisma/client";
 import { beforeAll, describe, expect, it } from "vitest";
 import { prisma } from "@/server/db";
 import { ForbiddenError, NotFoundError } from "@/server/errors";
@@ -198,13 +198,49 @@ describe("customer lookup", () => {
       const otherLocation = await prisma.location.create({
         data: { businessId: cafe.businessId, name: "Second counter" },
       });
-      // An award made at a counter this cashier is not assigned to.
-      await awardManualStamps(cafe.ctx, {
-        customerCardId: hereCard.customerCardId,
-        quantity: 1,
-        locationId: otherLocation.id,
-        idempotencyKey: key(),
-        source: OperationSource.DASHBOARD,
+
+      /**
+       * An operation at a counter this cashier is not assigned to.
+       *
+       * It is seeded directly rather than written through the engine, because Phase 1a's engine
+       * refuses to write anywhere but Main — that restriction is asserted in stamp-engine.test.ts.
+       * The narrowing logic still has to be correct for rows that DO exist at other locations:
+       * imported history today, and multi-location programs from Phase 1b. The card projection is
+       * moved by the same amount so reconciliation stays clean.
+       */
+      const card = await prisma.customerCard.findUniqueOrThrow({
+        where: { id: hereCard.customerCardId },
+        select: {
+          businessId: true,
+          templateId: true,
+          programVersionId: true,
+          customerBusinessProfileId: true,
+          stampBalance: true,
+          profile: { select: { customerId: true } },
+        },
+      });
+      await prisma.loyaltyOperation.create({
+        data: {
+          transactionGroupId: randomUUID(),
+          businessId: card.businessId,
+          locationId: otherLocation.id,
+          customerId: card.profile.customerId,
+          customerBusinessProfileId: card.customerBusinessProfileId,
+          customerCardId: hereCard.customerCardId,
+          templateId: card.templateId,
+          programVersionId: card.programVersionId,
+          performedByUserId: cafe.userId,
+          kind: OperationKind.MANUAL_AWARD,
+          unitType: UnitType.STAMP,
+          quantity: 1,
+          balanceAfter: card.stampBalance + 1,
+          countsAsVisit: true,
+          source: OperationSource.DASHBOARD,
+        },
+      });
+      await prisma.customerCard.update({
+        where: { id: hereCard.customerCardId },
+        data: { stampBalance: { increment: 1 } },
       });
 
       const owner = await listCardOperations(cafe.ctx, hereCard.customerCardId);

@@ -173,17 +173,24 @@ describe("cashier accounts", () => {
       await expectReconciled(cafe.businessId);
     });
 
-    it("cannot act at a counter it is not assigned to", async () => {
+    it("cannot reach a second counter, because nobody can name one", async () => {
+      // Phase 1a is one café at one counter. A second Location row may exist in the database, but
+      // no caller can direct an operation to it: the location is resolved by the server.
       const otherCounter = await prisma.location.create({ data: { businessId: cafe.businessId, name: "Drive-through" } });
+      const before = await prisma.loyaltyOperation.count({ where: { customerCardId: cardId } });
+
       await expect(
         awardManualStamps(cashierCtx, {
           customerCardId: cardId,
           quantity: 1,
-          locationId: otherCounter.id,
           idempotencyKey: key(),
           source: OperationSource.SCANNER,
-        }),
-      ).rejects.toBeInstanceOf(ForbiddenError);
+          locationId: otherCounter.id,
+        } as unknown as Parameters<typeof awardManualStamps>[1]),
+      ).rejects.toBeInstanceOf(ValidationError);
+
+      expect(await prisma.loyaltyOperation.count({ where: { customerCardId: cardId } })).toBe(before);
+      expect(await prisma.loyaltyOperation.count({ where: { locationId: otherCounter.id } })).toBe(0);
     });
 
     it("cannot create or change the loyalty program", async () => {

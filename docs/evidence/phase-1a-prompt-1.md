@@ -5,14 +5,16 @@
 **Performed by:** development agent (Claude Opus 5)
 **Branch:** `rebuild/phase-0-foundation`
 **Predecessor:** Phase 0 Prompt 3 + two remediations — PASS (`docs/evidence/phase-0-prompt-3.md` §12)
+**Revision:** first submission returned by review for a scope breach — the stamp engine accepted a
+`locationId`, which let an owner operate a second counter before Phase 1b. Fixed and re-verified; see §9.
 
 ---
 
 ## 1. Result
 
-**GATE PASSED — 13/13 steps in 230.1 s** on `372fdeb`, the final commit. Unit **119/119** (11
-files), integration **306/306** (27 files) against real PostgreSQL 15, every integration test
-connected as the restricted runtime role. `npm audit`, full tree and production view: **0
+**GATE PASSED — 13/13 steps in 214.5 s** on `<<FINAL_SHA>>`, the final code commit. Unit
+**119/119** (11 files), integration **309/309** (27 files) against real PostgreSQL 15, every
+integration test connected as the restricted runtime role. `npm audit`, full tree and production view: **0
 vulnerabilities** each. `git diff --check` clean; working tree clean.
 
 **No migration was required.** Every field this phase needs already exists from Phase 0.
@@ -34,8 +36,10 @@ are mutually dependent, so splitting them further would have produced commits th
 | 2 | `69f1fab` | feat(stamp): program, enrollment, lookup, cashier and stamp-engine services |
 | 3 | `27b40e4` | test(stamp): real-PostgreSQL coverage for the Phase 1a café loop |
 | 4 | `372fdeb` | docs: Phase 1a implementation guide, and resolve the card-issuance contradiction |
+| 5 | `ea8f1df` | docs(evidence): Phase 1a Prompt 1 core gate record (first submission) |
+| 6 | `<<FINAL_SHA>>` | fix(stamp): Phase 1a writes only at Main; the location is never a caller's input (§9) |
 
-25 files changed, 4,798 insertions.
+25 files changed in commits 1–4, 4,798 insertions; the scope fix in §9 touches 5 more.
 
 ---
 
@@ -173,21 +177,21 @@ assigned locations, and an unassigned cashier sees nothing.
 =============================================================
 GATE SUMMARY
 =============================================================
-PASS  dependency audit (prod, high+)             1238 ms
-PASS  prisma generate                            1819 ms
-PASS  lint                                       5659 ms
-PASS  typecheck                                  4823 ms
-PASS  prisma validate                            1625 ms
-PASS  unit tests                                 1794 ms
-PASS  test db up                                  939 ms
-PASS  migrate deploy (test db, migrator role)    5841 ms
-PASS  migrate status (test db)                   5878 ms
-PASS  runtime role grants (test db)               165 ms
-PASS  integration tests                        187502 ms
-PASS  worker build                                185 ms
-PASS  production build                          13971 ms
+PASS  dependency audit (prod, high+)             1097 ms
+PASS  prisma generate                            1531 ms
+PASS  lint                                       5565 ms
+PASS  typecheck                                  4924 ms
+PASS  prisma validate                            1672 ms
+PASS  unit tests                                 1687 ms
+PASS  test db up                                  958 ms
+PASS  migrate deploy (test db, migrator role)    5876 ms
+PASS  migrate status (test db)                   5594 ms
+PASS  runtime role grants (test db)               152 ms
+PASS  integration tests                        170614 ms
+PASS  worker build                                122 ms
+PASS  production build                          14709 ms
 -------------------------------------------------------------
-GATE PASSED in 230.1s (13/13 steps)
+GATE PASSED in 214.5s (13/13 steps)
 ```
 
 `migrate status (test db)` reports the schema up to date against the five existing migrations. The
@@ -205,9 +209,9 @@ witness.
 | Project | Files | Tests | Database |
 |---|---|---|---|
 | unit | 11 | **119** | none |
-| integration | 27 | **306** | real PostgreSQL 15, as the restricted runtime role |
+| integration | 27 | **309** | real PostgreSQL 15, as the restricted runtime role |
 
-New in this prompt — 71 unit and 109 integration tests:
+New in this prompt — 71 unit and 112 integration tests:
 
 | File | Tests | Covers |
 |---|---|---|
@@ -217,7 +221,7 @@ New in this prompt — 71 unit and 109 integration tests:
 | `unit/card-tokens.test.ts` | 11 | entropy, uniqueness over 2,000 draws, no shared prefixes, per-position alphabet spread, QR ≠ page token |
 | `integration/stamp-program.test.ts` | 15 | the four rows created together, version/tier/cardType frozen, one program per business, authorization |
 | `integration/enrollment.test.ts` | 18 | pinned version, phone normalisation, opaque tokens, **6 concurrent enrollments → one customer/profile/card**, welcome bonus exactly once, one person in two businesses, issuance audited not ledgered |
-| `integration/stamp-engine.test.ts` | 34 | manual/visit/purchase awards, conversion group, multiple rewards, remainder, redemption, reversal, idempotency, **12 concurrent awards with no lost update**, card-status refusals, tenant isolation, reconciliation |
+| `integration/stamp-engine.test.ts` | 37 | manual/visit/purchase awards, conversion group, multiple rewards, remainder, redemption, reversal, idempotency, **12 concurrent awards with no lost update**, card-status refusals, tenant isolation, **one-location enforcement (§9)**, reconciliation |
 | `integration/daily-limit.test.ts` | 9 | limit enforced and unslippable under a burst, operations not stamps, per card, **business-timezone day boundary** |
 | `integration/customer-lookup.test.ts` | 19 | QR/phone/serial tenant isolation, page token refused as scan token, directory closed to cashiers, operations narrowed by location |
 | `integration/cashier.test.ts` | 14 | role defaults and Main assignment, owner-only creation unwidenable by `EDIT_STAFF`, location restriction, deactivation takes effect at once |
@@ -261,7 +265,66 @@ Nothing critical or high. Each item below carries severity, owner and follow-up 
 - **No Prompt 2 work was started:** no pages, no route handlers, no public customer pages, no
   service worker, no scanner UI. The services exist for Prompt 2 to call.
 - No deferred mechanics were implemented; the contract actively refuses them.
+- **Multi-location work was not started.** Phase 1a writes only at `Main`, and the engine refuses a
+  caller-supplied location entirely (§9). A second `Location` row may exist and receives nothing.
 - Owner decisions A1–A5, B1–B6, C1–C5 are unchanged and none is marked approved.
+
+---
+
+## 9. Scope correction — one location, resolved by the server
+
+**Finding (review of the first submission).** The stamp engine accepted an optional `locationId`
+and fell back to `Main` only when none was given. `requireLocationAccess` stops a *cashier* acting
+outside their assignment, but an `OWNER` is unrestricted across their own locations — so an owner
+could create a second `Location` and award stamps there. A test in the first submission did exactly
+that, which made the breach explicit rather than hypothetical.
+
+This is not a cross-tenant risk: nothing could reach another business. It breaks the Phase 1a
+promise of **one café, one counter**, and starts multi-location behaviour underneath screens that
+Prompt 2 has not been designed to show it.
+
+**Fix.** The location is no longer an input at any layer of this phase.
+
+- `locationId` is removed from `StampActionInput` and `ReverseGroupActionInput`, so the type system
+  rejects it at compile time — which is how the two offending tests were found.
+- Every award, redemption and reversal resolves the business's default `Main` location inside the
+  transaction. Reversals now attribute their compensating rows to `Main` explicitly rather than
+  inheriting the original group's location.
+- Supplying `locationId` anyway, which untyped JavaScript can still do, is **refused before
+  anything is validated or written** — including when the value supplied is the correct `Main` id,
+  because the rule is about who decides, not about which id arrives.
+- The test that had an owner award at a second counter is **deleted**. Its replacement asserts the
+  refusal and that the second counter receives no rows at all.
+
+**Proof.** `tests/integration/stamp-engine.test.ts`, describe block "one location only" (3 tests):
+
+- every operation of a full lifecycle — award, reversal, award, conversion, reward earned,
+  redemption — carries the same `locationId`, and that location is the business's `isDefault`
+  `Main`;
+- all five verbs refuse a caller-supplied location with `ValidationError`, no row is written, the
+  second counter has zero operations, and reconciliation stays clean;
+- the correct `Main` id is refused too.
+
+`tests/integration/cashier.test.ts` now asserts a cashier cannot reach a second counter because
+nobody can name one. `tests/integration/customer-lookup.test.ts` still proves that a cashier's
+operation list is narrowed by location, but seeds that row directly through Prisma — the engine can
+no longer write it — with a comment saying why and the card projection moved to match, so
+reconciliation stays clean. That narrowing logic must keep working for rows that legitimately exist
+at other locations: imported history now, and Phase 1b's multi-location programs later.
+
+**Verification after the fix**
+
+| Command | Result |
+|---|---|
+| `npx tsc --noEmit` | caught both offending tests; 0 errors after they were rewritten |
+| `npx vitest run --project integration` (three affected files) | 1 failure, mine: the new lifecycle test reversed a group whose reward had already been redeemed, which the engine correctly refuses. Sequence corrected |
+| same, re-run | **37 + 14 + 19 passed** |
+| `npm run gate` | **GATE PASSED 13/13 in 214.5 s**, integration 309/309 |
+| `npm audit`; `npm audit --omit=dev --audit-level=high` | 0 vulnerabilities each |
+| `git diff --check`; `git status --porcelain` | clean; clean |
+
+Multi-location support remains **entirely deferred to Phase 1b**, where the parameter returns
+deliberately alongside the program's `availableLocations` and a location picker.
 
 ---
 

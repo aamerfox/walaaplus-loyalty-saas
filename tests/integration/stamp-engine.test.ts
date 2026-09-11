@@ -585,6 +585,109 @@ describe("stamp engine", () => {
     });
   });
 
+  /**
+   * Phase 1a is one café at one counter. The location is resolved by the server from the business,
+   * never taken from a screen or a request, so multi-location behaviour cannot start by accident
+   * before Phase 1b builds it deliberately.
+   */
+  describe("one location only", () => {
+    it("attributes every kind of operation to Main", async () => {
+      const cardId = await freshCard(cafe);
+      // A reversible award first: reversing the group that EARNED a reward after redeeming it is
+      // refused by design, and that refusal has its own test.
+      const reversible = await awardManualStamps(cafe.ctx, {
+        customerCardId: cardId,
+        quantity: 3,
+        idempotencyKey: key(),
+        source: OperationSource.SCANNER,
+      });
+      await reverseStampOperation(cafe.ctx, {
+        transactionGroupId: reversible.transactionGroupId,
+        reason: "one-location check",
+        idempotencyKey: key(),
+        source: OperationSource.DASHBOARD,
+      });
+      // Then an award that converts, and the redemption of what it earned.
+      await awardManualStamps(cafe.ctx, {
+        customerCardId: cardId,
+        quantity: 10,
+        idempotencyKey: key(),
+        source: OperationSource.SCANNER,
+      });
+      await redeemReward(cafe.ctx, { customerCardId: cardId, idempotencyKey: key(), source: OperationSource.SCANNER });
+
+      const rows = await prisma.loyaltyOperation.findMany({
+        where: { customerCardId: cardId },
+        select: { locationId: true, kind: true },
+      });
+      // award, reversal, award + conversion + reward earned, redemption
+      expect(rows.length).toBeGreaterThanOrEqual(6);
+      expect(new Set(rows.map((r) => r.kind)).size).toBeGreaterThanOrEqual(5);
+      expect(new Set(rows.map((r) => r.locationId))).toEqual(new Set([cafe.locationId]));
+
+      const main = await prisma.location.findUniqueOrThrow({ where: { id: cafe.locationId } });
+      expect(main.isDefault).toBe(true);
+      expect(main.name).toBe("Main");
+    });
+
+    it("refuses a caller-supplied location on every verb, writing nothing", async () => {
+      const cardId = await freshCard(cafe);
+      await awardManualStamps(cafe.ctx, { customerCardId: cardId, quantity: 10, idempotencyKey: key(), source: OperationSource.SCANNER });
+      const group = await prisma.loyaltyOperation.findFirstOrThrow({
+        where: { customerCardId: cardId, kind: OperationKind.MANUAL_AWARD },
+        select: { transactionGroupId: true },
+      });
+      const secondCounter = await prisma.location.create({ data: { businessId: cafe.businessId, name: "Terrace" } });
+      const before = await prisma.loyaltyOperation.count({ where: { customerCardId: cardId } });
+
+      // Exactly what an untyped route handler spreading a request body could pass. The field is
+      // gone from the contract, so this is the JavaScript-level attempt.
+      const withLocation = (extra: object) => ({ customerCardId: cardId, idempotencyKey: key(), source: OperationSource.SCANNER, locationId: secondCounter.id, ...extra });
+
+      await expect(
+        awardManualStamps(cafe.ctx, withLocation({ quantity: 1 }) as unknown as Parameters<typeof awardManualStamps>[1]),
+      ).rejects.toBeInstanceOf(ValidationError);
+      await expect(
+        awardVisitStamp(cafe.ctx, withLocation({}) as unknown as Parameters<typeof awardVisitStamp>[1]),
+      ).rejects.toBeInstanceOf(ValidationError);
+      await expect(
+        awardPurchaseStamps(cafe.ctx, withLocation({ purchaseAmountMinor: 10_000 }) as unknown as Parameters<typeof awardPurchaseStamps>[1]),
+      ).rejects.toBeInstanceOf(ValidationError);
+      await expect(
+        redeemReward(cafe.ctx, withLocation({}) as unknown as Parameters<typeof redeemReward>[1]),
+      ).rejects.toBeInstanceOf(ValidationError);
+      await expect(
+        reverseStampOperation(cafe.ctx, {
+          transactionGroupId: group.transactionGroupId,
+          reason: "nope",
+          idempotencyKey: key(),
+          source: OperationSource.DASHBOARD,
+          locationId: secondCounter.id,
+        } as unknown as Parameters<typeof reverseStampOperation>[1]),
+      ).rejects.toBeInstanceOf(ValidationError);
+
+      // Not one row was written, and the second counter has no history at all.
+      expect(await prisma.loyaltyOperation.count({ where: { customerCardId: cardId } })).toBe(before);
+      expect(await prisma.loyaltyOperation.count({ where: { locationId: secondCounter.id } })).toBe(0);
+      await expectReconciled(cafe.businessId);
+    });
+
+    it("refuses the Main location too: it is not the caller's to state", async () => {
+      // Passing the RIGHT location is still passing one. The rule is about who decides.
+      const cardId = await freshCard(cafe);
+      await expect(
+        awardManualStamps(cafe.ctx, {
+          customerCardId: cardId,
+          quantity: 1,
+          idempotencyKey: key(),
+          source: OperationSource.SCANNER,
+          locationId: cafe.locationId,
+        } as unknown as Parameters<typeof awardManualStamps>[1]),
+      ).rejects.toThrow(/Main location/);
+      expect(await prisma.loyaltyOperation.count({ where: { customerCardId: cardId } })).toBe(0);
+    });
+  });
+
   describe("tenant isolation", () => {
     it("refuses to touch another business's card, even with a real card id", async () => {
       const mine = await freshCard(cafe);
