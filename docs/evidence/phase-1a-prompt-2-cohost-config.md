@@ -48,7 +48,8 @@ nothing was pushed.
 | 5 | `d6c4964` | docs: the safety remediation |
 | 6 | `7a95d26` | docs: fill in row 5 |
 | 7 | `bed552f` | fix(docker): ship the module the migrate entrypoint imports |
-| 8 | (this commit) | docs: the migrate-image remediation |
+| 8 | `8b9d577` | docs: the migrate-image remediation |
+| 9 | (this commit) | docs: fill in row 8 |
 
 Files in commit 1:
 
