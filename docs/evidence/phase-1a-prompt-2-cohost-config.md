@@ -12,14 +12,18 @@
 **PASS — the configuration is written, validated locally, and ready for review.** It has not been
 deployed, and deploying it is not part of this task.
 
+**Round 2 (§9): both review findings remediated.** Forwarded IP headers are no longer trusted in
+the co-hosted shape, and all four services now carry CPU and memory ceilings. The figures in the
+table below are from the run after that remediation.
+
 | Check | Result |
 |---|---|
-| `npm run gate` on `2e4e17d` | **PASS 13/13 in 304.7 s** |
-| unit tests | **188** (12 files), up 23 |
+| `npm run gate` on `58b1b98` | **PASS 13/13 in 262.8 s** |
+| unit tests | **195** (12 files), up 30 from before this work |
 | integration tests | **368** (31 files), unchanged |
-| Playwright | **3 passed (45.4 s)** |
+| Playwright | **3 passed (35.2 s)** |
 | `npm audit`, full tree and production/high+ | **0 vulnerabilities** each |
-| `docker compose … config --quiet` on the new file | valid |
+| `docker compose … config --quiet`, **all four** Compose files | valid |
 | `caddy validate` on the new fragment, alone and combined | **Valid configuration**, both |
 
 **Nothing was deployed. Nothing remote was touched.** See §7.
@@ -35,7 +39,9 @@ nothing was pushed.
 |---|---|---|
 | 1 | `2e4e17d` | feat(ops): a co-hosted staging stack for a server that already owns 80 and 443 |
 | 2 | `d30e4c2` | docs: the co-hosted configuration evidence |
-| 3 | (this commit) | docs: fill in row 2 |
+| 3 | `4b635c2` | docs: fill in row 2 |
+| 4 | `58b1b98` | fix(ops): stop trusting forwarded IP headers on the shared host, and cap what this stack can take |
+| 5 | (this commit) | docs: the safety remediation |
 
 Files in commit 1:
 
@@ -292,7 +298,7 @@ Every item here was in reach and was left alone on purpose.
 
 | # | Sev | Item | Follow-up |
 |---|---|---|---|
-| C-1 | Medium | **`TRUST_PROXY_HEADERS=true` trusts every local process here**, not only the proxy. On a dedicated box `web` publishes nothing, so the proxy is the only possible path; on loopback anything on the host can reach port 3100 and forge `X-Forwarded-For`, defeating the per-address rate limits. Acceptable on an owner-controlled staging machine as the price of having TLS at all | Not acceptable for production: put the app on its own host, or behind a proxy it does not share |
+| ~~C-1~~ | **CLOSED in round 2 (§9.1)** | ~~`TRUST_PROXY_HEADERS=true` trusts every local process here.~~ The setting is now `false` and a test prevents its return. The residual is that per-IP rate limiting is unavailable in this shape, which is a documented consequence rather than a defect | Recoverable by moving to a dedicated server (`docker-compose.staging.yml`) |
 | C-2 | Low | The co-hosted stack has never been **run**, only validated. A first `up` on that host may still surface something host-specific | Owner/OCI agent, following runbook §13.4 |
 | C-3 | Low | `staging.truebiznes.com` is now hardcoded in the fragment | Correct for a reviewed fragment naming one site. If the hostname changes, the fragment changes with it |
 | C-4 | Low | Backups (§6) write to the same host they protect | Unchanged from before; owner decision C2 |
@@ -300,4 +306,185 @@ Every item here was in reach and was left alone on purpose.
 
 ---
 
-**PASS — CO-HOSTED OCI STAGING CONFIG READY FOR REVIEW**
+---
+
+## 9. Round 2 — safety remediation
+
+Two findings, both accepted, both fixed in `58b1b98`. Nothing from §1–8 was erased; the figures in
+§1 were re-taken after this work.
+
+### 9.1 Forwarded IP headers are no longer trusted here
+
+This was recorded as limitation **C-1** in §8 of the original evidence, at medium severity. The
+reviewer is right that recording it was not enough.
+
+`docker-compose.staging-cohost.yml` now sets **`TRUST_PROXY_HEADERS: "false"`**.
+
+The reasoning, stated as the reviewer put it: `127.0.0.1:3100` is reachable by **every local
+process on the host**, not only by Caddy. Any of them could send a request carrying a different
+`X-Forwarded-For` each time. A per-address limit built on an address the caller chooses is not a
+weak limit, it is a **misleading** one — it appears on the dashboard and stops nothing.
+
+The Caddy fragment is unchanged and still replaces the headers correctly. The application simply
+declines to believe them in this shape.
+
+**The trade-off, honestly.** The rate limiter was already written to degrade rather than pretend:
+`consumeRegisterLimit`, `consumeSignInLimit` and `consumeEnrollmentLimit` each add the per-address
+window **only when an address is supplied**, so with none supplied those windows do not open at
+all. Nothing silently falls back to something weaker.
+
+| Control | Co-hosted staging |
+|---|---|
+| Per-IP window, registration | **unavailable** |
+| Per-IP window, sign-in | **unavailable** |
+| Per-IP window, public enrolment | **unavailable** |
+| Per-submitted-email window, registration | active |
+| Per-identifier window, sign-in | active — the one that actually stops credential stuffing against one account |
+| **Per-enrolment-link window, database-backed** | **active** — and the right shape for the real threat: farming a welcome bonus means hammering one merchant's link |
+| Enrolment honeypot, idempotency, tenant isolation, append-only ledger | unaffected |
+
+**Why this is the safer option rather than a reluctant compromise.** Trusting the header would not
+have protected against a local process in the first place — it would have handed that process an
+unlimited supply of distinct identities. The choice was never "per-IP limits or none"; it was
+"honest absence, or a limit that can be walked through at will".
+
+**A dedicated server restores the trusted-proxy behaviour** with no code change, by using
+`docker-compose.staging.yml`, where `web` publishes nothing and the proxy really is the only path
+in. That file still sets `TRUST_PROXY_HEADERS=true` and is untouched.
+
+Documented in runbook **§13.1** (comparison table) and **§13.2** ("Why forwarded IP headers are not
+trusted here"), and in the Compose file itself at the setting.
+
+### 9.2 Conservative resource limits
+
+The host has one vCPU and shares it with OpenClaw/OpenBot. All four services now carry ceilings:
+
+| Service | `cpus` | `mem_limit` | `mem_reservation` | When | Why this number |
+|---|---|---|---|---|---|
+| `db` | 0.25 | 384m | 128m | always | Roughly triple PostgreSQL's expected resident size here (128 MB shared buffers plus a handful of Prisma connections). Deliberately loose: an OOM-killed database is a corrupted staging run, not a tidy failure |
+| `web` | 0.35 | 512m | 160m | always | The standalone Next.js server sits well under 200 MB; this leaves room for a restart, a burst of requests and the V8 heap without making this stack the reason the host swaps |
+| `worker` | 0.15 | 256m | 64m | always | A pg-boss loop that wakes, polls and sleeps, with no user waiting on it. The right service to squeeze first |
+| `migrate` | 0.50 | 512m | 128m | startup only | The most generous, and free in steady state because it exits before `web` and `worker` start |
+
+**Budget**, from the resolved `docker compose config`:
+
+```
+db       cpus=0.25 mem_limit=402653184 mem_reservation=134217728
+migrate  cpus=0.5  mem_limit=536870912 mem_reservation=134217728
+web      cpus=0.35 mem_limit=536870912 mem_reservation=167772160
+worker   cpus=0.15 mem_limit=268435456 mem_reservation=67108864
+steady-state ceiling: cpus=0.75 mem=1152 MiB
+```
+
+Steady state is capped at **0.75 vCPU and 1152 MiB**, leaving at least a quarter of the single core
+to the host and its other services. The startup ceiling is the same number, because `migrate` runs
+while `web` and `worker` do not: `db` 0.25 + `migrate` 0.50 = 0.75.
+
+**`migrate` can still complete**, which was an explicit requirement. `web` and `worker` wait on it
+with `condition: service_completed_successfully`, so an OOM kill there does not fail a request — it
+halts the entire startup. It therefore gets the largest allowance in the file, and a test enforces
+that its memory ceiling is **never lower than `web`'s** and its CPU share never smaller.
+
+**`mem_reservation` sits well below each limit on purpose.** A reservation is a floor the kernel
+tries to protect; setting it near the limit would make this stack the *last* thing reclaimed under
+pressure, which is backwards on someone else's host.
+
+**Plain Compose keys, not Swarm.** `cpus`, `mem_limit` and `mem_reservation` are enforced by
+`docker compose up` directly. `deploy.resources` is the Swarm spelling and is silently ignored by
+parts of the non-Swarm toolchain; a limit that is quietly ignored on a one-vCPU box is the worst of
+both worlds. A test asserts the file contains neither `deploy:` nor `resources:`.
+
+**Assumption recorded in the runbook:** the host has at least 2 GiB of RAM. §13.2 tells the operator
+to check with `free -m` and `nproc` before the first start and to scale down if it has less.
+
+### 9.3 The required runbook step
+
+New **§13.7, "First startup: watch what it does to the host — required, not optional"**. After the
+first `up`, and again after the Caddy block goes live, the OCI agent watches for at least five
+minutes with `docker stats` (live and as a pasteable `--no-stream` snapshot), `vmstat 1 10`,
+`free -m` and `uptime`, then checks that OpenClaw/OpenBot are still healthy.
+
+It states four **stop conditions**, each with the action:
+
+| Signal | Action |
+|---|---|
+| OpenClaw/OpenBot unhealthy, unresponsive or erroring | `down` the stack and report before anything else |
+| Sustained swap in/out in `vmstat`, or available memory near zero | Same. Heavy swapping on one vCPU degrades every service on the host |
+| Load average sustained above ~2.0 on the single core | Same |
+| A WalaaPlus container restarting repeatedly, or `docker inspect` reporting `OOMKilled` | Stop, raise that service's `mem_limit`, report which service and what it was doing |
+
+It also notes that stopping is cheap and reversible — `down` keeps the volume, the images and the
+certificate — and that the `docker stats --no-stream` snapshot must go in the deployment report,
+because "it seemed fine" is not a result.
+
+### 9.4 Tests added, and proven to bite
+
+Seven new assertions in `tests/unit/compose-exposure.test.ts` (unit total **188 → 195**):
+
+- `TRUST_PROXY_HEADERS` is exactly `"false"` in the co-hosted file, and never `"true"`;
+- the dedicated file still has `"true"` **and still publishes no application port**, so the two
+  differ for a reason that is itself asserted rather than remembered;
+- all four services declare both `cpus` and `mem_limit`;
+- the steady-state budget stays at or under 0.8 vCPU and 1536 MiB, and the startup ceiling too;
+- `migrate` is never squeezed tighter than `web`, in memory or CPU;
+- every reservation is below half its limit;
+- the file uses neither `deploy:` nor `resources:`.
+
+Mutation-tested, with both files restored byte-identical afterwards (sha256 verified):
+
+| Mutation | Result |
+|---|---|
+| `TRUST_PROXY_HEADERS: "false"` → `"true"` | **1 failure**: "does not believe forwarded IP headers on a shared host" |
+| Deleted `worker`'s three limit keys | **2 failures**: "gives every service an explicit CPU and memory ceiling" and "reserves far less than it limits" |
+
+### 9.5 Verification after remediation
+
+```
+GATE SUMMARY
+PASS  dependency audit (prod, high+)             2101 ms
+PASS  prisma generate                            2416 ms
+PASS  lint                                       7565 ms
+PASS  typecheck                                  3690 ms
+PASS  prisma validate                            2097 ms
+PASS  unit tests                                 1981 ms
+PASS  test db up                                 1023 ms
+PASS  migrate deploy (test db, migrator role)    6135 ms
+PASS  migrate status (test db)                   5840 ms
+PASS  runtime role grants (test db)               185 ms
+PASS  integration tests                        214388 ms
+PASS  worker build                                181 ms
+PASS  production build                          15192 ms
+GATE PASSED in 262.8s (13/13 steps)
+```
+
+| Check | Result |
+|---|---|
+| `npm run test:e2e` | **3 passed (35.2 s)** |
+| `npm audit --omit=dev --audit-level=high` | **0 vulnerabilities** |
+| `npm audit` (full tree) | **0 vulnerabilities** |
+| `docker compose config --quiet` — local, local with `--profile app`, dedicated staging, co-hosted | **all four valid** |
+| unit / integration | **195** / **368** |
+
+### 9.6 What this round did not change
+
+`docker-compose.staging.yml` and `deploy/Caddyfile.staging` remain byte-identical. The Caddy
+fragment `deploy/Caddyfile.walaaplus-staging.caddy` is unchanged: its header replacement was
+already correct and stays exactly as reviewed. No application code was touched — the rate limiter
+already handled an absent client address correctly, so the fix was a configuration decision, not a
+code change.
+
+Still true, and re-confirmed: **no OCI host was contacted, no Caddy was read, written, reloaded or
+restarted, no DNS record was touched, no Docker service was restarted, no OpenClaw/OpenBot service
+was touched, no remote environment was modified, nothing was deployed, and nothing was pushed.**
+`master` is untouched at `b9ee686`.
+
+### 9.7 Limitation C-1, closed
+
+§8's limitation **C-1** (`TRUST_PROXY_HEADERS=true` trusts every local process) is **closed by
+this remediation**: the setting is now false and a test prevents its return. The residual, which is
+not a defect, is that per-IP rate limiting is unavailable in this shape — recorded above, in the
+runbook, and in the Compose file, and recoverable by moving to a dedicated server.
+
+---
+
+**PASS — CO-HOSTED OCI STAGING CONFIG SAFETY REMEDIATED — READY FOR ARCHITECT REVIEW**
