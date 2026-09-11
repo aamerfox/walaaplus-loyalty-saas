@@ -1,4 +1,4 @@
-import { PrismaClient, type Prisma } from "@prisma/client";
+import { Prisma, PrismaClient } from "@prisma/client";
 import { env } from "./env";
 
 /**
@@ -59,6 +59,21 @@ export const prisma: PrismaClient = new Proxy({} as PrismaClient, {
     return d ? { ...d, configurable: true } : undefined;
   },
 });
+
+/**
+ * Options for a write that CONTENDS by design: enrollment, program creation, staff creation.
+ *
+ * Prisma's default `maxWait` is 2 s — how long a caller waits for a free connection before the
+ * write FAILS. That is too short here on purpose-built queues: six people enrolling the same
+ * phone number at once serialise on a unique index, which is the mechanism that keeps them from
+ * becoming six customers. They should wait and then succeed, not error. The statement timeout
+ * still bounds a transaction that is genuinely stuck.
+ */
+export const CONTENDED_TX = {
+  isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+  timeout: 20_000,
+  maxWait: 10_000,
+} as const;
 
 /** Interactive-transaction client. Services accept `DbClient` so they compose inside one transaction. */
 export type Tx = Prisma.TransactionClient;

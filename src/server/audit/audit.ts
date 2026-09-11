@@ -16,6 +16,20 @@ export const AuditAction = {
   LEDGER_SYSTEM_GROUP_APPENDED: "ledger.system_group_appended",
   /** An authentication window was exhausted. Recorded once per window; never carries credentials. */
   AUTH_RATE_LIMITED: "auth.rate_limited",
+
+  // ── Phase 1a: programs, enrollment, staff ──────────────────────────────────
+  /** A program template and its first immutable version were created and activated. */
+  PROGRAM_CREATED: "program.created",
+  /** The `direct` enrollment source was created for a template. */
+  ENROLLMENT_SOURCE_CREATED: "program.enrollment_source_created",
+  /**
+   * A card was issued to a customer. This is the ONLY record of issuance: the ledger refuses
+   * zero-quantity rows, so there is no CARD_ISSUED operation to write. See the note in
+   * src/server/customers/enrollment.ts.
+   */
+  CARD_ISSUED: "card.issued",
+  /** An owner created a cashier account. */
+  CASHIER_CREATED: "staff.cashier_created",
 } as const;
 export type AuditActionName = (typeof AuditAction)[keyof typeof AuditAction];
 
