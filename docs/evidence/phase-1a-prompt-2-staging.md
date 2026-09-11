@@ -59,7 +59,8 @@ rewritten history; the branch still has no upstream.
 | 6 | `ea3f880` | docs: the staging evidence, and why it is blocked rather than passed |
 | 7 | `f2d01f4` | docs: fill in the evidence commit SHA, which row 6 could not know while being written |
 | 8 | `29a1642` | fix(ops): generate database passwords as hex, and refuse a URL that does not parse |
-| 9 | (this commit) | docs: record the review finding and its fix |
+| 9 | `b5466ad` | docs: record the review finding and its fix |
+| 10 | (this commit) | docs: fill in row 9 |
 
 ---
 
