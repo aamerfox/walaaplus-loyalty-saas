@@ -12,7 +12,21 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Generated / scratch / test output
+    "playwright-results/**",
+    "playwright-report/**",
+    "test-results/**",
+    "coverage/**",
+    "tmp_*",
   ]),
+  {
+    // Server-side code, tests and scripts are not React components; the React-specific
+    // hook rules do not apply and `any` is forbidden outright.
+    files: ["src/server/**", "src/worker/**", "tests/**", "scripts/**", "prisma/**"],
+    rules: {
+      "@typescript-eslint/no-explicit-any": "error",
+    },
+  },
 ]);
 
 export default eslintConfig;

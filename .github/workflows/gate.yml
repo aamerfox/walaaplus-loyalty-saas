@@ -1,0 +1,72 @@
+# Engineering gate. Runs the exact same `npm run gate` a developer runs locally.
+#
+# Triggers on rebuild branches and on pull requests only. It does NOT deploy anything.
+# Deployment is an owner-only action (docs/DECISIONS-REQUIRED.md B6).
+#
+# Secrets: none are used. The values below are ephemeral fixtures for a throwaway CI
+# database and a build that never serves traffic. They are not credentials.
+name: gate
+
+on:
+  push:
+    branches: ["rebuild/**"]
+  pull_request:
+    branches: ["master", "rebuild/**"]
+
+concurrency:
+  group: gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci-ephemeral-not-a-secret
+          POSTGRES_DB: loyalty_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ci -d loyalty_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      GATE_SKIP_DOCKER: "1"
+      NEXT_TELEMETRY_DISABLED: "1"
+      NEXTAUTH_URL: http://localhost:3000
+      TEST_DATABASE_URL: postgresql://ci:ci-ephemeral-not-a-secret@localhost:5432/loyalty_test?schema=public
+      # `next build` evaluates server modules; it needs a syntactically valid DATABASE_URL but never connects.
+      DATABASE_URL: postgresql://ci:ci-ephemeral-not-a-secret@localhost:5432/loyalty_build_unused?schema=public
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Generate an ephemeral NEXTAUTH_SECRET for this run
+        # Random per run, never stored, never reused. Exists only so env validation passes during build.
+        run: echo "NEXTAUTH_SECRET=$(openssl rand -base64 48)" >> "$GITHUB_ENV"
+
+      - name: Gate
+        run: npm run gate
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-logs
+          path: |
+            .next/trace
+          if-no-files-found: ignore

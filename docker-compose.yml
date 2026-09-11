@@ -1,11 +1,85 @@
-version: '3.8'
+# Local development and test infrastructure.
+#
+# No credentials are committed here. Every value comes from `.env` (git-ignored) via
+# Compose's automatic env-file loading. `${VAR:?message}` makes Compose fail loudly
+# when a required variable is unset instead of silently using a literal.
+#
+#   docker compose up -d db          # application database
+#   docker compose up -d test-db     # disposable integration-test database (tmpfs, wiped on stop)
+#   docker compose --profile app up  # web + worker containers (requires a build)
+
 services:
   db:
     image: postgres:15-alpine
-    restart: always
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: walaaplus
-      POSTGRES_PASSWORD: walaaplus_password
-      POSTGRES_DB: loyalty
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env (see .env.example)}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env (see .env.example)}
+      POSTGRES_DB: ${POSTGRES_DB:-loyalty}
     ports:
-      - '5433:5432'
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Disposable database for integration tests. Data lives in RAM and is destroyed on `down`.
+  # The test harness truncates all tables between test files; never point it at `db`.
+  test-db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env (see .env.example)}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env (see .env.example)}
+      POSTGRES_DB: loyalty_test
+    ports:
+      - "${TEST_POSTGRES_PORT:-5435}:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d loyalty_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  # Next.js standalone server. Opt-in via `--profile app`.
+  web:
+    profiles: ["app"]
+    build:
+      context: .
+      target: web
+    env_file: .env
+    environment:
+      # Inside the Compose network the database host is the service name, not localhost.
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-loyalty}?schema=public
+    ports:
+      - "3000:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # pg-boss background worker. A SEPARATE process from web; it never runs inside a request.
+  worker:
+    profiles: ["app"]
+    build:
+      context: .
+      target: worker
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-loyalty}?schema=public
+      WORKER_HEALTH_PORT: 8081
+    ports:
+      - "8081:8081"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8081/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  db-data:

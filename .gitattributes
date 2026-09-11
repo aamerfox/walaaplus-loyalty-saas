@@ -1,0 +1,23 @@
+# Normalise text files to LF in the repository regardless of the contributor's OS.
+# Added in Phase 0 Prompt 0.2 WITHOUT running `git add --renormalize`, so existing
+# files are not rewritten in one noisy commit; they converge as they are next edited.
+* text=auto eol=lf
+
+# Windows-only files keep CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary assets
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.pdf  binary
+
+# Lockfile: treat as text, never merge by hand
+package-lock.json text eol=lf -diff
