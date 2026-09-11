@@ -41,7 +41,8 @@ nothing was pushed.
 | 2 | `d30e4c2` | docs: the co-hosted configuration evidence |
 | 3 | `4b635c2` | docs: fill in row 2 |
 | 4 | `58b1b98` | fix(ops): stop trusting forwarded IP headers on the shared host, and cap what this stack can take |
-| 5 | (this commit) | docs: the safety remediation |
+| 5 | `d6c4964` | docs: the safety remediation |
+| 6 | (this commit) | docs: fill in row 5 |
 
 Files in commit 1:
 
