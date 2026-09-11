@@ -1,0 +1,100 @@
+# Reverse proxy for the STAGING deployment. Terminates TLS; nothing else in the stack is public.
+#
+# This is a separate file from deploy/Caddyfile on purpose. That one is the local `--profile app`
+# form: plain HTTP on :80 with `auto_https off`, because a developer machine has no domain and no
+# certificate. Merging the two behind conditionals would give staging a file whose most important
+# lines are the ones that do not apply to it.
+#
+# TWO variables come from the environment, and Caddy refuses to start without them:
+#
+#   WALAAPLUS_DOMAIN   the staging hostname, e.g. staging.example.com (owner decision B2)
+#   ACME_EMAIL         the address Let's Encrypt uses for expiry notices (owner decision B3)
+#
+# Neither is a secret, and neither is committed. Caddy obtains and renews the certificate itself
+# over ACME; there is no certificate file to copy, no cron entry to forget, and no private key on
+# the host outside the `caddy-data` volume. That volume is what must survive a redeploy — losing
+# it means re-issuing, which Let's Encrypt rate-limits.
+#
+# PREREQUISITES, and they are not optional:
+#   - an A (or AAAA) record for WALAAPLUS_DOMAIN pointing at this host, resolving publicly;
+#   - inbound tcp/80 AND tcp/443 open. Port 80 is not decoration: the HTTP-01 challenge uses it,
+#     and this file also redirects http:// to https:// there.
+
+{
+	# ACME account contact. Automatic HTTPS stays ON — the entire point of this file.
+	email {$ACME_EMAIL}
+
+	# The admin API listens on localhost:2019 by default. Nothing here uses it, and an open
+	# control socket inside a container that faces the internet is a liability, not a feature.
+	admin off
+}
+
+# Canonical host only. A request arriving with any other Host header (a scanner pointed at the
+# raw IP, an opportunistic bot) does not match this site and gets no response from the app, so
+# the certificate is never requested for a name the owner does not control.
+{$WALAAPLUS_DOMAIN} {
+	encode gzip
+
+	header {
+		# Staging serves real-looking loyalty cards at guessable-looking paths. It must never
+		# appear in a search result.
+		X-Robots-Tag "noindex, nofollow"
+
+		# Nine weeks. Long enough to be meaningful, short enough that a mistake on a staging
+		# subdomain ages out. Deliberately WITHOUT includeSubDomains or preload: this host is a
+		# subdomain of a domain the owner uses for other things, and those two directives would
+		# reach beyond staging.
+		Strict-Transport-Security "max-age=5184000"
+
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+
+		# The card and the scanner are never legitimately framed.
+		Content-Security-Policy "frame-ancestors 'none'"
+		X-Frame-Options "DENY"
+
+		# Caddy announces itself by default; a version banner helps nobody but a scanner.
+		-Server
+	}
+
+	# `handle` blocks are mutually exclusive and run in written order. Bare directives would be
+	# reordered by Caddy's directive order, which puts reverse_proxy BEFORE respond — /healthz
+	# would then be proxied to the app instead of answered here, and a proxy health check that
+	# depends on the app cannot tell you the app is down.
+	handle /healthz {
+		respond "ok" 200
+	}
+
+	handle {
+		reverse_proxy web:3000 {
+			# The headers the application may believe, and the reason TRUST_PROXY_HEADERS is
+			# allowed to be true at all. Each is SET from the connection this proxy actually
+			# received, replacing whatever the client sent. Never append here: an appended
+			# X-Forwarded-For carries the client's forged prefix through to the rate limiter.
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-Host {host}
+
+			# Anything else a client might pass off as proxy state is removed outright.
+			header_up -Forwarded
+			header_up -X-Forwarded-Server
+			header_up -X-Client-IP
+			header_up -CF-Connecting-IP
+			header_up -True-Client-IP
+
+			# Upstream health. /api/health runs `SELECT 1` as the runtime role, so an app that
+			# is up but cannot reach PostgreSQL is taken out of rotation instead of serving
+			# five-hundreds. It returns a status word and nothing else.
+			health_uri /api/health
+			health_interval 30s
+			health_timeout 5s
+		}
+	}
+}
+
+# Everything on plain HTTP goes to HTTPS. Caddy adds this automatically for a named site; it is
+# written out so the redirect is visible in the file rather than implied.
+http://{$WALAAPLUS_DOMAIN} {
+	redir https://{host}{uri} permanent
+}

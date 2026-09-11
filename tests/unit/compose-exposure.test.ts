@@ -4,36 +4,42 @@ import yaml from "js-yaml";
 import { describe, expect, it } from "vitest";
 
 /**
- * Phase 0.3 security remediation — network exposure of the Compose stack.
+ * Network exposure and credential reach of the Compose stacks.
  *
- * The documentation claims the reverse proxy is the only publicly reachable service. That claim
- * was once false: PostgreSQL was published as `5433:5432` and the worker's health endpoint as
- * `8081:8081`, and a short-form Compose mapping without a host IP binds **0.0.0.0** — on a VPS
- * that is every interface, including the public one.
+ * Two files are held to this policy, for different reasons.
  *
- * This test reads docker-compose.yml and holds the policy:
+ * **docker-compose.yml** is the local stack. Its claim — that the reverse proxy is the only
+ * publicly reachable service — was once false: PostgreSQL was published as `5433:5432` and the
+ * worker's health endpoint as `8081:8081`, and a short-form Compose mapping without a host IP
+ * binds **0.0.0.0**, which on a VPS is every interface including the public one.
  *
- *   - exactly one service may bind a public interface, and it is `proxy`;
- *   - any other published port must be bound to 127.0.0.1, and exists only so host tooling
- *     (prisma, psql, the integration suite) can reach a local database;
- *   - application services publish nothing at all.
+ * **docker-compose.staging.yml** is a real deployment that faces the internet, so it is held to
+ * a stricter rule than the local file: the database publishes nothing at all, not even a loopback
+ * port, and lives on a network with `internal: true` — no gateway, no route out, no route in.
  *
- * It parses the file rather than `docker compose config` so it needs no Docker daemon and runs
- * in the unit project, inside the gate, on every commit.
+ * Both files are also checked for CREDENTIAL REACH. `env_file: .env` on `web` used to hand the
+ * application container every variable in the file, including the migrator password, both test
+ * database URLs and some leftover prototype API keys, while the comment beside it claimed the
+ * opposite. A service may only receive variables named on its own `environment:` block.
+ *
+ * The files are parsed as YAML rather than run through `docker compose config`, so these tests
+ * need no Docker daemon and run in the unit project, inside the gate, on every commit.
  */
 
-const COMPOSE = path.resolve(import.meta.dirname, "../../docker-compose.yml");
+const ROOT = path.resolve(import.meta.dirname, "../..");
+const LOCAL = path.join(ROOT, "docker-compose.yml");
+const STAGING = path.join(ROOT, "docker-compose.staging.yml");
 
-/** Services allowed to bind a public interface. */
-const PUBLIC_SERVICES = new Set(["proxy"]);
-/** Services allowed a loopback-only binding, and why. */
-const LOOPBACK_SERVICES = new Map([
-  ["db", "host tooling: prisma migrate, psql, npm run db:seed"],
-  ["test-db", "the integration suite runs on the host"],
-]);
-
+interface ComposeService {
+  ports?: unknown[];
+  expose?: unknown[];
+  env_file?: unknown;
+  environment?: Record<string, unknown> | string[];
+  networks?: unknown;
+}
 interface ComposeFile {
-  services: Record<string, { ports?: unknown[]; expose?: unknown[] }>;
+  services: Record<string, ComposeService>;
+  networks?: Record<string, { internal?: boolean } | null>;
 }
 
 interface Binding {
@@ -68,32 +74,46 @@ function bindingOf(service: string, entry: unknown): Binding {
   return { service, entry: text, hostIp, published: parts.length >= 2 };
 }
 
-function loadCompose(): ComposeFile {
-  return yaml.load(readFileSync(COMPOSE, "utf8")) as ComposeFile;
+function load(file: string): ComposeFile {
+  return yaml.load(readFileSync(file, "utf8")) as ComposeFile;
 }
 
-function allBindings(): Binding[] {
-  const compose = loadCompose();
+function bindings(file: string): Binding[] {
+  const compose = load(file);
   return Object.entries(compose.services).flatMap(([service, def]) =>
     (def.ports ?? []).map((entry) => bindingOf(service, entry)),
   );
 }
 
-describe("docker-compose network exposure", () => {
+/** Variable NAMES a service receives. Values are never read, printed or asserted on. */
+function envNames(service: ComposeService): string[] {
+  const env = service.environment;
+  if (Array.isArray(env)) return env.map((e) => String(e).split("=")[0]);
+  return Object.keys(env ?? {});
+}
+
+/** Names that carry, or build, the owner/migrator credential. */
+const MIGRATOR_VARIABLES = /^(MIGRATE_DATABASE_URL|POSTGRES_PASSWORD|POSTGRES_USER)$/;
+
+describe("docker-compose.yml — the local stack", () => {
+  const PUBLIC_SERVICES = new Set(["proxy"]);
+  const LOOPBACK_SERVICES = new Map([
+    ["db", "host tooling: prisma migrate, psql, npm run db:seed"],
+    ["test-db", "the integration suite runs on the host"],
+  ]);
+
   it("parses, and every service is accounted for by this policy", () => {
-    const compose = loadCompose();
-    const services = Object.keys(compose.services).sort();
-    expect(services).toEqual(["db", "migrate", "proxy", "test-db", "web", "worker"]);
+    expect(Object.keys(load(LOCAL).services).sort()).toEqual(["db", "migrate", "proxy", "test-db", "web", "worker"]);
   });
 
   it("publishes exactly one public binding, and it is the proxy", () => {
-    const publicBindings = allBindings().filter((b) => b.published && b.hostIp === null);
+    const publicBindings = bindings(LOCAL).filter((b) => b.published && b.hostIp === null);
     expect(publicBindings.map((b) => b.service)).toEqual(["proxy"]);
     expect(publicBindings).toHaveLength(1);
   });
 
   it("binds every other published port to 127.0.0.1 only", () => {
-    for (const b of allBindings()) {
+    for (const b of bindings(LOCAL)) {
       if (PUBLIC_SERVICES.has(b.service)) continue;
       expect(LOOPBACK_SERVICES.has(b.service), `${b.service} may not publish a port at all: ${b.entry}`).toBe(true);
       expect(b.hostIp, `${b.service} must bind 127.0.0.1, got: ${b.entry}`).toBe("127.0.0.1");
@@ -101,14 +121,14 @@ describe("docker-compose network exposure", () => {
   });
 
   it("publishes nothing from the application services", () => {
-    const compose = loadCompose();
+    const compose = load(LOCAL);
     for (const service of ["web", "worker", "migrate"]) {
       expect(compose.services[service].ports, `${service} must not publish any port`).toBeUndefined();
     }
   });
 
   it("keeps web and worker reachable inside the network via expose", () => {
-    const compose = loadCompose();
+    const compose = load(LOCAL);
     expect(compose.services.web.expose?.map(String)).toEqual(["3000"]);
     expect(compose.services.worker.expose?.map(String)).toEqual(["8081"]);
   });
@@ -120,5 +140,82 @@ describe("docker-compose network exposure", () => {
     expect(bindingOf("db", "127.0.0.1:${POSTGRES_PORT:-5433}:5432").hostIp).toBe("127.0.0.1");
     expect(bindingOf("proxy", "${WEB_PORT:-8080}:80").published).toBe(true);
     expect(bindingOf("x", "8081").published).toBe(false);
+  });
+});
+
+describe("docker-compose.staging.yml — the deployed stack", () => {
+  it("parses, and defines no test database", () => {
+    const services = Object.keys(load(STAGING).services).sort();
+    expect(services).toEqual(["db", "migrate", "proxy", "web", "worker"]);
+    // A throwaway database holding the migrator credentials, with its data in tmpfs, has no
+    // business on a server that faces the internet.
+    expect(services).not.toContain("test-db");
+  });
+
+  it("publishes 80 and 443 from the proxy, and nothing else from anything else", () => {
+    const all = bindings(STAGING);
+    expect(all.every((b) => b.service === "proxy"), "only the proxy may publish a port").toBe(true);
+    expect(all.map((b) => b.entry).sort()).toEqual(["443:443", "80:80"]);
+  });
+
+  it("gives the database no published port at all, not even a loopback one", () => {
+    // The local file binds 127.0.0.1 so prisma and psql can reach the database from the host.
+    // A server needs no such thing: migrations run in the `migrate` container and a backup runs
+    // inside the database container.
+    expect(load(STAGING).services.db.ports).toBeUndefined();
+  });
+
+  it("puts the database on an internal network, so there is no route rather than a closed port", () => {
+    const compose = load(STAGING);
+    expect(compose.networks?.backend?.internal).toBe(true);
+    expect(compose.services.db.networks).toEqual(["backend"]);
+    expect(compose.services.worker.networks).toEqual(["backend"]);
+    expect(compose.services.migrate.networks).toEqual(["backend"]);
+    // Only the proxy touches the network that has a way out.
+    expect(compose.services.proxy.networks).toEqual(["edge"]);
+    expect(compose.services.web.networks).toEqual(["backend", "edge"]);
+  });
+
+  it("exposes the app and worker inside the network only", () => {
+    const compose = load(STAGING);
+    expect(compose.services.web.expose?.map(String)).toEqual(["3000"]);
+    expect(compose.services.worker.expose?.map(String)).toEqual(["8081"]);
+  });
+
+  it("mounts the TLS-terminating proxy configuration, not the plain-HTTP local one", () => {
+    const volumes = (load(STAGING).services.proxy as { volumes?: string[] }).volumes ?? [];
+    expect(volumes.some((v) => v.startsWith("./deploy/Caddyfile.staging:"))).toBe(true);
+    expect(volumes.some((v) => v.startsWith("./deploy/Caddyfile:"))).toBe(false);
+  });
+});
+
+describe.each([
+  ["docker-compose.yml", LOCAL],
+  ["docker-compose.staging.yml", STAGING],
+])("%s — credential reach", (_name, file) => {
+  it("hands no service a whole env file", () => {
+    // `env_file:` passes EVERY variable in the file to the container. Naming variables one by
+    // one is the only way the next two assertions can be true by construction.
+    for (const [service, def] of Object.entries(load(file).services)) {
+      expect(def.env_file, `${service} must not use env_file`).toBeUndefined();
+    }
+  });
+
+  it("gives the migrator credential to the migrate service and to nothing else", () => {
+    const compose = load(file);
+    expect(envNames(compose.services.migrate).some((n) => MIGRATOR_VARIABLES.test(n))).toBe(true);
+    for (const service of ["web", "worker"]) {
+      const leaked = envNames(compose.services[service]).filter((n) => MIGRATOR_VARIABLES.test(n));
+      expect(leaked, `${service} must never receive the migrator credential`).toEqual([]);
+    }
+  });
+
+  it("gives the application only variables it needs, and no test-database URLs", () => {
+    const compose = load(file);
+    for (const service of ["web", "worker"]) {
+      const names = envNames(compose.services[service]);
+      expect(names).toContain("DATABASE_URL");
+      expect(names.filter((n) => n.startsWith("TEST_")), `${service} must not see test variables`).toEqual([]);
+    }
   });
 });

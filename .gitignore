@@ -37,6 +37,9 @@ build.log
 build_error.log
 lint_errors.txt
 
+# database dumps written by deploy/backup.sh. Never commit a dump: it is customer data.
+/backups/
+
 # test output
 /playwright-results/
 /playwright-report/
@@ -46,9 +49,11 @@ lint_errors.txt
 tmp_*.js
 tmp_*.ts
 
-# env files. The sanitized .env.example template IS tracked on purpose.
+# env files. The sanitized templates ARE tracked on purpose; they hold variable names only.
+# Everything else matching .env* stays out, including .env.staging on a server.
 .env*
 !.env.example
+!.env.staging.example
 
 # vercel
 .vercel

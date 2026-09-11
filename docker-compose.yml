@@ -82,11 +82,18 @@ services:
     build:
       context: .
       target: web
-    env_file: .env
+    # `env_file: .env` was here and was wrong: it handed this container EVERY variable in the
+    # file - the migrator password, both test-database URLs, and leftover prototype API keys -
+    # while the comment below claimed the opposite. Each service now receives the variables it
+    # needs by name. tests/unit/compose-exposure.test.ts fails if env_file returns.
     environment:
+      NODE_ENV: production
       # Inside the Compose network the database host is the service name, not localhost.
       # RUNTIME role only: web never holds the migrator credentials.
       DATABASE_URL: postgresql://${APP_DB_USER:-walaaplus_app}:${APP_DB_PASSWORD:?Set APP_DB_PASSWORD in .env (runtime role)}@db:5432/${POSTGRES_DB:-loyalty}?schema=public
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?Set NEXTAUTH_SECRET in .env (openssl rand -base64 48)}
+      # Reach the stack through the proxy, not through the app: this is the published port.
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:${WEB_PORT:-8080}}
       # Forwarding headers may be believed HERE and only here, because `proxy` overwrites them
       # and this service is not published to the host. See deploy/Caddyfile.
       TRUST_PROXY_HEADERS: "true"
@@ -107,10 +114,15 @@ services:
     build:
       context: .
       target: worker
-    env_file: .env
+    # Same as `web`: named variables only, never the whole env file. See the note there.
     environment:
+      NODE_ENV: production
       # RUNTIME role only. pg-boss owns the `pgboss` schema; it needs nothing in `public`.
       DATABASE_URL: postgresql://${APP_DB_USER:-walaaplus_app}:${APP_DB_PASSWORD:?Set APP_DB_PASSWORD in .env (runtime role)}@db:5432/${POSTGRES_DB:-loyalty}?schema=public
+      # The worker validates the same environment as web (src/server/env.ts), so the session
+      # secret must be present even though the worker serves no session.
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?Set NEXTAUTH_SECRET in .env (openssl rand -base64 48)}
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:${WEB_PORT:-8080}}
       WORKER_HEALTH_PORT: 8081
     # NOT published: the health endpoint exists for the container orchestrator, which probes it
     # from inside (see healthcheck below). Publishing it would put an unauthenticated status

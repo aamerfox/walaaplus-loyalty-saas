@@ -1,0 +1,177 @@
+# STAGING deployment. Self-contained: use this file ALONE, never merged with docker-compose.yml.
+#
+#   docker compose -f docker-compose.staging.yml --env-file .env.staging up -d --build
+#
+# It is a separate file rather than an overlay on the local stack for two reasons, both of which
+# were tried first and rejected:
+#
+#   - Compose APPENDS the `ports` of an overlay to the base service's. There is no syntax for
+#     removing a published port. The base publishes PostgreSQL on 127.0.0.1 so host tooling can
+#     reach it; an overlay could never take that back, and a staging file that cannot remove a
+#     database binding is not a staging file.
+#   - The base stack also defines `test-db`, a throwaway database holding the migrator
+#     credentials with its data in tmpfs. Nothing like it belongs on a server facing the internet.
+#
+# The full runbook — DNS, secrets, migration order, backups, rollback, certificate renewal — is
+# docs/STAGING-RUNBOOK.md. Read it before running this.
+#
+# WHAT IS PUBLIC: `proxy`, on 80 and 443, and nothing else. Every other service is reachable only
+# from inside the Compose networks. tests/unit/compose-exposure.test.ts fails the gate if that
+# stops being true of this file.
+#
+# WHAT HOLDS WHICH CREDENTIAL:
+#   migrate  MIGRATE_DATABASE_URL (owner role) - the only service that ever receives it
+#   web      DATABASE_URL (restricted runtime role) and the session secret
+#   worker   DATABASE_URL (restricted runtime role)
+# `env_file` is deliberately not used for web and worker. It would hand those containers every
+# variable in the file, migrator password included, to save typing one line. Each service below
+# receives the variables it needs and no others.
+
+name: walaaplus-staging
+
+services:
+  db:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env.staging}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.staging}
+      POSTGRES_DB: ${POSTGRES_DB:-loyalty}
+    # NO `ports`. Not even a loopback binding: nothing on this host needs to reach PostgreSQL
+    # through the host's network stack. Migrations, the app and the worker all reach it over the
+    # `backend` network by service name, and a backup runs INSIDE the container
+    # (`docker compose exec db pg_dump`). A published port here would be the single most likely
+    # way this deployment gets breached.
+    networks: [backend]
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  # One-shot: `prisma migrate deploy` then `scripts/db-roles.mjs`, then exits 0. web and worker
+  # wait for it to COMPLETE, so they can never run against an unmigrated schema or without their
+  # grants. Bringing the stack up again re-runs it; both steps are idempotent.
+  migrate:
+    build:
+      context: .
+      target: migrate
+    restart: "no"
+    environment:
+      MIGRATE_DATABASE_URL: postgresql://${POSTGRES_USER:?}:${POSTGRES_PASSWORD:?}@db:5432/${POSTGRES_DB:-loyalty}?schema=public
+      # db-roles.mjs reads the runtime role's NAME and PASSWORD from this URL and creates the
+      # role from them. It is the one place a runtime credential is written down.
+      DATABASE_URL: postgresql://${APP_DB_USER:-walaaplus_app}:${APP_DB_PASSWORD:?Set APP_DB_PASSWORD in .env.staging}@db:5432/${POSTGRES_DB:-loyalty}?schema=public
+    networks: [backend]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    build:
+      context: .
+      target: web
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      # RUNTIME role only. This container never receives POSTGRES_PASSWORD.
+      DATABASE_URL: postgresql://${APP_DB_USER:-walaaplus_app}:${APP_DB_PASSWORD:?Set APP_DB_PASSWORD in .env.staging}@db:5432/${POSTGRES_DB:-loyalty}?schema=public
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?Set NEXTAUTH_SECRET in .env.staging - generate with openssl rand -base64 48}
+      NEXTAUTH_URL: https://${WALAAPLUS_DOMAIN:?Set WALAAPLUS_DOMAIN in .env.staging}
+      # Forwarding headers may be believed HERE and only here: `proxy` REPLACES them with the
+      # address of the connection it received, and this service publishes no port, so no request
+      # can reach it without passing through that replacement. See deploy/Caddyfile.staging.
+      TRUST_PROXY_HEADERS: "true"
+    # Container-only. A caller who could reach port 3000 directly would forge X-Forwarded-For and
+    # walk past every per-address rate limit in the product.
+    expose:
+      - "3000"
+    networks: [backend, edge]
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  worker:
+    build:
+      context: .
+      target: worker
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${APP_DB_USER:-walaaplus_app}:${APP_DB_PASSWORD:?Set APP_DB_PASSWORD in .env.staging}@db:5432/${POSTGRES_DB:-loyalty}?schema=public
+      # The worker validates the same environment as web (src/server/env.ts), so the session
+      # secret must be present even though the worker serves no session.
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?Set NEXTAUTH_SECRET in .env.staging}
+      NEXTAUTH_URL: https://${WALAAPLUS_DOMAIN:?Set WALAAPLUS_DOMAIN in .env.staging}
+      WORKER_HEALTH_PORT: 8081
+    # Container-only, and on the internal network only: an unauthenticated status endpoint has no
+    # reason to be reachable from the host. Read it by hand with
+    #   docker compose -f docker-compose.staging.yml exec worker wget -qO- http://localhost:8081/health
+    expose:
+      - "8081"
+    networks: [backend]
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8081/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # THE ONLY PUBLIC SERVICE. Terminates TLS, obtains and renews the certificate over ACME, and
+  # rewrites the forwarding headers the app is allowed to believe.
+  proxy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      WALAAPLUS_DOMAIN: ${WALAAPLUS_DOMAIN:?Set WALAAPLUS_DOMAIN in .env.staging, e.g. staging.example.com}
+      ACME_EMAIL: ${ACME_EMAIL:?Set ACME_EMAIL in .env.staging - the address Let's Encrypt notifies before expiry}
+    # Both are required and neither is optional: 443 serves the site, 80 answers the HTTP-01
+    # challenge and redirects human traffic to HTTPS.
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile.staging:/etc/caddy/Caddyfile:ro
+      # THE CERTIFICATE AND ITS PRIVATE KEY LIVE HERE. Back this volume up, or at minimum never
+      # delete it casually: re-issuing counts against Let's Encrypt's rate limit for the name.
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [edge]
+    depends_on:
+      web:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost/healthz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+networks:
+  # `internal: true` removes this network's gateway. Containers attached only to it - db, worker,
+  # migrate - have no route to the internet AT ALL, in either direction. It is the difference
+  # between "we did not publish the port" and "there is no path".
+  backend:
+    internal: true
+  # The proxy needs outbound access for ACME, and `web` is attached so the proxy can reach it.
+  edge:
+
+volumes:
+  db-data:
+  caddy-data:
+  caddy-config:
