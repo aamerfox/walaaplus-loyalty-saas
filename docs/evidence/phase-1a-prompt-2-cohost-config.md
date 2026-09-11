@@ -59,7 +59,8 @@ nothing was pushed.
 | 10 | `354694a` | docs: correct the deployment record - migrations completed, role setup failed |
 | 11 | `6f0c270` | docs(ops): correct the migrate failure message an operator will read |
 | 12 | `887d18a` | fix(deploy): bind the standalone server on container loopback, and prove it in a real container |
-| 13 | (this commit) | docs: the web container health remediation |
+| 13 | `05c89e3` | docs: the web container health remediation |
+| 14 | (this commit) | docs: fill in row 13 |
 
 Files in commit 1:
 
