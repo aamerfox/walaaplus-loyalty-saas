@@ -5,6 +5,13 @@ import { Link, usePathname } from "@/i18n/routing";
 import { LayoutDashboard, Users, CreditCard, Settings, LogOut, QrCode, PieChart, ShieldCheck, MapPin, BellRing, Star, Share2, FileText, Server, Layers } from "lucide-react";
 import { cn } from "@/lib/utils";
 
+/**
+ * Routes with a real implementation behind them. Every other entry below is a visual prototype
+ * from the original mock-up and stays HIDDEN until its phase lands (docs/PHASE-PLAN.md), so no one
+ * mistakes a mock for a feature. Add a route here in the same commit that implements it.
+ */
+const IMPLEMENTED_ROUTES: ReadonlySet<string> = new Set(["/business"]);
+
 export default function Sidebar() {
   const t = useTranslations("Navigation");
   const pathname = usePathname();
@@ -25,7 +32,7 @@ export default function Sidebar() {
     { name: t("team"), href: "/business/team", icon: ShieldCheck },
     { name: t("billing"), href: "/business/billing", icon: CreditCard },
     { name: t("settings"), href: "/business/settings", icon: Settings },
-  ];
+  ].filter((item) => IMPLEMENTED_ROUTES.has(item.href));
 
   return (
     <aside className="w-64 bg-white dark:bg-zinc-950 border-e border-zinc-200 dark:border-zinc-800 flex flex-col h-screen transition-all duration-300 shadow-sm">
