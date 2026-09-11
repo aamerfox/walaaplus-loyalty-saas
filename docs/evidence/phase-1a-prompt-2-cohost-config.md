@@ -34,7 +34,8 @@ nothing was pushed.
 | # | SHA | Subject |
 |---|---|---|
 | 1 | `2e4e17d` | feat(ops): a co-hosted staging stack for a server that already owns 80 and 443 |
-| 2 | (this commit) | docs: the co-hosted configuration evidence |
+| 2 | `d30e4c2` | docs: the co-hosted configuration evidence |
+| 3 | (this commit) | docs: fill in row 2 |
 
 Files in commit 1:
 
