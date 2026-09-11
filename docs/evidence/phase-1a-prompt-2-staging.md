@@ -23,8 +23,8 @@ Everything that can be honestly done without them is done:
 | Deployment runbook | written |
 | Backup and restore-verification scripts | written **and actually run against a real PostgreSQL** |
 | Local security validation (§5) | done, output below |
-| `npm run gate` | **PASS 13/13 in 241.4 s** on `591aa2f` |
-| `npm run test:e2e` | **3 passed (30.8 s)** |
+| `npm run gate` | **PASS 13/13 in 237.7 s** on `29a1642`, after the review fix |
+| `npm run test:e2e` | **3 passed (31.4 s)** |
 | `npm audit`, full tree and production/high+ | **0 vulnerabilities** each |
 
 ### Owner inputs: supplied or not
@@ -57,7 +57,9 @@ rewritten history; the branch still has no upstream.
 | 4 | `30b3003` | feat(ops): backups that are verified on write, and a restore drill that reads the data |
 | 5 | `591aa2f` | docs: the staging runbook, and who performs each step |
 | 6 | `ea3f880` | docs: the staging evidence, and why it is blocked rather than passed |
-| 7 | (this commit) | docs: fill in the evidence commit SHA, which row 6 could not know while being written |
+| 7 | `f2d01f4` | docs: fill in the evidence commit SHA, which row 6 could not know while being written |
+| 8 | `29a1642` | fix(ops): generate database passwords as hex, and refuse a URL that does not parse |
+| 9 | (this commit) | docs: record the review finding and its fix |
 
 ---
 
@@ -257,29 +259,29 @@ not performed.
 
 ## 7. Automated verification
 
-On `591aa2f`, working tree clean.
+On `29a1642`, working tree clean.
 
 ```
 GATE SUMMARY
-PASS  dependency audit (prod, high+)             1219 ms
-PASS  prisma generate                            1561 ms
-PASS  lint                                       5946 ms
-PASS  typecheck                                  5333 ms
-PASS  prisma validate                            1729 ms
-PASS  unit tests                                 1676 ms
-PASS  test db up                                  967 ms
-PASS  migrate deploy (test db, migrator role)    6002 ms
-PASS  migrate status (test db)                   5611 ms
-PASS  runtime role grants (test db)               160 ms
-PASS  integration tests                        193685 ms
-PASS  worker build                                117 ms
-PASS  production build                          17433 ms
-GATE PASSED in 241.4s (13/13 steps)
+PASS  dependency audit (prod, high+)              982 ms
+PASS  prisma generate                            1573 ms
+PASS  lint                                       5467 ms
+PASS  typecheck                                  5501 ms
+PASS  prisma validate                            1873 ms
+PASS  unit tests                                 1780 ms
+PASS  test db up                                  969 ms
+PASS  migrate deploy (test db, migrator role)    5587 ms
+PASS  migrate status (test db)                   5770 ms
+PASS  runtime role grants (test db)               135 ms
+PASS  integration tests                        192552 ms
+PASS  worker build                                130 ms
+PASS  production build                          15339 ms
+GATE PASSED in 237.7s (13/13 steps)
 ```
 
 | Suite | Files | Tests | Change |
 |---|---|---|---|
-| unit | 12 | **154** | +35 (compose exposure +12, deployment config +23) |
+| unit | 12 | **165** | +46 (compose exposure +12, deployment config +27, connection-string validation +7) |
 | integration | 31 | **368** | +5 (`/api/health`) |
 | browser (Playwright) | 1 | **3 passed (30.8 s)** | unchanged |
 
@@ -315,6 +317,73 @@ either.
 
 **HTTPS verification:** not available. No certificate was requested, issued or inspected, because
 there is no hostname to request one for.
+
+---
+
+## 8a. Review round 1 — a password format that would have broken the deployment
+
+**Reviewer finding, accepted in full.** The secret-generation instructions used
+`openssl rand -base64 24` for both PostgreSQL passwords, and both are interpolated into a
+connection string by Compose, which substitutes them verbatim and cannot percent-encode:
+
+```
+postgresql://walaaplus:ab/cd@db:5432/loyalty
+```
+
+The base64 alphabet includes `/` and `+`. A password containing `/` ends the URL authority early,
+so the string stops being a URL and `prisma migrate deploy`, `psql` and `pg_dump` all reject it.
+
+**The reviewer called the probability "not rare"; measured, it is worse than that.** Over 200
+samples on this machine:
+
+| Character in `openssl rand -base64 24` | Frequency |
+|---|---|
+| contains `/` — breaks the URL outright | **36%** |
+| contains `+` — parses, but ambiguous across tooling | **38%** |
+
+A first deployment would therefore have succeeded or failed on a coin flip, with a driver error
+pointing nowhere near the password. That is the worst shape a deployment step can have: it reads
+as flaky infrastructure rather than as a documentation bug.
+
+### What changed
+
+| Location | Change |
+|---|---|
+| `.env.staging.example` | Both database passwords now `openssl rand -hex 32`, with the reason stated. `NEXTAUTH_SECRET` stays base64: it never goes into a URL |
+| `docs/STAGING-RUNBOOK.md` §2 | Same, plus the measured frequencies and the percent-encoding escape hatch |
+| `docker-compose.staging.yml`, `docker-compose.yml` | A note at the interpolation site: Compose cannot encode, so the value must be URL-safe |
+| `.env.example` | The same warning for the local database passwords |
+| `src/server/env.ts` | **New validation.** It previously checked only that `DATABASE_URL` *started with* `postgresql://`, so a broken password passed, the app started, and the first query failed instead. It now parses the string and requires a host, a database name and decodable userinfo |
+| `scripts/db-roles.mjs` | "is not a valid URL" replaced with the cause and the fix; an unencoded `%` is refused instead of throwing `URIError` out of `decodeURIComponent` |
+
+Hex is `[0-9a-f]`. 32 bytes is 64 characters and 256 bits, **stronger** than the 192 bits of the
+base64 form it replaces, so this is not a security trade. A correctly percent-encoded password
+(`ab%2Fcd`) is still accepted everywhere. Neither guard prints a value; both name the variable.
+
+### Proof
+
+```
+$ node scripts/db-roles.mjs            # with MIGRATE_DATABASE_URL containing a raw slash
+db-roles: MIGRATE_DATABASE_URL is not a valid URL. A password containing / + % : @ or
+whitespace must be percent-encoded; generate database passwords with `openssl rand -hex 32`
+instead. The value is not printed.
+$ echo $?
+2
+```
+
+Eleven new unit tests: seven in `tests/unit/env.test.ts` for the malformed connection strings
+(raw slash, unencoded `%`, no host, no database name, and the encoded and hex forms being
+accepted), and four in `tests/unit/deploy-config.test.ts` holding the generation commands
+themselves. The last of those was mutation-tested: reverting one template line to `-base64`
+fails the gate, and the file was restored byte-identical afterwards, sha256 verified.
+
+**Unit tests: 154 to 165.** Gate, browser tests and audits all still pass; the figures in §1 and
+§7 are from the run after this fix.
+
+**Deployment status is unchanged by this.** It remains blocked on B1, B2 and B3. The reviewer
+instruction — do not follow the secret-provisioning or deployment steps until this is fixed — is
+satisfied: those steps now generate URL-safe passwords, and a value that would break the
+connection string is refused at three separate points instead of failing at a random later one.
 
 ---
 
@@ -363,4 +432,4 @@ No critical or high issue remains open. Everything below is Low unless marked.
 
 ---
 
-**BLOCKED — PHASE 1A PROMPT 2 HTTPS STAGING — owner decisions B1 (hosting), B2 (staging domain) and B3 (HTTPS certificate and DNS readiness) are all still open, and no deployment authorization was given; there is no host, hostname or DNS record to deploy to, so no certificate could be issued and the seven real-device checks in §8 remain unperformed. All staging configuration, the runbook, the backup and restore-verification scripts, and every local check are complete and passing on `591aa2f`**
+**BLOCKED — PHASE 1A PROMPT 2 HTTPS STAGING — owner decisions B1 (hosting), B2 (staging domain) and B3 (HTTPS certificate and DNS readiness) are all still open, and no deployment authorization was given; there is no host, hostname or DNS record to deploy to, so no certificate could be issued and the seven real-device checks in §8 remain unperformed. The password-format blocker raised in review is fixed and verified (§8a). All staging configuration, the runbook, the backup and restore-verification scripts, and every local check are complete and passing on `29a1642`**
