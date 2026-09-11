@@ -48,7 +48,10 @@
 			header_up -CF-Connecting-IP
 			header_up -True-Client-IP
 
-			health_uri /api/auth/providers
+			# /api/health runs `SELECT 1` as the runtime role and returns a status word only,
+			# so an app that is up but cannot reach PostgreSQL is reported unhealthy rather
+			# than left in rotation to serve five-hundreds.
+			health_uri /api/health
 			health_interval 30s
 			health_timeout 5s
 		}
