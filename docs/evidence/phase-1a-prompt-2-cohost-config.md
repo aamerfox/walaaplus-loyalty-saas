@@ -12,6 +12,10 @@
 **PASS — the configuration is written, validated locally, and ready for review.** It has not been
 deployed, and deploying it is not part of this task.
 
+**Round 3 (§10): a real deployment attempt failed, and the defect it found is fixed.** The
+first staging deployment reached the `migrate` container and stopped there, before Caddy was
+touched. See §10.
+
 **Round 2 (§9): both review findings remediated.** Forwarded IP headers are no longer trusted in
 the co-hosted shape, and all four services now carry CPU and memory ceilings. The figures in the
 table below are from the run after that remediation.
@@ -42,7 +46,9 @@ nothing was pushed.
 | 3 | `4b635c2` | docs: fill in row 2 |
 | 4 | `58b1b98` | fix(ops): stop trusting forwarded IP headers on the shared host, and cap what this stack can take |
 | 5 | `d6c4964` | docs: the safety remediation |
-| 6 | (this commit) | docs: fill in row 5 |
+| 6 | `7a95d26` | docs: fill in row 5 |
+| 7 | `bed552f` | fix(docker): ship the module the migrate entrypoint imports |
+| 8 | (this commit) | docs: the migrate-image remediation |
 
 Files in commit 1:
 
@@ -300,7 +306,7 @@ Every item here was in reach and was left alone on purpose.
 | # | Sev | Item | Follow-up |
 |---|---|---|---|
 | ~~C-1~~ | **CLOSED in round 2 (§9.1)** | ~~`TRUST_PROXY_HEADERS=true` trusts every local process here.~~ The setting is now `false` and a test prevents its return. The residual is that per-IP rate limiting is unavailable in this shape, which is a documented consequence rather than a defect | Recoverable by moving to a dedicated server (`docker-compose.staging.yml`) |
-| C-2 | Low | The co-hosted stack has never been **run**, only validated. A first `up` on that host may still surface something host-specific | Owner/OCI agent, following runbook §13.4 |
+| C-2 | Low | ~~The co-hosted stack has never been run.~~ **It has now: the first attempt failed inside `migrate` (§10) and is fixed.** The stack still has not completed a full start on that host | Owner/OCI agent, resume at runbook §13.4 |
 | C-3 | Low | `staging.truebiznes.com` is now hardcoded in the fragment | Correct for a reviewed fragment naming one site. If the hostname changes, the fragment changes with it |
 | C-4 | Low | Backups (§6) write to the same host they protect | Unchanged from before; owner decision C2 |
 | C-5 | Low | The real-device checklist (§12) is still unperformed | Blocked until staging is live; unchanged by this work |
@@ -488,4 +494,182 @@ runbook, and in the Compose file, and recoverable by moving to a dedicated serve
 
 ---
 
-**PASS — CO-HOSTED OCI STAGING CONFIG SAFETY REMEDIATED — READY FOR ARCHITECT REVIEW**
+---
+
+## 10. Round 3 — the first real deployment attempt, and the image defect it found
+
+This section records a **failed deployment**. Nothing in it claims staging is running.
+
+### 10.1 What happened
+
+The owner attempted the first real co-hosted staging deployment from commit
+`7a95d2643fcc0eff9ad77035178ba7611bcb336a`. It reached the `migrate` container and stopped there:
+
+```
+Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/app/scripts/lib/db-role-membership.mjs'
+imported from /app/scripts/db-roles.mjs
+```
+
+**It failed before Caddy was changed.** The host's `/etc/caddy/Caddyfile` was never edited, no
+site block was inserted, no reload was issued and no certificate was requested. The runbook's
+order — stack up and answering on loopback *before* touching the proxy (§13.4, §13.5) — is what
+kept the failure contained to a container that had not yet been put in front of anything.
+
+**The WalaaPlus containers were removed without deleting volumes.** `down` was used, not
+`down -v`, so the `walaaplus-staging-cohost_db-data` volume still exists on the host.
+
+**Nothing is claimed beyond that.** Staging is not deployed. No real-device check was performed.
+No part of §8's manual checklist moved.
+
+### 10.2 The defect
+
+`scripts/db-roles.mjs` imports `./lib/db-role-membership.mjs`. The Dockerfile's `migrate` target
+copied two files:
+
+```dockerfile
+COPY --chown=app:app scripts/db-migrate.mjs scripts/db-roles.mjs ./scripts/
+```
+
+The helper was in the repository the whole time, and every check in this project ran against the
+**source tree**, where it exists. The image was missing it. That is the shape of the defect worth
+naming: a source tree cannot answer whether an image is complete, and no amount of source-tree
+testing would ever have caught this.
+
+It landed in the worst container to land in. `web` and `worker` wait on `migrate` with
+`condition: service_completed_successfully`, so a broken migrate image is not a degraded service,
+it is a deployment that cannot start at all.
+
+**Reproduced locally before anything was changed**, with no network:
+
+```
+$ docker build --target migrate -t walaaplus-migrate:before-fix .
+$ docker run --rm --network none walaaplus-migrate:before-fix sh -c 'ls -la /app/scripts/lib'
+ls: /app/scripts/lib: No such file or directory
+
+$ docker run --rm --network none walaaplus-migrate:before-fix node scripts/db-roles.mjs
+Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/app/scripts/lib/db-role-membership.mjs'
+imported from /app/scripts/db-roles.mjs
+```
+
+Byte for byte the deployment's error.
+
+### 10.3 The fix — `bed552f`
+
+```dockerfile
+COPY --chown=app:app scripts/lib ./scripts/lib
+```
+
+The directory, not that one file, so a helper added later arrives with it.
+
+**No product behaviour changed.** No schema, no ledger logic, no Compose networking, no Caddy
+configuration, no secret, no application code. The commit touches `Dockerfile`, `scripts/gate.mjs`,
+and two new test files.
+
+### 10.4 The regression guard runs inside the image
+
+`scripts/check-migrate-image.mjs` is a new **gate step**, because the only thing that can answer
+"is this image complete" is the image. It:
+
+1. builds `--target migrate`;
+2. requires `/app/scripts/lib/db-role-membership.mjs` to be present in the image;
+3. imports it inside the image and requires `decideMembershipAction` to be a function — presence
+   on disk is not the same as being resolvable by Node;
+4. runs `scripts/db-roles.mjs` inside the image **with no environment and `--network none`**, and
+   requires the failure to be the missing-variable message rather than `ERR_MODULE_NOT_FOUND`.
+   Module resolution happens before any top-level code, so this proves the entire module graph
+   links.
+
+No database is contacted at any point, and the script under test prints variable **names** only.
+
+`tests/unit/dockerfile-migrate-deps.test.ts` is the cheap complement: it reads the entrypoints'
+**real import graph** and checks a `COPY` line covers each relative specifier, catching the
+mistake in milliseconds at edit time. It also asserts the gate still calls the image check, so the
+fast guard can never quietly replace the real one. It is explicitly not the proof, and says so.
+
+**Both were mutation-tested**, with the Dockerfile restored byte-identical afterwards (sha256
+verified):
+
+| Mutation | Result |
+|---|---|
+| Remove the `scripts/lib` COPY, then run the image check | **FAIL**, reporting the missing module and the deployment's own error |
+| Remove it, then run the static test | **FAIL**: "copies every local module the entrypoints import" |
+
+### 10.5 Verification, on `bed552f`
+
+```
+GATE SUMMARY
+PASS  dependency audit (prod, high+)             1501 ms
+PASS  prisma generate                           11670 ms
+PASS  lint                                      37369 ms
+PASS  typecheck                                  4391 ms
+PASS  prisma validate                            1621 ms
+PASS  unit tests                                 3101 ms
+PASS  test db up                                 1058 ms
+PASS  migrate deploy (test db, migrator role)    6357 ms
+PASS  migrate status (test db)                   5693 ms
+PASS  runtime role grants (test db)               626 ms
+PASS  integration tests                        197684 ms
+PASS  worker build                                196 ms
+PASS  production build                          26280 ms
+PASS  migrate image dependencies                 2829 ms
+GATE PASSED in 300.4s (14/14 steps)
+```
+
+| Check | Result |
+|---|---|
+| unit / integration | **199** (13 files) / **368** (31 files) |
+| `npm run test:e2e` | **3 passed (34.8 s)** |
+| `npm audit --omit=dev --audit-level=high` | **0 vulnerabilities** |
+| `npm audit` (full tree) | **0 vulnerabilities** |
+| `docker compose config --quiet` — co-hosted, dedicated, local | **all valid**, with non-secret placeholder variables |
+| `docker build --no-cache --target migrate` | **succeeded** |
+
+Smoke check inside the clean, no-cache image:
+
+```
+/app/scripts/lib:
+-rwxr-xr-x  1 app  app  1753  db-role-membership.mjs
+
+$ node scripts/db-roles.mjs            # --network none, no env file
+db-roles: MIGRATE_DATABASE_URL is not set. See .env.example.
+
+$ node --input-type=module -e 'import("/app/scripts/lib/db-role-membership.mjs")…'
+decideMembershipAction is a function
+```
+
+The entrypoint now reaches its own environment validation instead of dying at link time. That
+message is the correct outcome for a container started with no configuration, and it names a
+variable without printing any value.
+
+### 10.6 The existing staging volume
+
+**It can be reused, and it must not be deleted.**
+
+The deployment stopped inside `migrate`, at **module resolution** — before `prisma migrate deploy`
+ran, before a single statement reached PostgreSQL. `web` and `worker` never started, because they
+wait on `migrate` completing successfully. So the database in `walaaplus-staging-cohost_db-data`
+is in whatever state PostgreSQL's own initialisation left it: an empty database with no WalaaPlus
+schema, or a schema from an earlier successful run. Either is a valid starting point.
+
+Both steps that follow are idempotent by design: `prisma migrate deploy` applies only what is
+missing, and `scripts/db-roles.mjs` creates or refreshes the runtime role and its grants. Bringing
+the stack up again on the fixed image runs both against the existing volume correctly.
+
+There is no need to delete the volume, and doing so would destroy the database for no benefit.
+Before resuming, the runbook's §13.4 check still applies: bring the stack up, confirm
+`migrate` exits 0 and `curl http://127.0.0.1:3100/api/health` answers, and only then consider the
+Caddy block.
+
+### 10.7 What this round did not do
+
+- **It did not deploy anything.** No OCI host was contacted from this session.
+- **No Caddy file was read, written, reloaded or restarted**; no DNS record was touched; no
+  certificate was requested.
+- **No real-device check was performed.** §8's checklist is unchanged and entirely unperformed.
+- **No claim is made that staging works.** One container was fixed and proven to start; the
+  deployment has not been re-attempted.
+- `master` is untouched at `b9ee686`.
+
+---
+
+**PASS — MIGRATE IMAGE REMEDIATION COMPLETE — READY TO RESUME STAGING DEPLOYMENT**
