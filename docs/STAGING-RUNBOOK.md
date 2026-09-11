@@ -62,10 +62,33 @@ is how you confirm that.
 a chat window, never in a ticket:
 
 ```bash
-openssl rand -base64 48   # NEXTAUTH_SECRET
-openssl rand -base64 24   # POSTGRES_PASSWORD      (the migrator/owner role)
-openssl rand -base64 24   # APP_DB_PASSWORD        (the restricted runtime role)
+openssl rand -base64 48   # NEXTAUTH_SECRET        (never goes in a URL; base64 is fine)
+openssl rand -hex 32      # POSTGRES_PASSWORD      (the migrator/owner role)
+openssl rand -hex 32      # APP_DB_PASSWORD        (the restricted runtime role)
 ```
+
+**The two database passwords must be hex.** Both are embedded in a connection string that
+`docker-compose.staging.yml` builds:
+
+```
+postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+```
+
+base64 uses `/` and `+`. A password containing `/` ends the URL's authority early, so
+`postgresql://walaaplus:ab/cd@db:5432/loyalty` is not a URL at all: `prisma migrate deploy`,
+`psql` and `pg_dump` all reject it. The trap is that this depends on which bytes `openssl`
+happened to draw, so the same instructions work one day and fail the next, with an error that
+points nowhere near the password. Measured on a developer machine: **36% of
+`openssl rand -base64 24` values contain a `/`, and 38% contain a `+`.**
+
+Hex is `[0-9a-f]`: safe in a URL, safe in Compose interpolation, safe on a `psql` command line.
+32 bytes of hex is 64 characters and 256 bits of entropy, stronger than the 192 bits of the
+base64 form it replaces. `NEXTAUTH_SECRET` stays base64 because it is never put in a URL.
+
+If you must use a password that contains `/`, `+`, `%`, `:`, `@` or whitespace, percent-encode
+it before it reaches the URL (`/` becomes `%2F`). The application refuses to start on a
+connection string that does not parse, and `scripts/db-roles.mjs` refuses to create the role,
+both naming the variable and neither printing the value.
 
 The two database passwords must differ from each other. All three must differ from development
 and from production. A value that has ever appeared in this repository's git history is refused

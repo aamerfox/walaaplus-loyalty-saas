@@ -26,6 +26,7 @@ const ROOT = path.resolve(import.meta.dirname, "../..");
 const local = readFileSync(path.join(ROOT, "deploy/Caddyfile"), "utf8");
 const staging = readFileSync(path.join(ROOT, "deploy/Caddyfile.staging"), "utf8");
 const stagingEnvTemplate = readFileSync(path.join(ROOT, ".env.staging.example"), "utf8");
+const runbook = readFileSync(path.join(ROOT, "docs/STAGING-RUNBOOK.md"), "utf8");
 
 /** Directive lines only, comments and blanks removed. */
 function directives(text: string): string[] {
@@ -174,5 +175,50 @@ describe(".env.staging.example", () => {
 
   it("names no real domain either", () => {
     expect(stagingEnvTemplate).not.toMatch(REAL_LOOKING_DOMAIN);
+  });
+});
+
+describe("database password guidance", () => {
+  /*
+   * Both database passwords are interpolated into a connection string by Compose, which
+   * substitutes them verbatim and cannot percent-encode. `openssl rand -base64 24` produces a
+   * `/` in roughly a third of its output, and
+   *
+   *   postgresql://walaaplus:ab/cd@db:5432/loyalty
+   *
+   * is not a URL: the authority ends at the slash. The instructions therefore worked or failed
+   * depending on which bytes openssl happened to draw, which is the worst way for a deployment
+   * step to be wrong - it looks like an intermittent infrastructure problem rather than a
+   * documentation bug. Hex is [0-9a-f] and removes the class of failure entirely.
+   */
+  const sources: Array<[string, string]> = [
+    [".env.staging.example", stagingEnvTemplate],
+    ["docs/STAGING-RUNBOOK.md", runbook],
+  ];
+
+  it.each(sources)("%s generates both database passwords as hex", (_name, text) => {
+    const generation = text.split("\n").filter((line) => line.includes("openssl rand"));
+    const forDatabase = generation.filter(
+      (line) => line.includes("POSTGRES_PASSWORD") || line.includes("APP_DB_PASSWORD"),
+    );
+    // One command per database password, and no more than the two roles that exist.
+    expect(forDatabase.length).toBeGreaterThanOrEqual(2);
+    for (const line of forDatabase) {
+      expect(line, "a database password must be generated as hex").toContain("openssl rand -hex");
+      expect(line, "base64 uses / and + and breaks the connection string").not.toContain("-base64");
+    }
+  });
+
+  it.each(sources)("%s still generates the session secret as base64", (_name, text) => {
+    // NEXTAUTH_SECRET never goes into a URL, so it keeps the denser alphabet.
+    const line = text.split("\n").find((l) => l.includes("openssl rand") && l.includes("NEXTAUTH_SECRET"));
+    expect(line).toBeDefined();
+    expect(line).toContain("-base64");
+  });
+
+  it("explains why, so the next person does not switch it back", () => {
+    for (const [name, text] of sources) {
+      expect(text, `${name} must say why hex`).toMatch(/not a URL|breaks|ends the (?:URL's )?authority/i);
+    }
   });
 });

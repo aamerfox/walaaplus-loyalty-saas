@@ -51,6 +51,48 @@ describe("validateEnv", () => {
     expect(() => validateEnv({ ...VALID, DATABASE_URL: "mysql://x" })).toThrow(EnvValidationError);
   });
 
+  describe("a password that breaks the connection string", () => {
+    // `openssl rand -base64 24` produces a `/` roughly a third of the time, and the resulting
+    // URL is not a URL: the authority ends at the slash. Before this check the process started
+    // and failed at the first query instead, with a driver error pointing nowhere near the
+    // password — which is what made the failure look intermittent rather than deterministic.
+    const withPassword = (pw: string) => `postgresql://walaaplus:${pw}@db:5432/loyalty?schema=public`;
+
+    it("refuses a raw slash, and names the variable without echoing it", () => {
+      let caught: unknown;
+      try {
+        validateEnv({ ...VALID, DATABASE_URL: withPassword("abc/def") });
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(EnvValidationError);
+      const err = caught as EnvValidationError;
+      expect(err.variables).toEqual(["DATABASE_URL"]);
+      expect(err.message).not.toContain("abc/def");
+    });
+
+    it("refuses an unencoded percent sign", () => {
+      // decodeURIComponent throws on this, exactly where the driver would.
+      expect(() => validateEnv({ ...VALID, DATABASE_URL: withPassword("ab%zz") })).toThrow(EnvValidationError);
+    });
+
+    it("accepts the same password once it is percent-encoded", () => {
+      expect(() => validateEnv({ ...VALID, DATABASE_URL: withPassword("abc%2Fdef") })).not.toThrow();
+    });
+
+    it("accepts hex, which is what the templates now recommend", () => {
+      expect(() => validateEnv({ ...VALID, DATABASE_URL: withPassword("f".repeat(64)) })).not.toThrow();
+    });
+
+    it("refuses a connection string with no database name", () => {
+      expect(() => validateEnv({ ...VALID, DATABASE_URL: "postgresql://u:p@db:5432" })).toThrow(EnvValidationError);
+    });
+
+    it("refuses a connection string with no host", () => {
+      expect(() => validateEnv({ ...VALID, DATABASE_URL: "postgresql:///loyalty" })).toThrow(EnvValidationError);
+    });
+  });
+
   it("rejects an unknown NODE_ENV", () => {
     expect(() => validateEnv({ ...VALID, NODE_ENV: "staging" })).toThrow(EnvValidationError);
   });

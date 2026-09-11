@@ -55,17 +55,37 @@ function parsePostgresUrl(name, raw) {
   try {
     url = new URL(raw);
   } catch {
-    fail(`${name} is not a valid URL.`);
+    // Almost always one cause: an unencoded character in the password. `openssl rand -base64 24`
+    // yields a `/` about a third of the time, and in
+    //   postgresql://walaaplus:ab/cd@db:5432/loyalty
+    // the authority ends at that slash, so this is not a URL. Say so here rather than leaving
+    // the operator with "is not a valid URL" and a password that looks perfectly fine.
+    fail(
+      `${name} is not a valid URL. A password containing / + % : @ or whitespace must be ` +
+        "percent-encoded; generate database passwords with `openssl rand -hex 32` instead. " +
+        "The value is not printed.",
+    );
   }
   if (!/^postgres(ql)?:$/.test(url.protocol)) fail(`${name} must be a postgresql:// URL.`);
   const database = decodeURIComponent(url.pathname.replace(/^\//, ""));
   if (!database) fail(`${name} has no database name.`);
+  if (!url.hostname) fail(`${name} has no host.`);
+  let decodedPassword;
+  try {
+    decodedPassword = decodeURIComponent(url.password);
+  } catch {
+    fail(
+      `${name} has a password containing an unencoded % sign. Percent-encode it, or generate ` +
+        "database passwords with `openssl rand -hex 32`. The value is not printed.",
+    );
+  }
+  if (!decodedPassword) fail(`${name} has no password.`);
   // node-postgres connection string: Prisma's `?schema=` parameter is not a libpq option.
   const forPg = new URL(raw);
   forPg.searchParams.delete("schema");
   return {
     user: decodeURIComponent(url.username),
-    password: decodeURIComponent(url.password),
+    password: decodedPassword,
     database,
     connectionString: forPg.toString(),
   };

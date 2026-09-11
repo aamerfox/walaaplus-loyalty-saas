@@ -69,6 +69,9 @@ services:
       context: .
       target: migrate
     environment:
+      # Both passwords are interpolated into a URL and Compose substitutes them verbatim, with no
+      # percent-encoding. Use URL-safe values (`openssl rand -hex 32`); a `/` in a password ends
+      # the authority early and the connection string stops being a URL. See .env.example.
       MIGRATE_DATABASE_URL: postgresql://${POSTGRES_USER:?Set POSTGRES_USER in .env}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-loyalty}?schema=public
       DATABASE_URL: postgresql://${APP_DB_USER:-walaaplus_app}:${APP_DB_PASSWORD:?Set APP_DB_PASSWORD in .env (runtime role)}@db:5432/${POSTGRES_DB:-loyalty}?schema=public
     restart: "no"

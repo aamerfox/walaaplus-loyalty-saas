@@ -14,13 +14,59 @@ import { z } from "zod";
  * this module also refuses to start if either burned value is ever supplied.
  */
 
+/**
+ * Does this string actually parse as a usable PostgreSQL connection string?
+ *
+ * The prefix regex above is not enough, and the gap is a real deployment failure rather than a
+ * theoretical one. A database password is embedded in this URL, and `openssl rand -base64 24` —
+ * the obvious way to generate one — produces a `/` about a third of the time. In
+ *
+ *   postgresql://walaaplus:ab/cd@db:5432/loyalty
+ *
+ * the authority ends at that slash, so the string is not a URL at all. Without this check the
+ * process starts happily and fails later, at the first query, with a driver error that points
+ * nowhere near the password. The same password also breaks `psql` and `pg_dump`, which is what
+ * makes it look intermittent: it depends entirely on which random bytes were drawn.
+ *
+ * A correctly percent-encoded password (`ab%2Fcd`) parses and is accepted.
+ *
+ * Returns a boolean and never throws, so zod reports the variable NAME and the fix, never the
+ * value.
+ */
+function isWellFormedPostgresUrl(raw: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (!/^postgres(ql)?:$/.test(url.protocol)) return false;
+  if (!url.hostname) return false;
+  // `/loyalty` -> `loyalty`. An empty path means no database was named.
+  if (url.pathname.replace(/^\//, "").length === 0) return false;
+  try {
+    // An unencoded `%` in the password makes this throw where the driver would.
+    decodeURIComponent(url.password);
+    decodeURIComponent(url.username);
+  } catch {
+    return false;
+  }
+  return true;
+}
+
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
 
   DATABASE_URL: z
     .string()
     .min(1)
-    .regex(/^postgres(ql)?:\/\//, "must be a postgresql:// connection string"),
+    .regex(/^postgres(ql)?:\/\//, "must be a postgresql:// connection string")
+    .refine(isWellFormedPostgresUrl, {
+      message:
+        "must parse as a connection string with a host and a database name. " +
+        "A password containing / + % : @ or whitespace must be percent-encoded; " +
+        "generate database passwords with `openssl rand -hex 32` to avoid the question entirely.",
+    }),
 
   NEXTAUTH_SECRET: z.string().min(32, "must be at least 32 characters"),
 

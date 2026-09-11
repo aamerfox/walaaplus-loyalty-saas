@@ -61,6 +61,12 @@ services:
       target: migrate
     restart: "no"
     environment:
+      # BOTH database passwords are interpolated into a URL here, so both must be URL-safe.
+      # Compose cannot percent-encode: it substitutes the value verbatim. A password containing
+      # `/` ends the authority early and the string stops being a URL, which is why
+      # .env.staging.example generates these with `openssl rand -hex 32` rather than base64.
+      # src/server/env.ts and scripts/db-roles.mjs both refuse a connection string that does not
+      # parse, naming the variable and never printing the value.
       MIGRATE_DATABASE_URL: postgresql://${POSTGRES_USER:?}:${POSTGRES_PASSWORD:?}@db:5432/${POSTGRES_DB:-loyalty}?schema=public
       # db-roles.mjs reads the runtime role's NAME and PASSWORD from this URL and creates the
       # role from them. It is the one place a runtime credential is written down.
