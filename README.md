@@ -14,6 +14,7 @@ visual prototype and is not built on.
 | [docs/PRODUCT-SPEC.md](docs/PRODUCT-SPEC.md) | Architecture and product rules — the source of truth |
 | [docs/PHASE-PLAN.md](docs/PHASE-PLAN.md) | Phases 0–6, engineering gates and pilot gates |
 | [docs/PHASE-0-IMPLEMENTATION.md](docs/PHASE-0-IMPLEMENTATION.md) | Local setup, worker, migrations, tests, gate, deployment boundary |
+| [docs/PHASE-1A-IMPLEMENTATION.md](docs/PHASE-1A-IMPLEMENTATION.md) | Stamp-café domain: mechanics contract, enrollment, the stamp engine, authorization |
 | [docs/DECISIONS-REQUIRED.md](docs/DECISIONS-REQUIRED.md) | Decisions only the owner can make |
 | [docs/BOOMERANGME-REFERENCE.md](docs/BOOMERANGME-REFERENCE.md) | Feature reference mapped to phases |
 | [docs/PHASE-0-HYGIENE.md](docs/PHASE-0-HYGIENE.md) | Repository audit and prototype defect backlog |

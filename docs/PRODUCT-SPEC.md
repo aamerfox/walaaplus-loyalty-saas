@@ -426,10 +426,18 @@ Public QR or link carrying a UtmSourceLink publicToken
   → match or create Customer by normalized phone
   → match or create CustomerBusinessProfile
   → issue CustomerCard (unique per profile+template)
-  → CARD_ISSUED and WELCOME_BONUS operations
+  → card issuance recorded in AuditLog; WELCOME_BONUS operation when configured
   → PWA install guidance
   → customer opens their card
 ```
+
+**Card issuance is audited, not ledgered.** An earlier draft of this flow wrote a `CARD_ISSUED`
+operation. The ledger refuses zero-quantity rows — that invariant is what makes every ledger row a
+real movement of value — and issuing a card moves none. A `+0` row would break the invariant and a
+`+1` row would inflate a balance to represent an event that granted nothing. Issuance is therefore
+recorded by `CustomerCard.issuedAt`, `CustomerCard.utmSourceLinkId` and an `AuditLog` entry; the
+`CARD_ISSUED` kind is unused. A welcome bonus, which does move value, remains a real operation.
+See [PHASE-1A-IMPLEMENTATION.md](PHASE-1A-IMPLEMENTATION.md) §4.
 
 Requirements: no merchant login anywhere in the path; high-entropy public tokens; idempotent enrollment; per-source welcome bonus overrides the template default; exact consent text version stored; required and unique enrollment fields validated; rate limiting and a honeypot field, because welcome bonuses make enrollment an abuse target.
 
