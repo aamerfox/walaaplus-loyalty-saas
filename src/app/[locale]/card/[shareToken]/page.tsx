@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { getTranslations } from "next-intl/server";
 import { notFound } from "next/navigation";
 import { getPublicCardView } from "@/server/customers/card-view";
@@ -31,7 +31,6 @@ export async function generateMetadata({ params }: { params: Promise<{ shareToke
       // Per-card manifest: a customer holding three cards needs three home-screen icons, which
       // means three manifests with three ids (PRODUCT-SPEC §6.2).
       manifest: `./${shareToken}/manifest.webmanifest`,
-      themeColor: "#4f46e5",
       // A loyalty card is not content to index, and its URL is a capability.
       robots: { index: false, follow: false },
     };
@@ -39,6 +38,16 @@ export async function generateMetadata({ params }: { params: Promise<{ shareToke
     return { title: "—", robots: { index: false, follow: false } };
   }
 }
+
+/**
+ * The installed card's theme colour: the tint an installed PWA paints its status bar and task
+ * switcher entry with. It belongs in `viewport`, not `metadata` - Next reads it from here, warns
+ * about it there, and a value it warns about is a value it does not apply. Same indigo as the
+ * manifest's `theme_color`; the two disagreeing is visible on an installed card.
+ */
+export const viewport: Viewport = {
+  themeColor: "#4f46e5",
+};
 
 export default async function CardPage({ params }: { params: Promise<{ locale: string; shareToken: string }> }) {
   const { locale, shareToken } = await params;
