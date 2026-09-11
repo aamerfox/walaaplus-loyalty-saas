@@ -31,6 +31,7 @@
  */
 import { config as loadDotenv } from "dotenv";
 import pg from "pg";
+import { decideMembershipAction } from "./lib/db-role-membership.mjs";
 
 loadDotenv({ quiet: true });
 
@@ -112,6 +113,11 @@ async function main() {
     if (!(await tableExists(t))) fail(`table "${t}" does not exist. Run \`npm run db:migrate\` first.`);
   }
 
+  /** Set when THIS run grants the migrator membership in the runtime role; revoked before COMMIT. */
+  let grantedTemporaryMembership = false;
+  /** Set when an administrator had already granted that membership; left untouched, reported. */
+  let hadPreExistingMembership = false;
+
   await run("BEGIN");
   try {
     const role = ident(runtime.user);
@@ -150,10 +156,29 @@ async function main() {
     }
 
     // 5. pg-boss schema, owned by the runtime role — including any objects a previous role created
-    //    in it (e.g. an environment whose worker used to connect as the owner). Changing ownership
-    //    requires membership in the target role unless we are superuser.
+    //    in it (e.g. an environment whose worker used to connect as the owner).
+    //
+    //    Creating or transferring an object owned by another role requires MEMBERSHIP in that role
+    //    unless we are superuser. Membership is privilege: a migrator that stays a member of the
+    //    runtime role can SET ROLE into it, and a runtime role that gains members widens its blast
+    //    radius. So the grant here is strictly temporary — taken only when it is missing, and
+    //    revoked again below. A membership an administrator established on purpose is DETECTED and
+    //    left exactly as it was, with a notice, because removing it is not this script's decision.
     const me = await client.query("SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user");
-    if (!me.rows[0].rolsuper) await run(`GRANT ${role} TO CURRENT_USER`);
+    const isSuperuser = me.rows[0].rolsuper === true;
+    const preExisting = await client.query(
+      `SELECT 1 FROM pg_catalog.pg_auth_members m
+         JOIN pg_catalog.pg_roles target ON target.oid = m.roleid
+         JOIN pg_catalog.pg_roles member ON member.oid = m.member
+        WHERE target.rolname = $1 AND member.rolname = current_user`,
+      [runtime.user],
+    );
+    hadPreExistingMembership = preExisting.rowCount > 0;
+    const decision = decideMembershipAction({ isSuperuser, hadPreExistingMembership });
+    if (decision.grant) {
+      await run(`GRANT ${role} TO CURRENT_USER`);
+      grantedTemporaryMembership = decision.revokeAfter;
+    }
     await run(`CREATE SCHEMA IF NOT EXISTS ${ident(WORKER_SCHEMA)} AUTHORIZATION ${role}`);
     await run(`ALTER SCHEMA ${ident(WORKER_SCHEMA)} OWNER TO ${role}`);
     const foreign = await client.query(
@@ -179,6 +204,19 @@ async function main() {
     for (const { typname } of foreignTypes.rows) await run(`ALTER TYPE ${ident(WORKER_SCHEMA)}.${ident(typname)} OWNER TO ${role}`);
     const handedOver = foreign.rowCount + foreignFns.rowCount + foreignTypes.rowCount;
     if (handedOver > 0) process.stdout.write(`db-roles: transferred ${handedOver} existing ${WORKER_SCHEMA} objects to "${runtime.user}"\n`);
+
+    // 5b. Hand the temporary privilege straight back. The ownership changes above are catalog
+    //     facts and survive; only the migrator's ability to act AS the runtime role goes away.
+    if (grantedTemporaryMembership) {
+      await run(`REVOKE ${role} FROM CURRENT_USER`);
+      process.stdout.write(`db-roles: temporary membership in "${runtime.user}" granted for the ownership transfer and revoked again\n`);
+    } else if (hadPreExistingMembership) {
+      process.stdout.write(
+        `db-roles: NOTICE migrator "${owner}" was ALREADY a member of "${runtime.user}" before this run. ` +
+          "Left unchanged — an administrator established it deliberately. Revoke it manually if that is not intended: " +
+          `REVOKE "${runtime.user}" FROM "${owner}";\n`,
+      );
+    }
 
     await run("COMMIT");
   } catch (err) {
@@ -217,6 +255,23 @@ async function main() {
   const schemaCreate = await client.query("SELECT has_schema_privilege($1, 'public', 'CREATE') AS c", [runtime.user]);
   if (schemaCreate.rows[0].c) problems.push("role can CREATE in schema public");
 
+  // No role may be left able to act AS the runtime role because of this script. A membership that
+  // existed before the run is reported, not silently accepted as ours.
+  const members = await client.query(
+    `SELECT member.rolname FROM pg_catalog.pg_auth_members m
+       JOIN pg_catalog.pg_roles target ON target.oid = m.roleid
+       JOIN pg_catalog.pg_roles member ON member.oid = m.member
+      WHERE target.rolname = $1 ORDER BY 1`,
+    [runtime.user],
+  );
+  const memberNames = members.rows.map((r) => r.rolname);
+  if (grantedTemporaryMembership && memberNames.includes(owner)) {
+    problems.push(`temporary membership of "${owner}" in "${runtime.user}" was not revoked`);
+  }
+  if (!grantedTemporaryMembership && !hadPreExistingMembership && memberNames.includes(owner)) {
+    problems.push(`migrator "${owner}" is a member of "${runtime.user}" but this run did not grant it`);
+  }
+
   const tables = await client.query(
     "SELECT count(*)::int AS n FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'",
   );
@@ -230,7 +285,8 @@ async function main() {
   process.stdout.write(
     `db-roles: OK role "${runtime.user}" — read/write on ${tables.rows[0].n} public tables, ` +
       `append-only on [${APPEND_ONLY_TABLES.join(", ")}], no access to [${MIGRATOR_ONLY_TABLES.join(", ")}], ` +
-      `owns schema "${WORKER_SCHEMA}", cannot CREATE in public\n`,
+      `owns schema "${WORKER_SCHEMA}", cannot CREATE in public, ` +
+      `members: [${memberNames.join(", ") || "none"}]\n`,
   );
 }
 

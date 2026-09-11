@@ -107,6 +107,36 @@ describe("restricted runtime database role", () => {
       expect(owned[0].n).toBe(0);
     });
 
+    it("no role is left able to act AS the runtime role after setup (0.3 item 5)", async () => {
+      // scripts/db-roles.mjs may borrow membership in this role to transfer ownership of the
+      // pgboss schema. Membership is privilege — a member can SET ROLE into it — so the script
+      // hands it straight back. Nothing may remain a member of the runtime role after setup.
+      const rows = await prisma.$queryRaw<{ rolname: string }[]>`
+        SELECT member.rolname FROM pg_catalog.pg_auth_members m
+          JOIN pg_catalog.pg_roles target ON target.oid = m.roleid
+          JOIN pg_catalog.pg_roles member ON member.oid = m.member
+         WHERE target.rolname = current_user ORDER BY 1`;
+      expect(rows.map((r) => r.rolname)).toEqual([]);
+
+      const migrator = await currentRole(migratorPrisma());
+      const asMigrator = await migratorPrisma().$queryRaw<{ n: number }[]>`
+        SELECT count(*)::int AS n FROM pg_catalog.pg_auth_members m
+          JOIN pg_catalog.pg_roles target ON target.oid = m.roleid
+          JOIN pg_catalog.pg_roles member ON member.oid = m.member
+         WHERE member.rolname = ${migrator.rolname}`;
+      expect(asMigrator[0].n).toBe(0);
+    });
+
+    it("the runtime role owns the worker schema but still cannot create in public", async () => {
+      const rows = await prisma.$queryRaw<{ owner: string }[]>`
+        SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname = 'pgboss'`;
+      expect(rows[0]?.owner).toBe(runtimeRoleName);
+      const created = await prisma.$queryRaw<{ n: number }[]>`
+        SELECT count(*)::int AS n FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'pgboss' AND pg_get_userbyid(c.relowner) <> current_user`;
+      expect(created[0].n).toBe(0);
+    });
+
     it("has exactly SELECT and INSERT on the ledger, and no CREATE in public", async () => {
       const p = await prisma.$queryRaw<{ s: boolean; i: boolean; u: boolean; d: boolean; t: boolean; c: boolean }[]>`
         SELECT has_table_privilege('"LoyaltyOperation"', 'SELECT')   AS s,
