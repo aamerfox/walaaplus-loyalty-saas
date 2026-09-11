@@ -2,7 +2,7 @@
 
 import { useLocale } from "next-intl";
 import { Link } from "@/i18n/routing";
-import { ArrowRight, Lock, Eye, EyeOff } from "lucide-react";
+import { Lock, Eye, EyeOff } from "lucide-react";
 import { useState } from "react";
 import { signIn } from "next-auth/react";
 import { useRouter } from "next/navigation";

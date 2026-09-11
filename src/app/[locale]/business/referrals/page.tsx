@@ -1,10 +1,7 @@
 "use client";
 
-import { useTranslations } from "next-intl";
 import { useLocale } from "next-intl";
-import { Award, Gift, Link as LinkIcon, Users, ArrowUpRight, Copy, Share2 } from "lucide-react";
-import { useState } from "react";
-import { cn } from "@/lib/utils";
+import { Award, Gift, Users, ArrowUpRight, Copy } from "lucide-react";
 
 export default function ReferralProgramPage() {
   const locale = useLocale();

@@ -43,7 +43,11 @@ export default function Header() {
         </button>
 
         <div className="w-10 h-10 rounded-full bg-indigo-100 dark:bg-indigo-900/40 border border-indigo-200 dark:border-indigo-800/60 flex items-center justify-center overflow-hidden cursor-pointer shadow-sm hover:ring-2 ring-indigo-500 ring-offset-2 dark:ring-offset-zinc-950 transition-all">
-           <img src="https://ui-avatars.com/api/?name=Business+Owner&background=4f46e5&color=fff" alt="Avatar" className="w-full h-full object-cover" />
+           {/* Initials, not a remote avatar service: rendering one would send the account
+               name to a third party on every dashboard load. Real avatars arrive with the
+               account UI in Phase 1b. */}
+           <span className="font-semibold text-indigo-700 dark:text-indigo-300 select-none" aria-hidden="true">BO</span>
+           <span className="sr-only">Business Owner</span>
         </div>
       </div>
     </header>

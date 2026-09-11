@@ -1,8 +1,7 @@
 "use client";
 
-import { useTranslations } from "next-intl";
 import { useLocale } from "next-intl";
-import { Smartphone, Zap, Webhook, Link2, KeySquare } from "lucide-react";
+import { Smartphone, Webhook, KeySquare } from "lucide-react";
 import { useState } from "react";
 
 export default function IntegrationsPage() {

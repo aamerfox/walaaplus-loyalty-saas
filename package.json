@@ -7,7 +7,7 @@
     "build": "next build",
     "build:worker": "node scripts/build-worker.mjs",
     "start": "next start",
-    "lint": "eslint .",
+    "lint": "eslint . --max-warnings=0",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:unit": "vitest run --project unit",
@@ -30,8 +30,6 @@
     "@prisma/client": "^6.19.2",
     "bcryptjs": "^3.0.3",
     "clsx": "^2.1.1",
-    "framer-motion": "^12.38.0",
-    "html5-qrcode": "^2.3.8",
     "lucide-react": "^1.0.1",
     "next": "^16.3.4",
     "next-auth": "^4.24.15",
@@ -40,7 +38,6 @@
     "pg-boss": "^12.31.0",
     "react": "19.2.4",
     "react-dom": "19.2.4",
-    "recharts": "^3.8.0",
     "tailwind-merge": "^3.5.0",
     "zod": "^4.6.2"
   },
@@ -64,6 +61,16 @@
   "overrides": {
     "effect": "^3.20.0",
     "deepmerge-ts": "^8.0.2",
-    "defu": "^6.1.7"
+    "defu": "^6.1.7",
+    "browserslist": "^4.28.9",
+    "js-yaml": "^4.3.2",
+    "@humanfs/node": "^0.16.8",
+    "@babel/core": "^7.29.6",
+    "minimatch@^3.1.5": {
+      "brace-expansion": "^1.1.18"
+    },
+    "minimatch@^10.2.4": {
+      "brace-expansion": "^5.0.9"
+    }
   }
 }

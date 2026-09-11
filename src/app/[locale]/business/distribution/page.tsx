@@ -1,6 +1,5 @@
 "use client";
 
-import { useTranslations } from "next-intl";
 import { useLocale } from "next-intl";
 import { QrCode, Link2, Download, Printer, Share2 } from "lucide-react";
 
@@ -40,7 +39,13 @@ export default function DistributionPage() {
 
               <div className="flex justify-center mb-8">
                  <div className="p-4 bg-white border border-zinc-200 shadow-sm rounded-[2rem]">
-                    <img src={`https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(registrationUrl)}`} alt="Registration QR" className="w-48 h-48 opacity-90" />
+                    {/* Placeholder, deliberately not a third-party QR service: sending the
+                        registration URL to api.qrserver.com would leak it off the server.
+                        QR generation lands with real enrollment tokens in Phase 1a. */}
+                    <div className="w-48 h-48 flex flex-col items-center justify-center gap-2 border-2 border-dashed border-zinc-300 rounded-2xl text-zinc-400">
+                       <QrCode className="w-12 h-12" aria-hidden="true" />
+                       <span className="text-xs px-2 text-center break-all">{registrationUrl}</span>
+                    </div>
                  </div>
               </div>
 

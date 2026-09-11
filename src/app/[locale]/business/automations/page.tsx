@@ -1,11 +1,9 @@
 "use client";
 
-import { useTranslations } from "next-intl";
 import { useLocale } from "next-intl";
 import { Bell, MapPin, Gift, AlertCircle } from "lucide-react";
 
 export default function AutomationsPage() {
-  const t = useTranslations("Navigation"); // using Navigation namespace loosely for standard layout strings if needed
   const locale = useLocale();
   const dir = locale === 'ar' ? 'rtl' : 'ltr';
 

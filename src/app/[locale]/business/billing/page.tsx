@@ -1,10 +1,8 @@
 "use client";
 
-import { useTranslations } from 'next-intl';
-import { CreditCard, CheckCircle2, AlertCircle, ArrowUpRight, Receipt, Download } from 'lucide-react';
+import { CreditCard, CheckCircle2, ArrowUpRight, Receipt, Download } from 'lucide-react';
 
 export default function BillingPage() {
-  const t = useTranslations('DashboardOverview'); // Will use some generic keys or hardcoded text for demo 
 
   return (
     <div className="max-w-6xl mx-auto space-y-8 animate-in fade-in zoom-in-95 duration-500">

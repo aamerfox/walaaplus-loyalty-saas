@@ -2,7 +2,7 @@
 
 import { useTranslations, useLocale } from "next-intl";
 import { Link } from "@/i18n/routing";
-import { ArrowRight, Smartphone, Globe, ShieldCheck, Zap } from "lucide-react";
+import { ArrowRight, Smartphone, Globe, Zap } from "lucide-react";
 
 export default function LandingPage() {
   const t = useTranslations("Landing");

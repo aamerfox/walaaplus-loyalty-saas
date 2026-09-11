@@ -1,6 +1,5 @@
 "use client";
 
-import { useTranslations } from "next-intl";
 import { useLocale } from "next-intl";
 import { Users, UserPlus, Fingerprint, MapPin, MoreVertical } from "lucide-react";
 

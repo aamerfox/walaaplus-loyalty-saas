@@ -49,7 +49,9 @@ const steps = [
   // separately by `npm audit` (full) and tracked in docs; nothing is allowlisted here.
   { name: "dependency audit (prod, high+)", cmd: "npm audit --omit=dev --audit-level=high" },
   { name: "prisma generate", cmd: "npx prisma generate" },
-  { name: "lint", cmd: "npx eslint ." },
+  // --max-warnings=0: a warning is a defect that has not been triaged yet. Letting them
+  // accumulate is how a codebase stops reading its own linter output.
+  { name: "lint", cmd: "npx eslint . --max-warnings=0" },
   { name: "typecheck", cmd: "npx tsc --noEmit" },
   { name: "prisma validate", cmd: "npx prisma validate" },
   { name: "unit tests", cmd: "npx vitest run --project unit" },

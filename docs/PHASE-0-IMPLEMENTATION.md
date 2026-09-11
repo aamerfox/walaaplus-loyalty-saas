@@ -208,9 +208,18 @@ npm run gate
 ```
 
 Runs in order and stops at the first failure: clean `.next` → `npm audit --omit=dev --audit-level=high`
-→ `prisma generate` → lint → typecheck → `prisma validate` → unit tests → test-db up → `migrate deploy`
-(migrator role) → `migrate status` → `db-roles` (runtime role grants, must print `OK role`) →
-integration tests (as the runtime role) → `next build`. Prints a per-step PASS/FAIL table. Set
+→ `prisma generate` → lint (`--max-warnings=0`) → typecheck → `prisma validate` → unit tests →
+test-db up → `migrate deploy` (migrator role) → `migrate status` → `db-roles` (runtime role grants,
+must print `OK role`) → integration tests (as the runtime role) → worker build → `next build`.
+
+**Lint fails on warnings.** A warning is a defect nobody has triaged yet; allowing a backlog of
+them is how a codebase stops reading its own linter output. The rule is never weakened to make a
+warning go away — the code is fixed, or the rule is wrong and is changed deliberately.
+
+**The audit gate covers production dependencies** (`--omit=dev`), because that is what ships in an
+image. The FULL `npm audit`, dev tooling included, is also clean as of Prompt 0.3 and is checked by
+hand each prompt; critical and high findings are fixed by targeted upgrades or version-scoped npm
+`overrides`, never by `npm audit fix --force` and never by an allowlist or suppression file. Prints a per-step PASS/FAIL table. Set
 `GATE_SKIP_DOCKER=1` when a database is provided externally (CI service container).
 
 CI: `.github/workflows/gate.yml` runs the identical command on `rebuild/**` pushes and pull requests

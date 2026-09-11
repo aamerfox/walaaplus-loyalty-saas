@@ -1,6 +1,5 @@
 "use client";
 
-import { useTranslations } from "next-intl";
 import { useLocale } from "next-intl";
 import { PieChart, Activity, TrendingUp, Users, HeartHandshake, AlertTriangle, Moon } from "lucide-react";
 
