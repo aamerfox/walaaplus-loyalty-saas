@@ -395,6 +395,11 @@ describe("docker-compose.staging-cohost.yml — a shared server", () => {
     expect(raw).not.toContain("resources:");
   });
 
+  it("probes the application on loopback, which is what needs the HOSTNAME override", () => {
+    const test = (load(COHOST).services.web as { healthcheck?: { test?: string[] } }).healthcheck?.test ?? [];
+    expect(test.join(" ")).toContain("127.0.0.1:3000");
+  });
+
   it("still orders the database, then the migration, then the application", () => {
     const compose = load(COHOST) as unknown as {
       services: Record<string, { depends_on?: Record<string, { condition?: string }> }>;
@@ -404,6 +409,57 @@ describe("docker-compose.staging-cohost.yml — a shared server", () => {
       expect(compose.services[service].depends_on?.migrate?.condition).toBe("service_completed_successfully");
     }
     expect(compose.services.migrate.depends_on?.db?.condition).toBe("service_healthy");
+  });
+});
+
+describe.each([
+  ["docker-compose.yml", LOCAL],
+  ["docker-compose.staging.yml", STAGING],
+  ["docker-compose.staging-cohost.yml", COHOST],
+])("%s — the web server's bind address", (_name, file) => {
+  /*
+   * A staging deployment reached a healthy migrated database with its runtime role created,
+   * started web and worker, and then stopped because the web container was unhealthy:
+   *
+   *   wget: can't connect to remote host (127.0.0.1): Connection refused
+   *
+   * while the same endpoint answered {"status":"ok"} from the host through the published port.
+   * Both were true. The Next standalone server does `process.env.HOSTNAME || "0.0.0.0"`, and
+   * Docker sets HOSTNAME to the container ID, so the server bound the bridge address ALONE: a
+   * published port still reaches it, the container's own loopback does not.
+   *
+   * This is the cheap guard. The proof is scripts/check-web-image.mjs, a gate step that runs the
+   * real image in a real container under the same Docker condition — a YAML file cannot tell you
+   * what a server binds.
+   */
+  const web = load(file).services.web;
+
+  it("overrides Docker's default HOSTNAME explicitly", () => {
+    expect(
+      envValue(web, "HOSTNAME"),
+      "without this the standalone server binds the container ID's address and a loopback " +
+        "healthcheck is refused",
+    ).toBe("0.0.0.0");
+  });
+
+  it("keeps the override a literal, not an interpolation", () => {
+    // `${HOSTNAME}` would resolve from the host environment at `up` time and could be anything,
+    // including empty — which is how this would silently come back.
+    const raw = readFileSync(file, "utf8");
+    const body = raw.split("\n  web:")[1].split("\n  worker:")[0];
+    const line = body.split("\n").find((l) => l.trim().startsWith("HOSTNAME:"));
+    expect(line).toBeDefined();
+    expect(line).not.toContain("$");
+  });
+
+  it("does not publish that binding to the host by accident", () => {
+    // Guards the obvious misreading of the fix: 0.0.0.0 is what the server listens on INSIDE its
+    // container. It changes nothing about what Docker publishes, and this file's own exposure
+    // rules above still decide that.
+    const ports = (web.ports ?? []).map((p) => String(p));
+    for (const entry of ports) {
+      expect(entry.startsWith("0.0.0.0"), `${entry} must not bind every host interface`).toBe(false);
+    }
   });
 });
 

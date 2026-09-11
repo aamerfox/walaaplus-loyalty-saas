@@ -83,6 +83,15 @@ services:
     restart: unless-stopped
     environment:
       NODE_ENV: production
+      # Docker sets HOSTNAME to the container ID unless it is overridden, and the Next
+      # standalone server does `const hostname = process.env.HOSTNAME || "0.0.0.0"`. So it binds
+      # the container's bridge address only, and 127.0.0.1 inside the container refuses
+      # connections - which is exactly how the healthcheck below failed on a real deployment
+      # while the same endpoint answered fine through the published port from the host.
+      # Setting it to 0.0.0.0 restores the server's own default: listen on every interface,
+      # including loopback. This publishes nothing new: what a container listens on internally is
+      # not what the host exposes, and the `ports`/`expose` lines below are unchanged.
+      HOSTNAME: "0.0.0.0"
       # RUNTIME role only. This container never receives POSTGRES_PASSWORD.
       DATABASE_URL: postgresql://${APP_DB_USER:-walaaplus_app}:${APP_DB_PASSWORD:?Set APP_DB_PASSWORD in .env.staging}@db:5432/${POSTGRES_DB:-loyalty}?schema=public
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?Set NEXTAUTH_SECRET in .env.staging - generate with openssl rand -base64 48}

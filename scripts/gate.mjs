@@ -79,6 +79,12 @@ const steps = [
   // Dockerfile copied two scripts and not the lib directory one of them imports. A source tree
   // cannot answer whether an image is complete, so this step asks the image.
   { name: "migrate image dependencies", cmd: "node scripts/check-migrate-image.mjs" },
+  // Runs the built web image in a real container and requires it to answer on its own
+  // loopback, because Docker supplies HOSTNAME and the Next standalone server binds
+  // whatever it finds there. A staging deployment got all the way to a healthy database
+  // and a started application before this surfaced, as a healthcheck failing on 127.0.0.1
+  // while the host got answers through the published port.
+  { name: "web image container health", cmd: "node scripts/check-web-image.mjs" },
 ];
 
 const results = [];

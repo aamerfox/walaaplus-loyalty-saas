@@ -91,6 +91,12 @@ services:
     # needs by name. tests/unit/compose-exposure.test.ts fails if env_file returns.
     environment:
       NODE_ENV: production
+      # Docker sets HOSTNAME to the container ID unless overridden, and the Next standalone
+      # server does `const hostname = process.env.HOSTNAME || "0.0.0.0"`, so it would bind the
+      # bridge address alone and refuse connections on the container's own loopback. Nothing here
+      # probes loopback today - the proxy reaches `web:3000` by service name - but a healthcheck
+      # added later must not rediscover the incident this cost a staging deployment.
+      HOSTNAME: "0.0.0.0"
       # Inside the Compose network the database host is the service name, not localhost.
       # RUNTIME role only: web never holds the migrator credentials.
       DATABASE_URL: postgresql://${APP_DB_USER:-walaaplus_app}:${APP_DB_PASSWORD:?Set APP_DB_PASSWORD in .env (runtime role)}@db:5432/${POSTGRES_DB:-loyalty}?schema=public
