@@ -2,7 +2,7 @@ import { OperationKind, OperationSource, ProgramVersionStatus, UnitType } from "
 import { beforeAll, describe, expect, it } from "vitest";
 import { prisma } from "@/server/db";
 import { appendOperationGroup } from "@/server/ledger/ledger";
-import { createBusinessWithCard, resetDatabase, type CardFixture } from "../setup/fixtures";
+import { createBusinessWithCard, ownerActor, resetDatabase, type CardFixture } from "../setup/fixtures";
 
 const APPEND_ONLY = /append-only/i;
 
@@ -14,11 +14,9 @@ describe("PostgreSQL-level protection", () => {
     await resetDatabase();
     fx = await createBusinessWithCard();
     const r = await appendOperationGroup({
-      businessId: fx.businessId,
+      actor: await ownerActor(fx, OperationSource.DASHBOARD),
       customerCardId: fx.cardId,
       locationId: fx.locationId,
-      performedByUserId: fx.userId,
-      source: OperationSource.DASHBOARD,
       operations: [{ kind: OperationKind.MANUAL_AWARD, unitType: UnitType.STAMP, quantity: 1 }],
     });
     opId = r.operations[0].id;

@@ -3,15 +3,12 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { prisma } from "@/server/db";
 import { ConflictError, LedgerInvariantError, NotFoundError, ValidationError } from "@/server/errors";
 import { appendOperationGroup, reverseOperationGroup } from "@/server/ledger/ledger";
-import { createBusinessWithCard, registerTestOwner, resetDatabase, type CardFixture } from "../setup/fixtures";
+import { createBusinessWithCard, ownerActor, resetDatabase, systemActor, type CardFixture } from "../setup/fixtures";
 
-const base = (fx: CardFixture) => ({
-  businessId: fx.businessId,
-  customerCardId: fx.cardId,
-  locationId: fx.locationId,
-  performedByUserId: fx.userId,
-  source: OperationSource.SCANNER,
-});
+/** Owner acting through the scanner at the fixture's Main location. */
+async function asOwner(fx: CardFixture) {
+  return { actor: await ownerActor(fx), customerCardId: fx.cardId, locationId: fx.locationId };
+}
 
 describe("ledger engine", () => {
   beforeAll(resetDatabase);
@@ -19,7 +16,7 @@ describe("ledger engine", () => {
   it("appends a group atomically, snapshots balanceAfter per row and refreshes projections", async () => {
     const fx = await createBusinessWithCard();
     const r = await appendOperationGroup({
-      ...base(fx),
+      ...(await asOwner(fx)),
       operations: [
         { kind: OperationKind.MANUAL_AWARD, unitType: UnitType.STAMP, quantity: 3, comment: "staff" },
         { kind: OperationKind.PURCHASE_AWARD, unitType: UnitType.STAMP, quantity: 2, purchaseAmountMinor: 25_000 },
@@ -35,6 +32,7 @@ describe("ledger engine", () => {
     expect(new Set(rows.map((o) => o.transactionGroupId)).size).toBe(1);
     expect(rows.every((o) => o.locationId === fx.locationId && o.performedByUserId === fx.userId)).toBe(true);
     expect(rows.every((o) => o.customerId === fx.customerId && o.programVersionId === fx.programVersionId)).toBe(true);
+    expect(rows.every((o) => o.source === OperationSource.SCANNER)).toBe(true);
     expect(rows[1].purchaseAmountMinor).toBe(25_000);
 
     const card = await prisma.customerCard.findUniqueOrThrow({ where: { id: fx.cardId } });
@@ -48,21 +46,28 @@ describe("ledger engine", () => {
 
     for (const fx of [off, on]) {
       const r = await appendOperationGroup({
-        ...base(fx),
-        source: OperationSource.ENROLLMENT,
-        performedByUserId: null,
+        actor: systemActor(fx, OperationSource.ENROLLMENT, "enrollment flow"),
+        customerCardId: fx.cardId,
+        locationId: fx.locationId,
         operations: [
           { kind: OperationKind.CARD_ISSUED, unitType: UnitType.STAMP, quantity: 1 },
           { kind: OperationKind.WELCOME_BONUS, unitType: UnitType.STAMP, quantity: 2 },
           { kind: OperationKind.REWARD_EARNED, unitType: UnitType.REWARD, quantity: 1 },
-          { kind: OperationKind.REWARD_REDEEMED, unitType: UnitType.REWARD, quantity: -1, redemptionValueMinor: 15_000 },
         ],
       });
       const byKind = Object.fromEntries(r.operations.map((o) => [o.kind, o.countsAsVisit]));
       expect(byKind.CARD_ISSUED).toBe(false);
       expect(byKind.WELCOME_BONUS).toBe(false);
       expect(byKind.REWARD_EARNED).toBe(false);
-      expect(byKind.REWARD_REDEEMED).toBe(fx === on);
+
+      const redeem = await appendOperationGroup({
+        ...(await asOwner(fx)),
+        operations: [{ kind: OperationKind.REWARD_REDEEMED, unitType: UnitType.REWARD, quantity: -1, redemptionValueMinor: 15_000 }],
+      });
+      expect(redeem.operations[0].countsAsVisit).toBe(fx === on);
+
+      const rows = await prisma.loyaltyOperation.findMany({ where: { customerCardId: fx.cardId, kind: { in: ["CARD_ISSUED", "WELCOME_BONUS"] } } });
+      expect(rows.every((o) => o.performedByUserId === null && o.source === OperationSource.ENROLLMENT)).toBe(true);
     }
   });
 
@@ -70,7 +75,7 @@ describe("ledger engine", () => {
     const fx = await createBusinessWithCard();
     await expect(
       appendOperationGroup({
-        ...base(fx),
+        ...(await asOwner(fx)),
         operations: [
           { kind: OperationKind.MANUAL_AWARD, unitType: UnitType.STAMP, quantity: 4 }, // valid
           { kind: OperationKind.REWARD_REDEEMED, unitType: UnitType.REWARD, quantity: -1 }, // no rewards yet
@@ -83,22 +88,21 @@ describe("ledger engine", () => {
     expect(card.stampBalance).toBe(0);
   });
 
-  it("is tenant-scoped: another business cannot write to the card", async () => {
+  it("is tenant-scoped: another business cannot write to the card, nor use its location", async () => {
     const fx = await createBusinessWithCard();
-    const other = await registerTestOwner();
+    const other = await createBusinessWithCard();
     await expect(
       appendOperationGroup({
-        ...base(fx),
-        businessId: other.businessId,
+        actor: await ownerActor(other),
+        customerCardId: fx.cardId,
         locationId: other.locationId,
-        performedByUserId: other.userId,
         operations: [{ kind: OperationKind.MANUAL_AWARD, unitType: UnitType.STAMP, quantity: 1 }],
       }),
     ).rejects.toBeInstanceOf(NotFoundError);
-    // and a foreign location inside the right business is refused too
     await expect(
       appendOperationGroup({
-        ...base(fx),
+        actor: await ownerActor(fx),
+        customerCardId: fx.cardId,
         locationId: other.locationId,
         operations: [{ kind: OperationKind.MANUAL_AWARD, unitType: UnitType.STAMP, quantity: 1 }],
       }),
@@ -107,16 +111,19 @@ describe("ledger engine", () => {
 
   it("validates input before touching the database", async () => {
     const fx = await createBusinessWithCard();
-    await expect(appendOperationGroup({ ...base(fx), operations: [] })).rejects.toBeInstanceOf(ValidationError);
+    const base = await asOwner(fx);
+    await expect(appendOperationGroup({ ...base, operations: [] })).rejects.toBeInstanceOf(ValidationError);
     await expect(
-      appendOperationGroup({ ...base(fx), operations: [{ kind: OperationKind.MANUAL_AWARD, unitType: UnitType.STAMP, quantity: 0 }] }),
+      appendOperationGroup({ ...base, operations: [{ kind: OperationKind.MANUAL_AWARD, unitType: UnitType.STAMP, quantity: 0 }] }),
     ).rejects.toBeInstanceOf(ValidationError);
     await expect(
-      appendOperationGroup({ ...base(fx), operations: [{ kind: OperationKind.MANUAL_AWARD, unitType: UnitType.STAMP, quantity: 1.5 }] }),
+      appendOperationGroup({ ...base, operations: [{ kind: OperationKind.MANUAL_AWARD, unitType: UnitType.STAMP, quantity: 1.5 }] }),
     ).rejects.toBeInstanceOf(ValidationError);
     await expect(
       appendOperationGroup({
-        ...base(fx),
+        actor: systemActor(fx, OperationSource.IMPORT),
+        customerCardId: fx.cardId,
+        locationId: fx.locationId,
         operations: [{ kind: OperationKind.IMPORT_ADJUSTMENT, unitType: UnitType.STAMP, quantity: 1 }], // reason missing
       }),
     ).rejects.toBeInstanceOf(ValidationError);
@@ -124,13 +131,11 @@ describe("ledger engine", () => {
 
   it("serialises CONCURRENT appends on the same card: exact balances, no lost updates", async () => {
     const fx = await createBusinessWithCard();
+    const base = await asOwner(fx);
     const N = 25;
     await Promise.all(
       Array.from({ length: N }, () =>
-        appendOperationGroup({
-          ...base(fx),
-          operations: [{ kind: OperationKind.VISIT_AWARD, unitType: UnitType.STAMP, quantity: 1 }],
-        }),
+        appendOperationGroup({ ...base, operations: [{ kind: OperationKind.VISIT_AWARD, unitType: UnitType.STAMP, quantity: 1 }] }),
       ),
     );
     const card = await prisma.customerCard.findUniqueOrThrow({ where: { id: fx.cardId } });
@@ -145,20 +150,13 @@ describe("ledger engine", () => {
   describe("reversals", () => {
     it("reverses a group with compensating rows and leaves the originals untouched", async () => {
       const fx = await createBusinessWithCard();
+      const base = await asOwner(fx);
       const award = await appendOperationGroup({
-        ...base(fx),
-        operations: [
-          { kind: OperationKind.PURCHASE_AWARD, unitType: UnitType.STAMP, quantity: 5, purchaseAmountMinor: 50_000 },
-        ],
+        ...base,
+        operations: [{ kind: OperationKind.PURCHASE_AWARD, unitType: UnitType.STAMP, quantity: 5, purchaseAmountMinor: 50_000 }],
       });
 
-      const rev = await reverseOperationGroup({
-        businessId: fx.businessId,
-        transactionGroupId: award.transactionGroupId,
-        performedByUserId: fx.userId,
-        source: OperationSource.DASHBOARD,
-        reason: "cashier tapped twice",
-      });
+      const rev = await reverseOperationGroup({ actor: base.actor, transactionGroupId: award.transactionGroupId, reason: "cashier tapped twice" });
 
       expect(rev.transactionGroupId).not.toBe(award.transactionGroupId);
       expect(rev.operations).toHaveLength(1);
@@ -168,6 +166,7 @@ describe("ledger engine", () => {
       expect(revRow.reversalOfOperationId).toBe(award.operations[0].id);
       expect(revRow.reason).toBe("cashier tapped twice");
       expect(revRow.purchaseAmountMinor).toBe(-50_000);
+      expect(revRow.performedByUserId).toBe(fx.userId);
 
       const original = await prisma.loyaltyOperation.findUniqueOrThrow({ where: { id: award.operations[0].id } });
       expect(original.quantity).toBe(5);
@@ -178,37 +177,28 @@ describe("ledger engine", () => {
 
     it("refuses to reverse twice, or to reverse a reversal", async () => {
       const fx = await createBusinessWithCard();
-      const award = await appendOperationGroup({
-        ...base(fx),
-        operations: [{ kind: OperationKind.MANUAL_AWARD, unitType: UnitType.STAMP, quantity: 1 }],
-      });
-      const rev = await reverseOperationGroup({ businessId: fx.businessId, transactionGroupId: award.transactionGroupId, performedByUserId: fx.userId, source: OperationSource.DASHBOARD, reason: "r" });
+      const base = await asOwner(fx);
+      const award = await appendOperationGroup({ ...base, operations: [{ kind: OperationKind.MANUAL_AWARD, unitType: UnitType.STAMP, quantity: 1 }] });
+      const rev = await reverseOperationGroup({ actor: base.actor, transactionGroupId: award.transactionGroupId, reason: "r" });
 
-      await expect(
-        reverseOperationGroup({ businessId: fx.businessId, transactionGroupId: award.transactionGroupId, performedByUserId: fx.userId, source: OperationSource.DASHBOARD, reason: "again" }),
-      ).rejects.toBeInstanceOf(ConflictError);
-      await expect(
-        reverseOperationGroup({ businessId: fx.businessId, transactionGroupId: rev.transactionGroupId, performedByUserId: fx.userId, source: OperationSource.DASHBOARD, reason: "undo undo" }),
-      ).rejects.toBeInstanceOf(ConflictError);
+      await expect(reverseOperationGroup({ actor: base.actor, transactionGroupId: award.transactionGroupId, reason: "again" })).rejects.toBeInstanceOf(ConflictError);
+      await expect(reverseOperationGroup({ actor: base.actor, transactionGroupId: rev.transactionGroupId, reason: "undo undo" })).rejects.toBeInstanceOf(ConflictError);
     });
 
     it("rejects a reversal whose dependent value was already consumed and asks for manual correction", async () => {
       const fx = await createBusinessWithCard();
-      await appendOperationGroup({ ...base(fx), operations: [{ kind: OperationKind.MANUAL_AWARD, unitType: UnitType.STAMP, quantity: 10 }] });
+      const base = await asOwner(fx);
+      await appendOperationGroup({ ...base, operations: [{ kind: OperationKind.MANUAL_AWARD, unitType: UnitType.STAMP, quantity: 10 }] });
       const conversion = await appendOperationGroup({
-        ...base(fx),
-        source: OperationSource.SYSTEM,
-        performedByUserId: null,
+        ...base,
         operations: [
           { kind: OperationKind.STAMP_CONVERTED, unitType: UnitType.STAMP, quantity: -10 },
           { kind: OperationKind.REWARD_EARNED, unitType: UnitType.REWARD, quantity: 1 },
         ],
       });
-      await appendOperationGroup({ ...base(fx), operations: [{ kind: OperationKind.REWARD_REDEEMED, unitType: UnitType.REWARD, quantity: -1 }] });
+      await appendOperationGroup({ ...base, operations: [{ kind: OperationKind.REWARD_REDEEMED, unitType: UnitType.REWARD, quantity: -1 }] });
 
-      await expect(
-        reverseOperationGroup({ businessId: fx.businessId, transactionGroupId: conversion.transactionGroupId, performedByUserId: fx.userId, source: OperationSource.DASHBOARD, reason: "oops" }),
-      ).rejects.toThrow(/manual correction/i);
+      await expect(reverseOperationGroup({ actor: base.actor, transactionGroupId: conversion.transactionGroupId, reason: "oops" })).rejects.toThrow(/manual correction/i);
 
       const card = await prisma.customerCard.findUniqueOrThrow({ where: { id: fx.cardId } });
       expect(card).toMatchObject({ stampBalance: 0, rewardBalance: 0 });
@@ -217,14 +207,11 @@ describe("ledger engine", () => {
 
     it("is tenant-scoped and requires a reason", async () => {
       const fx = await createBusinessWithCard();
-      const award = await appendOperationGroup({ ...base(fx), operations: [{ kind: OperationKind.MANUAL_AWARD, unitType: UnitType.STAMP, quantity: 1 }] });
-      const other = await registerTestOwner();
-      await expect(
-        reverseOperationGroup({ businessId: other.businessId, transactionGroupId: award.transactionGroupId, performedByUserId: other.userId, source: OperationSource.DASHBOARD, reason: "x" }),
-      ).rejects.toBeInstanceOf(NotFoundError);
-      await expect(
-        reverseOperationGroup({ businessId: fx.businessId, transactionGroupId: award.transactionGroupId, performedByUserId: fx.userId, source: OperationSource.DASHBOARD, reason: "  " }),
-      ).rejects.toBeInstanceOf(ValidationError);
+      const base = await asOwner(fx);
+      const award = await appendOperationGroup({ ...base, operations: [{ kind: OperationKind.MANUAL_AWARD, unitType: UnitType.STAMP, quantity: 1 }] });
+      const other = await createBusinessWithCard();
+      await expect(reverseOperationGroup({ actor: await ownerActor(other), transactionGroupId: award.transactionGroupId, reason: "x" })).rejects.toBeInstanceOf(NotFoundError);
+      await expect(reverseOperationGroup({ actor: base.actor, transactionGroupId: award.transactionGroupId, reason: "  " })).rejects.toBeInstanceOf(ValidationError);
     });
   });
 });

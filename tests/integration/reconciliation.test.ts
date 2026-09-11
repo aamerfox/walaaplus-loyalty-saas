@@ -1,9 +1,9 @@
-import { OperationKind, OperationSource, UnitType } from "@prisma/client";
+import { OperationKind, UnitType } from "@prisma/client";
 import { beforeAll, describe, expect, it } from "vitest";
 import { prisma } from "@/server/db";
 import { appendOperationGroup } from "@/server/ledger/ledger";
 import { reconcileCardBalances } from "@/server/ledger/reconciliation";
-import { createBusinessWithCard, resetDatabase } from "../setup/fixtures";
+import { createBusinessWithCard, ownerActor, resetDatabase } from "../setup/fixtures";
 
 describe("reconcileCardBalances", () => {
   beforeAll(resetDatabase);
@@ -11,11 +11,9 @@ describe("reconcileCardBalances", () => {
   it("reports no mismatch for a healthy card and for a card with no operations", async () => {
     const fx = await createBusinessWithCard();
     await appendOperationGroup({
-      businessId: fx.businessId,
+      actor: await ownerActor(fx),
       customerCardId: fx.cardId,
       locationId: fx.locationId,
-      performedByUserId: fx.userId,
-      source: OperationSource.SCANNER,
       operations: [
         { kind: OperationKind.MANUAL_AWARD, unitType: UnitType.STAMP, quantity: 4 },
         { kind: OperationKind.REWARD_EARNED, unitType: UnitType.REWARD, quantity: 1 },
@@ -35,11 +33,9 @@ describe("reconcileCardBalances", () => {
   it("detects a deliberately corrupted projection and names the unit, card and business", async () => {
     const fx = await createBusinessWithCard();
     await appendOperationGroup({
-      businessId: fx.businessId,
+      actor: await ownerActor(fx),
       customerCardId: fx.cardId,
       locationId: fx.locationId,
-      performedByUserId: fx.userId,
-      source: OperationSource.SCANNER,
       operations: [{ kind: OperationKind.MANUAL_AWARD, unitType: UnitType.STAMP, quantity: 7 }],
     });
 
