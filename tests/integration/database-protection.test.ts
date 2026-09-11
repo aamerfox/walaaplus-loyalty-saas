@@ -2,9 +2,11 @@ import { OperationKind, OperationSource, ProgramVersionStatus, UnitType } from "
 import { beforeAll, describe, expect, it } from "vitest";
 import { prisma } from "@/server/db";
 import { appendOperationGroup } from "@/server/ledger/ledger";
-import { createBusinessWithCard, ownerActor, resetDatabase, type CardFixture } from "../setup/fixtures";
+import { createBusinessWithCard, migratorPrisma, ownerActor, resetDatabase, type CardFixture } from "../setup/fixtures";
 
 const APPEND_ONLY = /append-only/i;
+/** What the RUNTIME role sees: PostgreSQL denies the privilege before any trigger runs. */
+const DENIED = /permission denied/i;
 
 describe("PostgreSQL-level protection", () => {
   let fx: CardFixture;
@@ -22,27 +24,39 @@ describe("PostgreSQL-level protection", () => {
     opId = r.operations[0].id;
   });
 
-  describe("LoyaltyOperation is append-only", () => {
+  describe("LoyaltyOperation is append-only — layer 1: the runtime role has no privilege", () => {
     it("rejects UPDATE through Prisma", async () => {
-      await expect(prisma.loyaltyOperation.update({ where: { id: opId }, data: { quantity: 99 } })).rejects.toThrow(APPEND_ONLY);
-      await expect(prisma.loyaltyOperation.updateMany({ data: { comment: "x" } })).rejects.toThrow(APPEND_ONLY);
+      await expect(prisma.loyaltyOperation.update({ where: { id: opId }, data: { quantity: 99 } })).rejects.toThrow(DENIED);
+      await expect(prisma.loyaltyOperation.updateMany({ data: { comment: "x" } })).rejects.toThrow(DENIED);
     });
 
     it("rejects DELETE through Prisma", async () => {
-      await expect(prisma.loyaltyOperation.delete({ where: { id: opId } })).rejects.toThrow(APPEND_ONLY);
-      await expect(prisma.loyaltyOperation.deleteMany({})).rejects.toThrow(APPEND_ONLY);
+      await expect(prisma.loyaltyOperation.delete({ where: { id: opId } })).rejects.toThrow(DENIED);
+      await expect(prisma.loyaltyOperation.deleteMany({})).rejects.toThrow(DENIED);
     });
 
     it("rejects raw SQL UPDATE, DELETE and TRUNCATE", async () => {
-      await expect(prisma.$executeRawUnsafe(`UPDATE "LoyaltyOperation" SET quantity = 5`)).rejects.toThrow(APPEND_ONLY);
-      await expect(prisma.$executeRawUnsafe(`DELETE FROM "LoyaltyOperation"`)).rejects.toThrow(APPEND_ONLY);
-      await expect(prisma.$executeRawUnsafe(`TRUNCATE "LoyaltyOperation"`)).rejects.toThrow(APPEND_ONLY);
+      await expect(prisma.$executeRawUnsafe(`UPDATE "LoyaltyOperation" SET quantity = 5`)).rejects.toThrow(DENIED);
+      await expect(prisma.$executeRawUnsafe(`DELETE FROM "LoyaltyOperation"`)).rejects.toThrow(DENIED);
+      await expect(prisma.$executeRawUnsafe(`TRUNCATE "LoyaltyOperation"`)).rejects.toThrow(DENIED);
+    });
+  });
+
+  describe("LoyaltyOperation is append-only — layer 2: the trigger refuses even the table owner", () => {
+    it("rejects UPDATE, DELETE and TRUNCATE issued by the migrator role", async () => {
+      const owner = migratorPrisma();
+      await expect(owner.loyaltyOperation.update({ where: { id: opId }, data: { quantity: 99 } })).rejects.toThrow(APPEND_ONLY);
+      await expect(owner.loyaltyOperation.deleteMany({})).rejects.toThrow(APPEND_ONLY);
+      await expect(owner.$executeRawUnsafe(`UPDATE "LoyaltyOperation" SET quantity = 5`)).rejects.toThrow(APPEND_ONLY);
+      await expect(owner.$executeRawUnsafe(`DELETE FROM "LoyaltyOperation"`)).rejects.toThrow(APPEND_ONLY);
+      await expect(owner.$executeRawUnsafe(`TRUNCATE "LoyaltyOperation"`)).rejects.toThrow(APPEND_ONLY);
     });
 
-    it("the row is still intact afterwards", async () => {
+    it("the row is still intact afterwards (checked as both roles)", async () => {
       const row = await prisma.loyaltyOperation.findUniqueOrThrow({ where: { id: opId } });
       expect(row.quantity).toBe(1);
       expect(await prisma.loyaltyOperation.count()).toBe(1);
+      expect(await migratorPrisma().loyaltyOperation.count()).toBe(1);
     });
   });
 

@@ -9,10 +9,11 @@
  *   4. prisma validate
  *   5. unit tests
  *   6. disposable test database up   (skipped when GATE_SKIP_DOCKER=1, e.g. CI service container)
- *   7. prisma migrate deploy  → test database
+ *   7. prisma migrate deploy  → test database, as the MIGRATOR role (TEST_MIGRATE_DATABASE_URL)
  *   8. prisma migrate status  → must report "up to date"
- *   9. integration tests      (real PostgreSQL)
- *  10. production build
+ *   9. runtime role grants    → scripts/db-roles.mjs creates the restricted role in TEST_DATABASE_URL
+ *  10. integration tests      (real PostgreSQL, connected as the RUNTIME role)
+ *  11. production build
  *
  * Playwright end-to-end tests are intentionally excluded; they are slow and belong to
  * `npm run test:e2e` from Phase 1a onwards.
@@ -33,12 +34,14 @@ rmSync(".next", { recursive: true, force: true });
 const isWin = process.platform === "win32";
 const skipDocker = process.env.GATE_SKIP_DOCKER === "1";
 
-const testDbUrl = process.env.TEST_DATABASE_URL;
-if (!testDbUrl) {
-  console.error("gate: TEST_DATABASE_URL is not set. See .env.example.");
+const testOwnerUrl = process.env.TEST_MIGRATE_DATABASE_URL;
+const testRuntimeUrl = process.env.TEST_DATABASE_URL;
+if (!testOwnerUrl || !testRuntimeUrl) {
+  console.error("gate: TEST_MIGRATE_DATABASE_URL (migrator role) and TEST_DATABASE_URL (runtime role) must be set. See .env.example.");
   process.exit(2);
 }
-const testEnv = { ...process.env, DATABASE_URL: testDbUrl, NODE_ENV: "test" };
+// Migrations and grants run as the migrator; everything under test connects as the runtime role.
+const testEnv = { ...process.env, MIGRATE_DATABASE_URL: testOwnerUrl, DATABASE_URL: testRuntimeUrl, NODE_ENV: "test" };
 
 const steps = [
   // Zero critical/high vulnerabilities in PRODUCTION dependencies. Dev-only tooling is audited
@@ -52,12 +55,18 @@ const steps = [
   ...(skipDocker
     ? []
     : [{ name: "test db up", cmd: "docker compose up -d --wait test-db" }]),
-  { name: "migrate deploy (test db)", cmd: "npx prisma migrate deploy", env: testEnv },
+  { name: "migrate deploy (test db, migrator role)", cmd: "node scripts/db-migrate.mjs deploy", env: testEnv },
   {
     name: "migrate status (test db)",
-    cmd: "npx prisma migrate status",
+    cmd: "node scripts/db-migrate.mjs status",
     env: testEnv,
     expectOutput: /Database schema is up to date/,
+  },
+  {
+    name: "runtime role grants (test db)",
+    cmd: "node scripts/db-roles.mjs",
+    env: testEnv,
+    expectOutput: /db-roles: OK role/,
   },
   { name: "integration tests", cmd: "npx vitest run --project integration" },
   { name: "production build", cmd: "npx next build" },

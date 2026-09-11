@@ -4,6 +4,10 @@
 # Compose's automatic env-file loading. `${VAR:?message}` makes Compose fail loudly
 # when a required variable is unset instead of silently using a literal.
 #
+# Two database roles (docs/PHASE-0-IMPLEMENTATION.md §4):
+#   POSTGRES_USER / POSTGRES_PASSWORD   migrator/owner — migrations and `npm run db:roles` only
+#   APP_DB_USER / APP_DB_PASSWORD       restricted runtime role — the ONLY role web and worker use
+#
 #   docker compose up -d db          # application database
 #   docker compose up -d test-db     # disposable integration-test database (tmpfs, wiped on stop)
 #   docker compose --profile app up  # web + worker containers (requires a build)
@@ -53,7 +57,8 @@ services:
     env_file: .env
     environment:
       # Inside the Compose network the database host is the service name, not localhost.
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-loyalty}?schema=public
+      # RUNTIME role only: web never holds the migrator credentials.
+      DATABASE_URL: postgresql://${APP_DB_USER:-walaaplus_app}:${APP_DB_PASSWORD:?Set APP_DB_PASSWORD in .env (runtime role)}@db:5432/${POSTGRES_DB:-loyalty}?schema=public
     ports:
       - "3000:3000"
     depends_on:
@@ -68,7 +73,8 @@ services:
       target: worker
     env_file: .env
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-loyalty}?schema=public
+      # RUNTIME role only. pg-boss owns the `pgboss` schema; it needs nothing in `public`.
+      DATABASE_URL: postgresql://${APP_DB_USER:-walaaplus_app}:${APP_DB_PASSWORD:?Set APP_DB_PASSWORD in .env (runtime role)}@db:5432/${POSTGRES_DB:-loyalty}?schema=public
       WORKER_HEALTH_PORT: 8081
     ports:
       - "8081:8081"

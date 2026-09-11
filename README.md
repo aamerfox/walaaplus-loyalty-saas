@@ -25,10 +25,15 @@ visual prototype and is not built on.
 cp .env.example .env        # fill in values; see the file for every variable name
 npm ci
 docker compose up -d db
-npx prisma migrate deploy
+npm run db:migrate          # migrations, as the owner/migrator role (MIGRATE_DATABASE_URL)
+npm run db:roles            # create the restricted runtime role that DATABASE_URL names
 npm run dev                 # web
 npm run worker:dev          # background worker, separate terminal
 ```
+
+Web and worker connect with a **restricted runtime role** that can append to the ledger but never
+update, delete or truncate it, alter a table, or touch a trigger. Migrations run as a separate
+owner role. See [docs/PHASE-0-IMPLEMENTATION.md §4](docs/PHASE-0-IMPLEMENTATION.md).
 
 ## Engineering gate
 
@@ -36,6 +41,7 @@ npm run worker:dev          # background worker, separate terminal
 npm run gate
 ```
 
-Lint, typecheck, Prisma validation, unit tests, integration tests against a disposable PostgreSQL,
-migration status, production build. CI runs the same command. Playwright end-to-end tests are
+Production dependency audit (zero high/critical), lint, typecheck, Prisma validation, unit tests,
+migrations and runtime-role grants on a disposable PostgreSQL, integration tests connected as the
+runtime role, production build. CI runs the same command. Playwright end-to-end tests are
 separate (`npm run test:e2e`) and start in Phase 1a.

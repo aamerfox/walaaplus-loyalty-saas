@@ -4,8 +4,9 @@
  * Production code must never do this (docs/PRODUCT-SPEC.md §2.6).
  */
 import { randomBytes, randomUUID } from "node:crypto";
-import { CardType, MembershipRole, OperationSource, ProgramVersionStatus, TemplateStatus, type Prisma } from "@prisma/client";
+import { CardType, MembershipRole, OperationSource, PrismaClient, ProgramVersionStatus, TemplateStatus, type Prisma } from "@prisma/client";
 import { prisma } from "@/server/db";
+import { resolveTestDatabaseUrls } from "./test-env";
 import type { MemberActor, SystemActor } from "@/server/ledger/actor";
 import { registerBusinessOwner, type RegisterInput } from "@/server/registration/register";
 import { requireBusinessMembership, type TenantContext } from "@/server/tenant/context";
@@ -31,18 +32,32 @@ const APP_TABLES = [
   "User",
 ];
 
+let migrator: PrismaClient | undefined;
+
+/**
+ * Prisma client connected as the MIGRATOR / table-owner role (TEST_MIGRATE_DATABASE_URL).
+ * Only the harness uses it: to wipe tables between files and to prove, from the owner's side,
+ * that the runtime role's bypass attempts changed nothing. `prisma` from "@/server/db" is the
+ * restricted RUNTIME role — exactly what web and worker use.
+ */
+export function migratorPrisma(): PrismaClient {
+  migrator ??= new PrismaClient({ datasourceUrl: resolveTestDatabaseUrls().owner, log: ["error"] });
+  return migrator;
+}
+
 /**
  * Wipe every application table. The ledger blocks TRUNCATE by trigger, so the user trigger is
- * disabled for the duration — something only the table owner (the test role) can do, which is
- * exactly the point: application code cannot.
+ * disabled for the duration — something only the table OWNER can do. The runtime role the
+ * services use cannot (tests/integration/runtime-role.test.ts proves it).
  */
 export async function resetDatabase(): Promise<void> {
+  const db = migratorPrisma();
   const list = APP_TABLES.map((t) => `"${t}"`).join(", ");
-  await prisma.$executeRawUnsafe(`ALTER TABLE "LoyaltyOperation" DISABLE TRIGGER USER`);
+  await db.$executeRawUnsafe(`ALTER TABLE "LoyaltyOperation" DISABLE TRIGGER USER`);
   try {
-    await prisma.$executeRawUnsafe(`TRUNCATE TABLE ${list} RESTART IDENTITY CASCADE`);
+    await db.$executeRawUnsafe(`TRUNCATE TABLE ${list} RESTART IDENTITY CASCADE`);
   } finally {
-    await prisma.$executeRawUnsafe(`ALTER TABLE "LoyaltyOperation" ENABLE TRIGGER USER`);
+    await db.$executeRawUnsafe(`ALTER TABLE "LoyaltyOperation" ENABLE TRIGGER USER`);
   }
 }
 

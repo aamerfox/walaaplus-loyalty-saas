@@ -1,46 +1,82 @@
 import { config as loadDotenv } from "dotenv";
 
 /**
- * Loads `.env` (git-ignored, developer-local) so TEST_DATABASE_URL is available, then
- * validates that the URL is safe to truncate. Used by both the global setup process and
- * every Vitest worker.
+ * Integration tests use TWO connection strings to the SAME disposable database, mirroring
+ * production (docs/PHASE-0-IMPLEMENTATION.md §4 "Database roles"):
+ *
+ *   TEST_MIGRATE_DATABASE_URL  migrator/owner role: applies migrations, creates the runtime role,
+ *                              truncates between test files (the harness only).
+ *   TEST_DATABASE_URL          restricted runtime role: what every Vitest worker — and therefore
+ *                              every service under test — connects as, exactly like web and worker.
+ *
+ * Loads `.env` (git-ignored, developer-local), then validates both URLs are safe to wipe.
  */
-export function resolveTestDatabaseUrl(): string {
+export interface TestDatabaseUrls {
+  /** Owner / migrator role. */
+  owner: string;
+  /** Restricted runtime role. */
+  runtime: string;
+}
+
+function parse(name: string, url: string): URL {
+  if (!/^postgres(ql)?:\/\//.test(url)) throw new Error(`${name} must be a postgresql:// URL.`);
+  const parsed = new URL(url);
+  const dbName = decodeURIComponent(parsed.pathname.replace(/^\//, ""));
+  // Guard rails: the harness truncates every table. Never let that hit a real database.
+  if (!/test/i.test(dbName)) {
+    throw new Error(`Refusing to run integration tests: ${name} database name "${dbName}" does not contain "test".`);
+  }
+  return parsed;
+}
+
+export function resolveTestDatabaseUrls(): TestDatabaseUrls {
   loadDotenv({ quiet: true });
 
-  const url = process.env.TEST_DATABASE_URL;
-  if (!url) {
+  const owner = process.env.TEST_MIGRATE_DATABASE_URL;
+  const runtime = process.env.TEST_DATABASE_URL;
+  if (!owner || !runtime) {
     throw new Error(
-      "TEST_DATABASE_URL is not set. Integration tests need a disposable PostgreSQL. " +
-        "Run `npm run db:test:up` and set TEST_DATABASE_URL in .env (see .env.example).",
+      "TEST_MIGRATE_DATABASE_URL (migrator role) and TEST_DATABASE_URL (runtime role) must both be set. " +
+        "Integration tests need a disposable PostgreSQL: run `npm run db:test:up` and see .env.example.",
     );
   }
-  if (!/^postgres(ql)?:\/\//.test(url)) {
-    throw new Error("TEST_DATABASE_URL must be a postgresql:// URL.");
+  const o = parse("TEST_MIGRATE_DATABASE_URL", owner);
+  const r = parse("TEST_DATABASE_URL", runtime);
+
+  if (o.host !== r.host || o.pathname !== r.pathname) {
+    throw new Error("TEST_MIGRATE_DATABASE_URL and TEST_DATABASE_URL must point at the same host and database.");
   }
-  // Guard rails: the harness truncates every table. Never let that hit a real database.
-  const dbName = url.split("/").pop()?.split("?")[0] ?? "";
-  if (!/test/i.test(dbName)) {
+  if (o.username === r.username) {
     throw new Error(
-      `Refusing to run integration tests: database name "${dbName}" does not contain "test".`,
+      `TEST_DATABASE_URL must use a DIFFERENT role from TEST_MIGRATE_DATABASE_URL ("${o.username}"): ` +
+        "the tests run as the restricted runtime role and prove it cannot bypass the ledger.",
     );
   }
-  if (process.env.DATABASE_URL && process.env.DATABASE_URL === url) {
-    throw new Error("Refusing to run integration tests: TEST_DATABASE_URL equals DATABASE_URL.");
+  // Never wipe the developer's application database, whichever role names it.
+  if (process.env.__WALAAPLUS_TEST_ENV_APPLIED !== "1") {
+    const appUrls = { DATABASE_URL: process.env.DATABASE_URL, MIGRATE_DATABASE_URL: process.env.MIGRATE_DATABASE_URL };
+    for (const [name, value] of Object.entries(appUrls)) {
+      if (value && (value === owner || value === runtime)) {
+        throw new Error(`Refusing to run integration tests: ${name} equals a test database URL.`);
+      }
+    }
   }
-  return url;
+  return { owner, runtime };
 }
 
 /**
- * Applies the test environment to the current process. Values that look like secrets are
- * deterministic TEST FIXTURES, not credentials, and are only ever set when absent.
+ * Applies the test environment to the current process (each Vitest worker, once). Values that
+ * look like secrets are deterministic TEST FIXTURES, not credentials, and are only set when absent.
  */
-export function applyTestProcessEnv(): void {
-  const url = resolveTestDatabaseUrl();
-  process.env.DATABASE_URL = url;
+export function applyTestProcessEnv(): TestDatabaseUrls {
+  const urls = resolveTestDatabaseUrls();
+  process.env.DATABASE_URL = urls.runtime; // services under test connect as the RUNTIME role
+  process.env.MIGRATE_DATABASE_URL = urls.owner;
+  process.env.__WALAAPLUS_TEST_ENV_APPLIED = "1";
   Object.assign(process.env, { NODE_ENV: "test" }); // NODE_ENV is typed read-only in @types/node 24
   process.env.NEXTAUTH_URL ??= "http://localhost:3000";
   // 48-character fixture so env validation (min 32) passes. Not a secret; never used outside tests.
   process.env.NEXTAUTH_SECRET ??= "test-fixture-not-a-secret-".padEnd(48, "x");
   process.env.WORKER_HEALTH_PORT ??= "0"; // 0 = ephemeral port in tests
+  return urls;
 }

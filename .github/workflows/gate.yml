@@ -40,7 +40,10 @@ jobs:
       GATE_SKIP_DOCKER: "1"
       NEXT_TELEMETRY_DISABLED: "1"
       NEXTAUTH_URL: http://localhost:3000
-      TEST_DATABASE_URL: postgresql://ci:ci-ephemeral-not-a-secret@localhost:5432/loyalty_test?schema=public
+      # Migrator (owner) role: applies migrations and creates the runtime role.
+      TEST_MIGRATE_DATABASE_URL: postgresql://ci:ci-ephemeral-not-a-secret@localhost:5432/loyalty_test?schema=public
+      # Restricted runtime role: created by scripts/db-roles.mjs during the gate; the tests connect as it.
+      TEST_DATABASE_URL: postgresql://walaaplus_app:ci-app-role-ephemeral-not-a-secret@localhost:5432/loyalty_test?schema=public
       # `next build` evaluates server modules; it needs a syntactically valid DATABASE_URL but never connects.
       DATABASE_URL: postgresql://ci:ci-ephemeral-not-a-secret@localhost:5432/loyalty_build_unused?schema=public
 

@@ -64,16 +64,19 @@ Prerequisites: Node 24 (`.nvmrc`), Docker Desktop, npm 11.
 cp .env.example .env            # then fill values; nothing in .env.example is a real value
 npm ci
 docker compose up -d db         # application database on ${POSTGRES_PORT:-5433}
-npx prisma migrate deploy       # apply the committed migration
+npm run db:migrate              # apply committed migrations AS THE MIGRATOR (MIGRATE_DATABASE_URL)
+npm run db:roles                # create/refresh the restricted runtime role named in DATABASE_URL
 npm run db:seed                 # optional dev owner; refuses NODE_ENV=production
-npm run dev                     # web on :3000
+npm run dev                     # web on :3000, connects as the runtime role
 npm run worker:dev              # worker, separate terminal, /health on :8081
 ```
 
-`.env` variables the web and worker require: `DATABASE_URL`, `NEXTAUTH_SECRET` (≥ 32 chars, generate
-with `openssl rand -base64 48`), `NEXTAUTH_URL`. Optional: `NEXT_PUBLIC_APP_URL`, `WORKER_HEALTH_PORT`.
-Compose-only: `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `POSTGRES_PORT`, `TEST_POSTGRES_PORT`.
-Tests: `TEST_DATABASE_URL`. Seed: `SEED_OWNER_EMAIL`, `SEED_OWNER_PASSWORD`.
+`.env` variables the web and worker require: `DATABASE_URL` (**runtime role**), `NEXTAUTH_SECRET`
+(≥ 32 chars, generate with `openssl rand -base64 48`), `NEXTAUTH_URL`. Optional: `NEXT_PUBLIC_APP_URL`,
+`WORKER_HEALTH_PORT`. Migrations and grants only: `MIGRATE_DATABASE_URL` (**owner/migrator role**).
+Compose-only: `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `POSTGRES_PORT`, `TEST_POSTGRES_PORT`,
+`APP_DB_USER`, `APP_DB_PASSWORD`. Tests: `TEST_MIGRATE_DATABASE_URL` (migrator), `TEST_DATABASE_URL`
+(runtime). Seed: `SEED_OWNER_EMAIL`, `SEED_OWNER_PASSWORD`.
 
 The full annotated list is `.env.example`. Never commit `.env`.
 
@@ -108,24 +111,52 @@ that schema and `prisma migrate status` ignores it.
   There is no deployed database to protect.
 - **After the first pilot database is deployed, migrations are forward-only.** Never edit an applied
   migration; add a new one.
-- `prisma migrate deploy` is the only command used against shared databases. `migrate dev` and
-  `db push` are local-only.
+- `npm run db:migrate` (= `prisma migrate deploy` as the migrator role) is the only command used
+  against shared databases. `npm run db:migrate:dev` and `db push` are local-only. Never call the
+  Prisma CLI with the runtime `DATABASE_URL`: that role cannot create or alter tables, by design.
+- Every `db:migrate` is followed by `npm run db:roles`, which grants the runtime role on any new
+  tables. Both run inside the Compose `migrate` service and inside the gate.
 - Schema ⇄ migration parity is enforced by the gate: `migrate deploy` then `migrate status` must
   report "up to date". `prisma migrate diff --from-migrations` is deliberately **not** used because it
   cannot represent the hand-written partial indexes and would report false drift.
 
-### Runtime database role (owner action, staging and production)
+### Database roles
 
-The trigger already rejects ledger mutation for every role. Defence in depth is to also deny the
-privilege. The owner runs, once per environment, with a superuser:
+Every environment — developer machine, the disposable test database, CI, staging, production — has
+**two** PostgreSQL roles. The application never holds the credentials of the first.
 
-```sql
--- app role used by web and worker
-REVOKE UPDATE, DELETE, TRUNCATE ON "LoyaltyOperation" FROM walaaplus_app;
--- migrations run as a different, privileged role
-```
+| Role | Variable | Who uses it | Can | Cannot |
+|---|---|---|---|---|
+| **migrator / owner** | `MIGRATE_DATABASE_URL` (tests: `TEST_MIGRATE_DATABASE_URL`) | `npm run db:migrate`, `npm run db:roles`, the Compose `migrate` service, the test harness | own and alter every table, apply migrations, grant | mutate the ledger — the trigger refuses even the owner |
+| **runtime** (`walaaplus_app` by default) | `DATABASE_URL` (tests: `TEST_DATABASE_URL`) | web, worker, every service under test | `SELECT/INSERT/UPDATE/DELETE` on application tables; `SELECT, INSERT` on `LoyaltyOperation`; own the `pgboss` schema | `UPDATE/DELETE/TRUNCATE` the ledger, `ALTER` any table, disable or drop a trigger, replace a trigger function, drop an index, `SET session_replication_role`, `SET ROLE` to the migrator, create anything in `public`, read or write `_prisma_migrations` |
 
-Role names are environment-specific and therefore not in the migration.
+`scripts/db-roles.mjs` (`npm run db:roles`) is the single source of the grants. It connects with
+`MIGRATE_DATABASE_URL`, reads the runtime role's **name and password from `DATABASE_URL`** (so a
+credential lives in exactly one place), and idempotently:
+
+1. creates the role if missing and applies `LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT
+   NOREPLICATION NOBYPASSRLS` plus the password;
+2. grants `CONNECT`, `USAGE` on `public` (never `CREATE`), `SELECT/INSERT/UPDATE/DELETE` on all
+   tables and sequences, and the same as *default privileges* for tables future migrations create;
+3. revokes everything on the append-only tables (`APPEND_ONLY_TABLES` in the script — add any new
+   append-only table there in the same commit as its migration) and re-grants `SELECT, INSERT`;
+4. revokes everything on `_prisma_migrations`;
+5. creates the `pgboss` schema owned by the runtime role and transfers any pre-existing `pgboss`
+   objects to it (an environment whose worker once ran as the owner);
+6. verifies the result with `has_table_privilege()` / `has_schema_privilege()` and exits non-zero
+   on any discrepancy. It prints role and table names only, never a password or URL.
+
+The migrator must be a superuser or hold `CREATEROLE`. Two layers therefore stand between any code
+path and ledger history: the runtime role has **no privilege** to mutate it, and even the owner is
+refused by the trigger. `tests/integration/runtime-role.test.ts` proves the first layer by
+connecting as the runtime role and attempting twenty-nine distinct bypasses; every one fails with a
+privilege error, and a snapshot taken as the owner confirms row, triggers, function and indexes are
+unchanged. `database-protection.test.ts` proves the second layer as the owner.
+
+**Staging and production (owner action):** provision the migrator credential and choose a runtime
+password, put them in `MIGRATE_DATABASE_URL` and `DATABASE_URL` of the deployment environment, then
+run `npm run db:migrate && npm run db:roles` (or start the Compose `migrate` service). The agent
+never holds or requests those values.
 
 ---
 
@@ -134,18 +165,24 @@ Role names are environment-specific and therefore not in the migration.
 | Project | Where | Database | Runs in gate |
 |---|---|---|---|
 | `unit` | `tests/unit/**` | none | yes |
-| `integration` | `tests/integration/**` | **real PostgreSQL** at `TEST_DATABASE_URL` | yes |
+| `integration` | `tests/integration/**` | **real PostgreSQL** at `TEST_DATABASE_URL`, connected as the **runtime role** | yes |
 | Playwright e2e | `tests/*.spec.ts`, `npm run test:e2e` | running app | **no** — Phase 1a onward |
 
 Integration harness (`tests/setup/`):
 
-- `integration-global.ts` runs once: validates `TEST_DATABASE_URL` (must contain `test`, must differ
-  from `DATABASE_URL`) and applies migrations.
-- `integration-env.ts` runs in every worker: points Prisma at the test database and sets test-only
-  fixtures for required variables. The fixture secret is a constant string that never leaves tests.
-- `fixtures.ts`: `resetDatabase()` truncates all tables. Because the ledger blocks TRUNCATE by trigger,
-  the harness disables the *user* trigger for that statement — an action only the table owner can
-  take, which is the point.
+- `integration-global.ts` runs once, as the migrator (`TEST_MIGRATE_DATABASE_URL`): validates both test
+  URLs (database name must contain `test`, same host and database, different roles, neither equal
+  to an application URL), applies migrations with `scripts/db-migrate.mjs`, then creates the runtime
+  role with `scripts/db-roles.mjs`.
+- `integration-env.ts` runs in every worker: sets `DATABASE_URL` to `TEST_DATABASE_URL` so every
+  service under test connects **as the restricted runtime role**, exactly like web and worker, and
+  sets test-only fixtures for required variables. The fixture secret is a constant string that
+  never leaves tests.
+- `fixtures.ts`: `migratorPrisma()` is a second client connected as the owner. `resetDatabase()` uses
+  it to truncate all tables — because the ledger blocks TRUNCATE by trigger, it disables the *user*
+  trigger for that statement, an action the runtime role cannot take (proved in
+  `runtime-role.test.ts`). Tests also use it to verify, from the owner's side, that a refused
+  bypass really changed nothing.
 
 Concurrency and idempotency are tested with real parallel transactions against PostgreSQL, never
 with mocks: 25 concurrent appends must yield `balanceAfter` exactly 1..25; 8 concurrent idempotent
@@ -159,14 +196,17 @@ calls must execute the work exactly once.
 npm run gate
 ```
 
-Runs in order and stops at the first failure: clean `.next` → `prisma generate` → lint → typecheck →
-`prisma validate` → unit tests → test-db up → `migrate deploy` → `migrate status` → integration tests
-→ `next build`. Prints a per-step PASS/FAIL table. Set `GATE_SKIP_DOCKER=1` when a database is
-provided externally (CI service container).
+Runs in order and stops at the first failure: clean `.next` → `npm audit --omit=dev --audit-level=high`
+→ `prisma generate` → lint → typecheck → `prisma validate` → unit tests → test-db up → `migrate deploy`
+(migrator role) → `migrate status` → `db-roles` (runtime role grants, must print `OK role`) →
+integration tests (as the runtime role) → `next build`. Prints a per-step PASS/FAIL table. Set
+`GATE_SKIP_DOCKER=1` when a database is provided externally (CI service container).
 
 CI: `.github/workflows/gate.yml` runs the identical command on `rebuild/**` pushes and pull requests
-against a throwaway PostgreSQL service. It uses **no secrets**: the CI database password is an
-ephemeral fixture and `NEXTAUTH_SECRET` is generated fresh per run and discarded. CI **never deploys**.
+against a throwaway PostgreSQL service. It uses **no secrets**: the CI database passwords (migrator
+`ci`, runtime `walaaplus_app`) are ephemeral fixtures and `NEXTAUTH_SECRET` is generated fresh per run
+and discarded. The runtime role is created inside the run by the gate's `db-roles` step. CI **never
+deploys**.
 
 ---
 
@@ -176,7 +216,7 @@ ephemeral fixture and `NEXTAUTH_SECRET` is generated fresh per run and discarded
 |---|---|
 | `Dockerfile` (targets `web`, `worker`), `docker-compose.yml`, CI workflow | Provisioning servers, domains, TLS certificates |
 | Scripts, runbooks, variable names | Creating and storing every real secret |
-| Migration files | Running `prisma migrate deploy` against staging/production |
+| Migration files, `scripts/db-migrate.mjs`, `scripts/db-roles.mjs` | Running `npm run db:migrate && npm run db:roles` against staging/production |
 | Health endpoints | Configuring monitoring and backups |
 | — | Pushing to `master`; every deployment |
 
@@ -194,7 +234,8 @@ Tracked with status in [DECISIONS-REQUIRED.md](DECISIONS-REQUIRED.md). Blocking 
 - **A2** make the public repository private
 - **A3–A5** CI provider, database approach, Node 24 pin — implemented locally per recommendation, **not marked approved**
 - **B1–B6** hosting, domains, staging TLS, secrets provisioning, deployment authority — before Phase 1a Prompt 2
-- Apply the runtime-role `REVOKE` above on staging and production databases
+- Provision the migrator and runtime database credentials for staging and production and run
+  `npm run db:migrate && npm run db:roles` there (§4 "Database roles")
 
 ---
 
