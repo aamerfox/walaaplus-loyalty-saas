@@ -12,7 +12,7 @@
 
 ## 1. Result
 
-**GATE PASSED — 13/13 steps in 214.5 s** on `<<FINAL_SHA>>`, the final code commit. Unit
+**GATE PASSED — 13/13 steps in 214.5 s** on `8d290ff`, the final code commit. Unit
 **119/119** (11 files), integration **309/309** (27 files) against real PostgreSQL 15, every
 integration test connected as the restricted runtime role. `npm audit`, full tree and production view: **0
 vulnerabilities** each. `git diff --check` clean; working tree clean.
@@ -37,7 +37,7 @@ are mutually dependent, so splitting them further would have produced commits th
 | 3 | `27b40e4` | test(stamp): real-PostgreSQL coverage for the Phase 1a café loop |
 | 4 | `372fdeb` | docs: Phase 1a implementation guide, and resolve the card-issuance contradiction |
 | 5 | `ea8f1df` | docs(evidence): Phase 1a Prompt 1 core gate record (first submission) |
-| 6 | `<<FINAL_SHA>>` | fix(stamp): Phase 1a writes only at Main; the location is never a caller's input (§9) |
+| 6 | `8d290ff` | fix(stamp): Phase 1a writes only at Main; the location is never a caller's input (§9) |
 
 25 files changed in commits 1–4, 4,798 insertions; the scope fix in §9 touches 5 more.
 
