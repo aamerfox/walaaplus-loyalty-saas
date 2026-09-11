@@ -10,6 +10,10 @@ import { resolveTestDatabaseUrls } from "./test-env";
 import type { MemberActor, SystemActor } from "@/server/ledger/actor";
 import { registerBusinessOwner, type RegisterInput } from "@/server/registration/register";
 import { requireBusinessMembership, type TenantContext } from "@/server/tenant/context";
+import { enrollCustomer, type EnrollCustomerInput } from "@/server/customers/enrollment";
+import { reconcileCardBalances } from "@/server/ledger/reconciliation";
+import type { StampMechanicsInput } from "@/server/program/mechanics";
+import { createStampProgram, type StampProgramSummary } from "@/server/program/stamp-program";
 
 const APP_TABLES = [
   "AuthRateLimit",
@@ -204,4 +208,77 @@ export async function createStaff(
 export async function createLocation(fx: { businessId: string }, name: string): Promise<string> {
   const l = await prisma.location.create({ data: { businessId: fx.businessId, name } });
   return l.id;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 1a: a real stamp café
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Mechanics a pilot café would actually configure: buy 10, get 1 free. */
+export const CAFE_MECHANICS: StampMechanicsInput = {
+  kind: "STAMP",
+  contractVersion: 1,
+  stampsRequiredPerReward: 10,
+  rewardName: "قهوة مجانية",
+  earnMode: "MANUAL",
+  countRewardRedemptionAsVisit: false,
+};
+
+export interface StampCafeFixture {
+  userId: string;
+  businessId: string;
+  locationId: string;
+  ctx: TenantContext;
+  program: StampProgramSummary;
+}
+
+/**
+ * Owner + business + live stamp program + direct enrollment source, through the REAL services.
+ *
+ * Deliberately not hand-written rows: a fixture that builds its own program can drift from what
+ * `createStampProgram` produces, and then every test that uses it proves nothing about the code
+ * that ships.
+ */
+export async function createStampCafe(
+  opts: { mechanics?: Partial<StampMechanicsInput>; timezone?: string; name?: string } = {},
+): Promise<StampCafeFixture> {
+  const reg = await registerTestOwner();
+  if (opts.timezone) {
+    await prisma.business.update({ where: { id: reg.businessId }, data: { timezone: opts.timezone } });
+  }
+  const ctx = await requireBusinessMembership(prisma, reg.userId, reg.businessId);
+  const program = await createStampProgram(ctx, {
+    name: opts.name ?? "Café card",
+    mechanics: { ...CAFE_MECHANICS, ...opts.mechanics } as StampMechanicsInput,
+  });
+  return { userId: reg.userId, businessId: reg.businessId, locationId: reg.locationId, ctx, program };
+}
+
+/** A cashier assigned to the café's Main location, with a verified context. */
+export async function createCafeCashier(fx: StampCafeFixture) {
+  return createStaff(fx, MembershipRole.CASHIER, [fx.locationId]);
+}
+
+/** A unique Syrian mobile number per call, so tests never collide on the global phone identity. */
+export function uniqueSyrianPhone(): string {
+  const subscriber = randomBytes(4).readUInt32BE(0).toString().padStart(8, "0").slice(0, 8);
+  return `+9639${subscriber}`;
+}
+
+/** Enrol a customer through the real public path and return the result. */
+export async function enrolCustomer(fx: StampCafeFixture, overrides: Partial<EnrollCustomerInput> = {}) {
+  return enrollCustomer({
+    sourceToken: fx.program.directSourceToken,
+    phone: overrides.phone ?? uniqueSyrianPhone(),
+    firstName: overrides.firstName ?? "زبون",
+    ...overrides,
+  });
+}
+
+/** Assert the ledger and the card projections still agree. Call it after every scenario. */
+export async function expectReconciled(businessId: string): Promise<void> {
+  const report = await reconcileCardBalances({ businessId });
+  if (report.mismatches.length > 0) {
+    throw new Error(`reconciliation drift: ${JSON.stringify(report.mismatches)}`);
+  }
 }
