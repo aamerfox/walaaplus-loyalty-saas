@@ -56,7 +56,8 @@ rewritten history; the branch still has no upstream.
 | 3 | `cdbe660` | feat(ops): a staging stack whose database has no route, not just a closed port |
 | 4 | `30b3003` | feat(ops): backups that are verified on write, and a restore drill that reads the data |
 | 5 | `591aa2f` | docs: the staging runbook, and who performs each step |
-| 6 | (this commit) | docs: the staging evidence |
+| 6 | `ea3f880` | docs: the staging evidence, and why it is blocked rather than passed |
+| 7 | (this commit) | docs: fill in the evidence commit SHA, which row 6 could not know while being written |
 
 ---
 
