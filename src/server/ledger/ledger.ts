@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { OperationKind, Prisma, UnitType, type CardStatus, type PrismaClient } from "@prisma/client";
+import { AuditAction, recordAudit } from "../audit/audit";
 import { prisma, type DbClient, type Tx } from "../db";
-import { ConflictError, LedgerInvariantError, NotFoundError, ValidationError } from "../errors";
+import { ConflictError, ForbiddenError, LedgerInvariantError, NotFoundError, ValidationError } from "../errors";
 import { requireLocationAccess } from "../tenant/context";
-import { actorBusinessId, actorUserId, assertMemberMayWrite, validateActor, type LedgerActor } from "./actor";
+import { actorBusinessId, actorUserId, assertMemberMayWrite, systemReason, validateActor, type LedgerActor } from "./actor";
 import type { AppendResult, AppendedOperation, Balances, OperationGroupInput, OperationInput } from "./types";
 import { readVisitRules, resolveCountsAsVisit } from "./visits";
 
@@ -129,6 +130,17 @@ export async function appendOperationGroup(input: OperationGroupInput, db: DbCli
         select: { id: true },
       });
       if (!loc) throw new NotFoundError("Location not found");
+
+      // 2b. A system actor may name a user it acts for. VERIFY that user is an active member of
+      //     THIS business before it is written to performedByUserId or the audit row — otherwise a
+      //     caller could attribute a platform write to an unrelated person, in any tenant.
+      if (performedByUserId) {
+        const member = await tx.businessMembership.findFirst({
+          where: { userId: performedByUserId, businessId, active: true, user: { active: true } },
+          select: { id: true },
+        });
+        if (!member) throw new ForbiddenError("onBehalfOfUserId is not an active member of this business");
+      }
     }
 
     // 3. Resolve related rows, all scoped to the same business.
@@ -222,6 +234,28 @@ export async function appendOperationGroup(input: OperationGroupInput, db: DbCli
     const projection: Record<string, number | Date> = { lastActivityAt: new Date() };
     for (const unit of ALL_UNITS) projection[UNIT_COLUMN[unit]] = balances[unit];
     await tx.customerCard.update({ where: { id: card.id }, data: projection });
+
+    // 6. A system write has no signed-in staff member behind it, so the WHY lives in one audit row
+    //    committed with the ledger rows. Member writes need none: the ledger itself records the
+    //    acting user, the location and the source. A retried request replays its stored response
+    //    without re-executing (idempotency.ts), so no second audit row is ever written.
+    if (input.actor.kind === "system") {
+      await recordAudit(tx, {
+        action: AuditAction.LEDGER_SYSTEM_GROUP_APPENDED,
+        entityType: "LoyaltyOperationGroup",
+        entityId: transactionGroupId,
+        businessId,
+        actorUserId: performedByUserId, // verified member, or null
+        metadata: {
+          source: input.actor.source,
+          reason: systemReason(input.actor),
+          customerCardId: card.id,
+          locationId: input.locationId,
+          operationIds: appended.map((o) => o.id),
+          operationCount: appended.length,
+        },
+      });
+    }
 
     return { transactionGroupId, customerCardId: card.id, operations: appended, balances };
   });

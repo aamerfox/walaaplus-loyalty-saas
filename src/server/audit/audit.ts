@@ -12,6 +12,8 @@ export const AuditAction = {
   MEMBERSHIP_DEACTIVATED: "membership.deactivated",
   MEMBERSHIP_REACTIVATED: "membership.reactivated",
   LOCATION_CREATED: "location.created",
+  /** A ledger group written by the platform rather than by a signed-in staff member. */
+  LEDGER_SYSTEM_GROUP_APPENDED: "ledger.system_group_appended",
 } as const;
 export type AuditActionName = (typeof AuditAction)[keyof typeof AuditAction];
 

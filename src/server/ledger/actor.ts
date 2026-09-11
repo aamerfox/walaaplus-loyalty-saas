@@ -30,9 +30,17 @@ export interface SystemActor {
   kind: "system";
   businessId: string;
   source: SystemSource;
-  /** Why the platform is writing — job name, integration id, enrollment flow. Stored nowhere yet but required for traceability. */
+  /**
+   * Why the platform is writing — job name, integration id, enrollment flow. Required, and
+   * PERSISTED: every system group writes one AuditLog row carrying this reason in the same
+   * transaction as the ledger rows (`AuditAction.LEDGER_SYSTEM_GROUP_APPENDED`).
+   */
   reason: string;
-  /** Optional user the system acts for (e.g. an import triggered from the dashboard). */
+  /**
+   * Optional user the system acts for (e.g. an import triggered from the dashboard). VERIFIED
+   * against BusinessMembership inside the ledger transaction: it must be an active member of
+   * `businessId`, so a caller cannot attribute a system write to an unrelated person.
+   */
   onBehalfOfUserId?: string | null;
 }
 
@@ -69,6 +77,17 @@ export function validateActor(actor: LedgerActor): void {
   if (!SYSTEM_SOURCES.has(actor.source)) throw new ValidationError(`Source ${actor.source} is not a system source`);
   if (!actor.businessId) throw new ValidationError("System actor requires businessId");
   if (!actor.reason?.trim()) throw new ValidationError("System actor requires a reason");
+  if (actor.onBehalfOfUserId !== undefined && actor.onBehalfOfUserId !== null && !actor.onBehalfOfUserId.trim()) {
+    throw new ValidationError("System actor onBehalfOfUserId must be a user id or omitted");
+  }
+}
+
+/** Max length persisted for a system actor's reason. Long enough for a job name and context. */
+export const MAX_SYSTEM_REASON_LENGTH = 500;
+
+/** Reason as it is persisted: trimmed and bounded, so a caller cannot write unbounded text. */
+export function systemReason(actor: SystemActor): string {
+  return actor.reason.trim().slice(0, MAX_SYSTEM_REASON_LENGTH);
 }
 
 export function actorBusinessId(actor: LedgerActor): string {
