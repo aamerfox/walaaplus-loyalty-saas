@@ -1,55 +1,97 @@
 "use client";
 
-import { Bell, Search, Globe } from "lucide-react";
+import { useState } from "react";
+import { Globe, Menu, X } from "lucide-react";
+import { useLocale, useTranslations } from "next-intl";
 import { useRouter, usePathname } from "@/i18n/routing";
-import { useLocale } from "next-intl";
+import Sidebar from "./Sidebar";
 
-export default function Header() {
+/**
+ * The top bar: who you are acting as, which language, and — on a phone — the way into the menu.
+ *
+ * What it deliberately no longer contains: a search box that searched nothing, a notification bell
+ * with a permanent unread dot, and an avatar showing the initials "BO" for every user alive. Each
+ * was a promise the product could not keep, and the bell's red dot was a promise it re-made on
+ * every page load. Customer search exists and has its own screen; notifications arrive with push in
+ * Phase 1.5.
+ *
+ * The business name comes from the server, from the membership resolved for this request — not from
+ * the session token, which says who someone is and never what they may do.
+ */
+export default function Header({ businessName, userInitials }: { businessName: string; userInitials: string }) {
+  const t = useTranslations("Navigation");
   const locale = useLocale();
   const router = useRouter();
   const pathname = usePathname();
+  const [menuOpen, setMenuOpen] = useState(false);
 
-  const toggleLanguage = () => {
-    const nextLocale = locale === "en" ? "ar" : "en";
-    router.replace(pathname, { locale: nextLocale });
-  };
+  const toggleLanguage = () => router.replace(pathname, { locale: locale === "en" ? "ar" : "en" });
 
   return (
-    <header className="h-20 bg-white/80 dark:bg-zinc-950/80 backdrop-blur-xl border-b border-zinc-200 dark:border-zinc-800 flex flex-shrink-0 items-center justify-between px-6 z-10 sticky top-0">
-      
-      {/* Search Bar - Logical CSS for perfect RTL */}
-      <div className="flex-1 max-w-sm hidden sm:flex items-center relative">
-        <Search className="w-5 h-5 text-zinc-400 absolute start-3" />
-        <input 
-          type="text" 
-          placeholder={locale === 'ar' ? 'البحث عن العملاء أو البطاقات...' : 'Search customers or cards...'} 
-          className="w-full bg-zinc-100 dark:bg-zinc-900 border-transparent focus:bg-white focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 dark:focus:border-indigo-500 dark:focus:ring-indigo-900/50 rounded-xl ps-10 pe-4 py-2.5 text-sm transition-all focus:outline-none text-zinc-900 dark:text-zinc-100 dark:placeholder-zinc-500"
-        />
-      </div>
-
-      <div className="flex items-center gap-4 ms-auto">
-        <button 
-           onClick={toggleLanguage}
-           className="px-3 py-2 text-zinc-500 font-medium text-sm hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors flex items-center gap-2 border border-zinc-200 dark:border-zinc-800"
-           title="Toggle Language"
+    <>
+      <header className="sticky top-0 z-20 flex h-16 shrink-0 items-center gap-3 border-b border-border bg-surface/90 px-4 backdrop-blur-md sm:h-20 sm:px-6">
+        <button
+          type="button"
+          onClick={() => setMenuOpen(true)}
+          data-testid="open-menu"
+          aria-label={t("openMenu")}
+          className="rounded-xl p-2 text-ink-muted hover:bg-surface-muted lg:hidden"
         >
-          <Globe className="w-4 h-4" />
-          <span>{locale === 'en' ? 'AR' : 'EN'}</span>
-        </button>
-        
-        <button className="relative p-2.5 text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-full transition-colors">
-          <Bell className="w-5 h-5" />
-          <span className="absolute top-2.5 end-2 w-2 h-2 bg-rose-500 rounded-full border-2 border-white dark:border-zinc-950"></span>
+          <Menu className="size-6" aria-hidden="true" />
         </button>
 
-        <div className="w-10 h-10 rounded-full bg-indigo-100 dark:bg-indigo-900/40 border border-indigo-200 dark:border-indigo-800/60 flex items-center justify-center overflow-hidden cursor-pointer shadow-sm hover:ring-2 ring-indigo-500 ring-offset-2 dark:ring-offset-zinc-950 transition-all">
-           {/* Initials, not a remote avatar service: rendering one would send the account
-               name to a third party on every dashboard load. Real avatars arrive with the
-               account UI in Phase 1b. */}
-           <span className="font-semibold text-indigo-700 dark:text-indigo-300 select-none" aria-hidden="true">BO</span>
-           <span className="sr-only">Business Owner</span>
+        <div className="min-w-0 flex-1">
+          <p className="truncate font-display text-base font-bold text-ink sm:text-lg" data-testid="current-business">
+            {businessName}
+          </p>
         </div>
-      </div>
-    </header>
+
+        <button
+          type="button"
+          onClick={toggleLanguage}
+          data-testid="toggle-locale"
+          // The label names the destination language, not the current one: "AR" alone leaves the
+          // user guessing whether it is a state or a switch.
+          aria-label={locale === "en" ? t("switchToArabic") : t("switchToEnglish")}
+          className="flex items-center gap-2 rounded-xl border border-border px-3 py-2 text-sm font-semibold text-ink-muted transition-colors hover:bg-surface-muted hover:text-ink"
+        >
+          <Globe className="size-4" aria-hidden="true" />
+          <span aria-hidden="true">{locale === "en" ? "AR" : "EN"}</span>
+        </button>
+
+        <span
+          aria-hidden="true"
+          className="flex size-10 items-center justify-center rounded-full bg-navy-50 font-semibold text-navy-900 dark:bg-navy-800 dark:text-white"
+        >
+          {userInitials}
+        </span>
+      </header>
+
+      {/* The phone menu: the same navigation, not a reduced one. */}
+      {menuOpen ? (
+        <div className="fixed inset-0 z-40 lg:hidden">
+          <button
+            type="button"
+            aria-label={t("closeMenu")}
+            onClick={() => setMenuOpen(false)}
+            className="absolute inset-0 bg-navy-950/50"
+          />
+          <div className="absolute inset-y-0 start-0 flex w-72 max-w-[85vw] flex-col bg-surface shadow-xl">
+            <div className="flex justify-end p-2">
+              <button
+                type="button"
+                onClick={() => setMenuOpen(false)}
+                data-testid="close-menu"
+                aria-label={t("closeMenu")}
+                className="rounded-xl p-2 text-ink-muted hover:bg-surface-muted"
+              >
+                <X className="size-6" aria-hidden="true" />
+              </button>
+            </div>
+            <Sidebar onNavigate={() => setMenuOpen(false)} />
+          </div>
+        </div>
+      ) : null}
+    </>
   );
 }

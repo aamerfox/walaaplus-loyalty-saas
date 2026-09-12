@@ -1,5 +1,6 @@
 "use client";
 
+import { BrandMark } from "@/components/brand/Wordmark";
 import { useState, type FormEvent } from "react";
 import { useLocale, useTranslations } from "next-intl";
 import { signIn } from "next-auth/react";
@@ -146,10 +147,8 @@ export default function RegisterPage() {
 
         <div className="relative z-10">
           <Link href="/" className="flex items-center gap-3">
-            <div className="w-12 h-12 rounded-2xl bg-white flex items-center justify-center shadow-lg">
-              <span className="text-indigo-600 font-black text-2xl">W</span>
-            </div>
-            <span className="font-black text-2xl tracking-tighter text-white">WalaaPlus</span>
+            <BrandMark className="size-12 bg-white" />
+            <span className="font-display text-2xl font-extrabold tracking-tight text-white">Zademi</span>
           </Link>
         </div>
 

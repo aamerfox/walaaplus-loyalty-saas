@@ -29,30 +29,62 @@ import { browserQrCameraDeps, selectQrEngine, startQrCamera, type QrCameraFailur
  * No test here claims a physical scan. Real-device verification stays a manual check.
  */
 
-interface CardSummary {
+interface CardBase {
   customerCardId: string;
   serialNumber: string;
   status: string;
   phone: string;
   firstName: string | null;
   lastName: string | null;
+  templateId: string;
+  programName: string;
+  earnMode: "MANUAL" | "PER_VISIT" | "SPEND_BLOCK";
+}
+
+interface StampCard extends CardBase {
+  cardType: "STAMP";
   stampBalance: number;
   rewardBalance: number;
   stampsRequiredPerReward: number;
   stampsToNextReward: number;
 }
 
+interface PointsCard extends CardBase {
+  cardType: "POINTS";
+  pointBalance: number;
+  pointsLabel: string | null;
+  tiers: { id: string; name: string; requiredPoints: number; affordable: boolean }[];
+}
+
+type CardSummary = StampCard | PointsCard;
+
+/** Which counters this member may operate each program at. `locations: null` means Main only. */
+export interface ScannerScope {
+  programs: { templateId: string; name: string; cardType: "STAMP" | "POINTS"; locations: { id: string; name: string }[] | null }[];
+  defaultLocationId: string | null;
+}
+
 interface OperationResult {
   transactionGroupId: string;
-  stampBalance: number;
-  rewardBalance: number;
-  stampsAwarded: number;
-  rewardsEarned: number;
+  stampBalance?: number;
+  rewardBalance?: number;
+  stampsAwarded?: number;
+  rewardsEarned?: number;
+  pointBalance?: number;
+  pointsDelta?: number;
 }
 
 type Feedback = { tone: "ok" | "warn" | "error"; text: string } | null;
 
-export default function ScannerClient({ businessId, businessName }: { businessId: string; businessName: string }) {
+export default function ScannerClient({
+  businessId,
+  businessName,
+  scope,
+}: {
+  businessId: string;
+  businessName: string;
+  scope: ScannerScope;
+}) {
   const t = useTranslations("Scanner");
   const tc = useTranslations("Common");
   /*
@@ -79,6 +111,14 @@ export default function ScannerClient({ businessId, businessName }: { businessId
   const [cardLink, setCardLink] = useState<{ url: string; qr: string } | null>(null);
   const [linkCopied, setLinkCopied] = useState(false);
   const [lastGroupId, setLastGroupId] = useState<string | null>(null);
+  /**
+   * Which counter this operation happened at.
+   *
+   * Empty until the cashier chooses, and the actions stay disabled until they do — because the
+   * server **refuses to guess** when a program runs at several locations, and a screen that picked
+   * one for them would be choosing which branch gets the revenue.
+   */
+  const [locationId, setLocationId] = useState("");
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<Feedback>(null);
   const [cameraOn, setCameraOn] = useState(false);
@@ -121,6 +161,7 @@ export default function ScannerClient({ businessId, businessName }: { businessId
       setFeedback(null);
       setEnrollPhone(null);
       setCardLink(null);
+      setLocationId("");
       try {
         const params = new URLSearchParams({ businessId });
         if (query.qr) params.set("qr", query.qr.trim());
@@ -149,15 +190,23 @@ export default function ScannerClient({ businessId, businessName }: { businessId
           }
           return;
         }
-        setCard(cards[0]);
+        const found = cards[0];
+        setCard(found);
         setLastGroupId(null);
+        /*
+         * One counter to choose from is not a choice. A program that runs at Main only sends no
+         * location at all (the server refuses one), and a program that lists exactly one gets it
+         * without asking — the picker appears only when there is a decision to make.
+         */
+        const program = scope.programs.find((p) => p.templateId === found.templateId);
+        setLocationId(program?.locations?.length === 1 ? program.locations[0].id : "");
       } catch {
         setFeedback({ tone: "error", text: t("notFound") });
       } finally {
         setBusy(false);
       }
     },
-    [businessId, describeFailure, t],
+    [businessId, describeFailure, scope, t],
   );
 
   /**
@@ -176,19 +225,39 @@ export default function ScannerClient({ businessId, businessName }: { businessId
         const response = await fetch(path, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ ...payload, businessId, customerCardId: card.customerCardId, idempotencyKey }),
+          body: JSON.stringify({
+            ...payload,
+            businessId,
+            customerCardId: card.customerCardId,
+            idempotencyKey,
+            // Only when the cashier actually chose one. A Phase 1a program refuses a location even
+            // if it is the right one, so an empty choice must send no field at all.
+            ...(locationId !== "" ? { locationId } : {}),
+          }),
         });
         if (!response.ok) {
           setFeedback({ tone: "error", text: await describeFailure(response) });
           return;
         }
         const result = (await response.json()) as OperationResult;
-        setCard({
-          ...card,
-          stampBalance: result.stampBalance,
-          rewardBalance: result.rewardBalance,
-          stampsToNextReward: card.stampsRequiredPerReward - (result.stampBalance % card.stampsRequiredPerReward),
-        });
+        if (card.cardType === "STAMP" && result.stampBalance !== undefined) {
+          setCard({
+            ...card,
+            stampBalance: result.stampBalance,
+            rewardBalance: result.rewardBalance ?? card.rewardBalance,
+            stampsToNextReward: card.stampsRequiredPerReward - (result.stampBalance % card.stampsRequiredPerReward),
+          });
+        } else if (card.cardType === "POINTS" && result.pointBalance !== undefined) {
+          const pointBalance = result.pointBalance;
+          setCard({
+            ...card,
+            pointBalance,
+            // Affordability is recomputed from the balance the SERVER just returned, never from a
+            // local sum: the two disagreeing is how a cashier ends up pressing a reward the card
+            // cannot pay for.
+            tiers: card.tiers.map((tier) => ({ ...tier, affordable: pointBalance >= tier.requiredPoints })),
+          });
+        }
         setLastGroupId(result.transactionGroupId);
         setFeedback(onOk(result));
       } catch {
@@ -197,7 +266,7 @@ export default function ScannerClient({ businessId, businessName }: { businessId
         setBusy(false);
       }
     },
-    [businessId, busy, card, describeFailure, t],
+    [businessId, busy, card, describeFailure, locationId, t],
   );
 
   // ── camera ─────────────────────────────────────────────────────────────────
@@ -365,6 +434,24 @@ export default function ScannerClient({ businessId, businessName }: { businessId
       (document.getElementById("customer-card-link") as HTMLInputElement | null)?.select();
     }
   }, [cardLink]);
+
+  /**
+   * The counters this card's program offers THIS member, or null for a Main-only program.
+   *
+   * Read from the scope the server resolved, not from the card: the card says which program it
+   * belongs to, and the server says where that program runs and where this member may stand. A
+   * picker built from anything else could offer an option the write would then refuse.
+   */
+  const programLocations = card === null ? null : (scope.programs.find((p) => p.templateId === card.templateId)?.locations ?? null);
+
+  /**
+   * Every write is blocked until a required counter is chosen.
+   *
+   * The server refuses to guess between several locations, so a disabled button is the honest
+   * version of that refusal — it fails before the request rather than after it, and the line under
+   * the picker says why.
+   */
+  const actionsBlocked = busy || (programLocations !== null && programLocations.length > 1 && locationId === "");
 
   const toneClass = {
     ok: "bg-emerald-500/10 text-emerald-300",
@@ -584,6 +671,44 @@ export default function ScannerClient({ businessId, businessName }: { businessId
               </p>
             </div>
 
+            {/* Which program this card belongs to. A merchant running two of them needs to see it
+                before awarding anything, and the balance below means nothing without it. */}
+            <p data-testid="scanner-program" className="rounded-xl bg-zinc-950 px-4 py-2 text-sm">
+              <span className="text-zinc-500">{t("programLabel")} </span>
+              <span className="font-semibold">{card.programName}</span>
+              <span className="ms-2 rounded-full bg-zinc-800 px-2 py-0.5 text-xs text-zinc-300">
+                {t(`cardType.${card.cardType}`)}
+              </span>
+            </p>
+
+            {/* The counter. Present only when there is a real choice; required when there is. */}
+            {programLocations !== null && programLocations.length > 0 && (
+              <div data-testid="scanner-location">
+                <label htmlFor="scanner-location-select" className="text-xs uppercase tracking-wide text-zinc-500">
+                  {t("locationLabel")}
+                </label>
+                <select
+                  id="scanner-location-select"
+                  value={locationId}
+                  onChange={(e) => setLocationId(e.target.value)}
+                  data-testid="scanner-location-select"
+                  className="mt-1 w-full rounded-xl bg-zinc-950 px-4 py-3 ring-1 ring-white/10"
+                >
+                  <option value="">{t("locationChoose")}</option>
+                  {programLocations.map((location) => (
+                    <option key={location.id} value={location.id}>
+                      {location.name}
+                    </option>
+                  ))}
+                </select>
+                {locationId === "" && (
+                  <p role="status" data-testid="scanner-location-required" className="mt-1 text-xs text-amber-300">
+                    {t("locationRequired")}
+                  </p>
+                )}
+              </div>
+            )}
+
             <button
               type="button"
               onClick={() => void revealCardLink()}
@@ -594,92 +719,219 @@ export default function ScannerClient({ businessId, businessName }: { businessId
               {t("revealCardLink")}
             </button>
 
-            <div className="flex gap-4 rounded-xl bg-zinc-950 px-4 py-3">
-              <div>
-                <p className="text-xs text-zinc-500">{t("balance")}</p>
-                <p data-testid="scanner-stamps" className="text-lg font-bold">
-                  {t("stamps", { count: card.stampBalance })}
-                </p>
-              </div>
-              <div>
-                <p className="text-xs text-zinc-500">&nbsp;</p>
-                <p data-testid="scanner-rewards" className="text-lg font-bold text-emerald-300">
-                  {t("rewards", { count: card.rewardBalance })}
-                </p>
-              </div>
-            </div>
+            {card.cardType === "STAMP" ? (
+              <>
+                <div className="flex gap-4 rounded-xl bg-zinc-950 px-4 py-3">
+                  <div>
+                    <p className="text-xs text-zinc-500">{t("balance")}</p>
+                    <p data-testid="scanner-stamps" className="text-lg font-bold">
+                      {t("stamps", { count: card.stampBalance })}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-zinc-500">&nbsp;</p>
+                    <p data-testid="scanner-rewards" className="text-lg font-bold text-emerald-300">
+                      {t("rewards", { count: card.rewardBalance })}
+                    </p>
+                  </div>
+                </div>
 
-            <div className="space-y-2">
-              <p className="text-xs uppercase tracking-wide text-zinc-500">{t("awardTitle")}</p>
-              <div className="flex items-center gap-2">
-                <input
-                  type="number"
-                  min={1}
-                  value={quantity}
-                  onChange={(e) => setQuantity(Math.max(1, Number(e.target.value) || 1))}
-                  aria-label={t("awardQuantity")}
-                  data-testid="scanner-quantity"
-                  className="w-20 rounded-xl bg-zinc-950 px-3 py-3 text-center ring-1 ring-white/10"
-                />
+                <div className="space-y-2">
+                  <p className="text-xs uppercase tracking-wide text-zinc-500">{t("awardTitle")}</p>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      min={1}
+                      value={quantity}
+                      onChange={(e) => setQuantity(Math.max(1, Number(e.target.value) || 1))}
+                      aria-label={t("awardQuantity")}
+                      data-testid="scanner-quantity"
+                      className="w-20 rounded-xl bg-zinc-950 px-3 py-3 text-center ring-1 ring-white/10"
+                    />
+                    <button
+                      type="button"
+                      disabled={actionsBlocked}
+                      data-testid="scanner-award"
+                      onClick={() =>
+                        void act("/api/scanner/award", { mode: "manual", quantity }, (r) => ({
+                          tone: "ok",
+                          text:
+                            (r.rewardsEarned ?? 0) > 0
+                              ? t("rewardEarned", { count: r.rewardsEarned ?? 0 })
+                              : t("awarded", { count: r.stampsAwarded ?? 0 }),
+                        }))
+                      }
+                      className="flex-1 rounded-xl bg-indigo-600 py-3 font-bold disabled:opacity-50"
+                    >
+                      {t("awardManual")}
+                    </button>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      min={0}
+                      value={purchaseAmount}
+                      onChange={(e) => setPurchaseAmount(e.target.value)}
+                      placeholder={t("purchaseAmount")}
+                      aria-label={t("purchaseAmount")}
+                      data-testid="scanner-purchase-amount"
+                      className="w-32 rounded-xl bg-zinc-950 px-3 py-3 ring-1 ring-white/10"
+                    />
+                    <button
+                      type="button"
+                      disabled={actionsBlocked || purchaseAmount.trim() === ""}
+                      data-testid="scanner-award-purchase"
+                      onClick={() =>
+                        void act(
+                          "/api/scanner/award",
+                          { mode: "purchase", purchaseAmountMinor: Number(purchaseAmount) },
+                          (r) => ({
+                            tone: "ok",
+                            text:
+                              (r.rewardsEarned ?? 0) > 0
+                                ? t("rewardEarned", { count: r.rewardsEarned ?? 0 })
+                                : t("awarded", { count: r.stampsAwarded ?? 0 }),
+                          }),
+                        )
+                      }
+                      className="flex-1 rounded-xl bg-zinc-800 py-3 text-sm font-semibold ring-1 ring-white/10 disabled:opacity-50"
+                    >
+                      {t("awardPurchase")}
+                    </button>
+                  </div>
+                </div>
+
                 <button
                   type="button"
-                  disabled={busy}
-                  data-testid="scanner-award"
-                  onClick={() =>
-                    void act("/api/scanner/award", { mode: "manual", quantity }, (r) => ({
-                      tone: "ok",
-                      text:
-                        r.rewardsEarned > 0
-                          ? t("rewardEarned", { count: r.rewardsEarned })
-                          : t("awarded", { count: r.stampsAwarded }),
-                    }))
-                  }
-                  className="flex-1 rounded-xl bg-indigo-600 py-3 font-bold disabled:opacity-50"
+                  disabled={actionsBlocked || card.rewardBalance < 1}
+                  data-testid="scanner-redeem"
+                  onClick={() => void act("/api/scanner/redeem", {}, () => ({ tone: "ok", text: t("redeemed") }))}
+                  className="w-full rounded-xl bg-emerald-600 py-3 font-bold disabled:opacity-40"
                 >
-                  {t("awardManual")}
+                  {t("redeem")}
                 </button>
-              </div>
+              </>
+            ) : (
+              <>
+                <div className="rounded-xl bg-zinc-950 px-4 py-3">
+                  <p className="text-xs text-zinc-500">{card.pointsLabel ?? t("pointsBalance")}</p>
+                  <p data-testid="scanner-points" className="text-lg font-bold tabular-nums">
+                    {t("points", { count: card.pointBalance })}
+                  </p>
+                </div>
 
-              <div className="flex items-center gap-2">
-                <input
-                  type="number"
-                  min={0}
-                  value={purchaseAmount}
-                  onChange={(e) => setPurchaseAmount(e.target.value)}
-                  placeholder={t("purchaseAmount")}
-                  aria-label={t("purchaseAmount")}
-                  data-testid="scanner-purchase-amount"
-                  className="w-32 rounded-xl bg-zinc-950 px-3 py-3 ring-1 ring-white/10"
-                />
-                <button
-                  type="button"
-                  disabled={busy || purchaseAmount.trim() === ""}
-                  data-testid="scanner-award-purchase"
-                  onClick={() =>
-                    void act("/api/scanner/award", { mode: "purchase", purchaseAmountMinor: Number(purchaseAmount) }, (r) => ({
-                      tone: "ok",
-                      text:
-                        r.rewardsEarned > 0
-                          ? t("rewardEarned", { count: r.rewardsEarned })
-                          : t("awarded", { count: r.stampsAwarded }),
-                    }))
-                  }
-                  className="flex-1 rounded-xl bg-zinc-800 py-3 text-sm font-semibold ring-1 ring-white/10 disabled:opacity-50"
-                >
-                  {t("awardPurchase")}
-                </button>
-              </div>
-            </div>
+                <div className="space-y-2">
+                  <p className="text-xs uppercase tracking-wide text-zinc-500">{t("awardTitle")}</p>
 
-            <button
-              type="button"
-              disabled={busy || card.rewardBalance < 1}
-              data-testid="scanner-redeem"
-              onClick={() => void act("/api/scanner/redeem", {}, () => ({ tone: "ok", text: t("redeemed") }))}
-              className="w-full rounded-xl bg-emerald-600 py-3 font-bold disabled:opacity-40"
-            >
-              {t("redeem")}
-            </button>
+                  {/* The earn mode decides which buttons exist. Offering "per visit" on a
+                      spend-block program would be offering a request the engine refuses. */}
+                  {card.earnMode === "SPEND_BLOCK" && (
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="number"
+                        min={0}
+                        value={purchaseAmount}
+                        onChange={(e) => setPurchaseAmount(e.target.value)}
+                        placeholder={t("purchaseAmount")}
+                        aria-label={t("purchaseAmount")}
+                        data-testid="scanner-points-purchase-amount"
+                        className="w-32 rounded-xl bg-zinc-950 px-3 py-3 ring-1 ring-white/10"
+                      />
+                      <button
+                        type="button"
+                        disabled={actionsBlocked || purchaseAmount.trim() === ""}
+                        data-testid="scanner-points-purchase"
+                        onClick={() =>
+                          void act(
+                            "/api/scanner/points",
+                            { mode: "purchase", purchaseAmountMinor: Number(purchaseAmount) },
+                            (r) => ({ tone: "ok", text: t("pointsAwarded", { count: r.pointsDelta ?? 0 }) }),
+                          )
+                        }
+                        className="flex-1 rounded-xl bg-indigo-600 py-3 font-bold disabled:opacity-50"
+                      >
+                        {t("awardPurchase")}
+                      </button>
+                    </div>
+                  )}
+
+                  {card.earnMode === "PER_VISIT" && (
+                    <button
+                      type="button"
+                      disabled={actionsBlocked}
+                      data-testid="scanner-points-visit"
+                      onClick={() =>
+                        void act("/api/scanner/points", { mode: "visit" }, (r) => ({
+                          tone: "ok",
+                          text: t("pointsAwarded", { count: r.pointsDelta ?? 0 }),
+                        }))
+                      }
+                      className="w-full rounded-xl bg-indigo-600 py-3 font-bold disabled:opacity-50"
+                    >
+                      {t("awardVisit")}
+                    </button>
+                  )}
+
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      min={1}
+                      value={quantity}
+                      onChange={(e) => setQuantity(Math.max(1, Number(e.target.value) || 1))}
+                      aria-label={t("awardQuantity")}
+                      data-testid="scanner-points-quantity"
+                      className="w-20 rounded-xl bg-zinc-950 px-3 py-3 text-center ring-1 ring-white/10"
+                    />
+                    <button
+                      type="button"
+                      disabled={actionsBlocked}
+                      data-testid="scanner-points-award"
+                      onClick={() =>
+                        void act("/api/scanner/points", { mode: "manual", quantity }, (r) => ({
+                          tone: "ok",
+                          text: t("pointsAwarded", { count: r.pointsDelta ?? 0 }),
+                        }))
+                      }
+                      className="flex-1 rounded-xl bg-zinc-800 py-3 text-sm font-semibold ring-1 ring-white/10 disabled:opacity-50"
+                    >
+                      {t("awardManual")}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <p className="text-xs uppercase tracking-wide text-zinc-500">{t("redeemTitle")}</p>
+                  {card.tiers.length === 0 ? (
+                    <p className="text-sm text-zinc-500">{t("noTiers")}</p>
+                  ) : (
+                    <ul className="space-y-2" data-testid="scanner-tiers">
+                      {card.tiers.map((tier) => (
+                        <li key={tier.id}>
+                          <button
+                            type="button"
+                            disabled={actionsBlocked || !tier.affordable}
+                            data-testid={`scanner-redeem-tier-${tier.id}`}
+                            onClick={() =>
+                              void act("/api/scanner/points", { mode: "redeem", rewardTierId: tier.id }, () => ({
+                                tone: "ok",
+                                text: t("redeemed"),
+                              }))
+                            }
+                            className="flex w-full items-center justify-between gap-3 rounded-xl bg-emerald-600 px-4 py-3 text-start font-bold disabled:bg-zinc-800 disabled:text-zinc-500 disabled:opacity-100"
+                          >
+                            <span>{tier.name}</span>
+                            <span className="tabular-nums text-sm font-semibold">
+                              {t("points", { count: tier.requiredPoints })}
+                            </span>
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </>
+            )}
 
             {lastGroupId !== null && (
               <div className="space-y-2 border-t border-white/10 pt-4">

@@ -1,7 +1,8 @@
-import { MembershipRole, OperationKind, Permission, UnitType, type CardStatus } from "@prisma/client";
+import { CardType, MembershipRole, OperationKind, Permission, Prisma, UnitType, type CardStatus } from "@prisma/client";
 import { prisma } from "../db";
 import { ForbiddenError, NotFoundError } from "../errors";
 import { readStampMechanics } from "../program/mechanics";
+import { readPointsMechanics } from "../program/points-mechanics";
 import { requirePermission, type TenantContext } from "../tenant/context";
 import { formatSyrianPhone, tryNormalizeSyrianPhone } from "./phone";
 
@@ -18,7 +19,19 @@ import { formatSyrianPhone, tryNormalizeSyrianPhone } from "./phone";
  * sees the customer's screen.
  */
 
-export interface CardSearchResult {
+/**
+ * One card at the counter, in whichever program it belongs to.
+ *
+ * **This used to be stamp-shaped, and that was a defect Phase 1b Prompt 1 shipped.** `toSearchResult`
+ * read the pinned mechanics through `readStampMechanics`, which throws for a points version - so the
+ * moment a business ran a points program, a phone lookup for any customer holding one failed
+ * outright, taking their stamp cards down with it because the lookup maps over every card the phone
+ * matched. The engines were isolated; the read that feeds the scanner was not.
+ *
+ * It is now a discriminated union on `cardType`, read through whichever contract owns the version.
+ * The shared fields are the ones a cashier identifies a person by; the rest belongs to the program.
+ */
+interface CardSearchBase {
   customerCardId: string;
   serialNumber: string;
   status: CardStatus;
@@ -26,54 +39,128 @@ export interface CardSearchResult {
   phone: string;
   firstName: string | null;
   lastName: string | null;
+  templateId: string;
+  programName: string;
+  /**
+   * How this program earns, so the counter shows the buttons that exist.
+   *
+   * Offering "award for a visit" on a spend-block program is offering a request the engine refuses,
+   * and the cashier finds out with a customer in front of them. It is program configuration, not
+   * customer data: safe on a staff screen, and nowhere near a public one.
+   */
+  earnMode: "MANUAL" | "PER_VISIT" | "SPEND_BLOCK";
+  expiresAt: Date | null;
+  lastActivityAt: Date | null;
+}
+
+export interface StampCardSearchResult extends CardSearchBase {
+  cardType: typeof CardType.STAMP;
   stampBalance: number;
   rewardBalance: number;
   stampsRequiredPerReward: number;
   stampsToNextReward: number;
-  expiresAt: Date | null;
-  lastActivityAt: Date | null;
 }
+
+export interface PointsCardSearchResult extends CardSearchBase {
+  cardType: typeof CardType.POINTS;
+  pointBalance: number;
+  pointsLabel: string | null;
+  /** Tiers on the card's PINNED version, cheapest first, with what this balance can afford. */
+  tiers: { id: string; name: string; requiredPoints: number; affordable: boolean }[];
+}
+
+export type CardSearchResult = StampCardSearchResult | PointsCardSearchResult;
 
 const CARD_SELECT = {
   id: true,
   serialNumber: true,
   status: true,
   stampBalance: true,
+  pointBalance: true,
   rewardBalance: true,
   expiresAt: true,
   lastActivityAt: true,
+  templateId: true,
+  template: { select: { name: true, cardType: true } },
   profile: { select: { firstName: true, lastName: true, customer: { select: { normalizedPhone: true } } } },
-  programVersion: { select: { id: true, mechanics: true } },
-} as const;
+  programVersion: {
+    select: {
+      id: true,
+      mechanics: true,
+      rewardTiers: {
+        select: { id: true, name: true, requiredPoints: true },
+        orderBy: [{ requiredPoints: "asc" }, { sortOrder: "asc" }],
+      },
+    },
+  },
+} satisfies Prisma.CustomerCardSelect;
 
 type CardWithProfile = {
   id: string;
   serialNumber: string;
   status: CardStatus;
   stampBalance: number;
+  pointBalance: number;
   rewardBalance: number;
   expiresAt: Date | null;
   lastActivityAt: Date | null;
+  templateId: string;
+  template: { name: string; cardType: CardType };
   profile: { firstName: string | null; lastName: string | null; customer: { normalizedPhone: string } };
-  programVersion: { id: string; mechanics: unknown };
+  programVersion: { id: string; mechanics: unknown; rewardTiers: { id: string; name: string; requiredPoints: number }[] };
 };
 
 function toSearchResult(card: CardWithProfile): CardSearchResult {
-  const mechanics = readStampMechanics(card.programVersion.mechanics, { programVersionId: card.programVersion.id });
-  return {
+  const base = {
     customerCardId: card.id,
     serialNumber: card.serialNumber,
     status: card.status,
     phone: formatSyrianPhone(card.profile.customer.normalizedPhone),
     firstName: card.profile.firstName,
     lastName: card.profile.lastName,
+    templateId: card.templateId,
+    programName: card.template.name,
+    expiresAt: card.expiresAt,
+    lastActivityAt: card.lastActivityAt,
+  };
+
+  /*
+   * The template's `cardType` says which contract owns this version, and the contract is then read
+   * strictly. A row whose two disagree is corrupt and throws here rather than being displayed as
+   * whichever kind the reader guessed - the balance on a counter screen is not a place to guess.
+   */
+  if (card.template.cardType === CardType.POINTS) {
+    const mechanics = readPointsMechanics(card.programVersion.mechanics, { programVersionId: card.programVersion.id });
+    return {
+      ...base,
+      earnMode: mechanics.earnMode,
+      cardType: CardType.POINTS,
+      pointBalance: card.pointBalance,
+      pointsLabel: mechanics.pointsLabel ?? null,
+      tiers: card.programVersion.rewardTiers.map((t) => ({
+        id: t.id,
+        name: t.name,
+        requiredPoints: t.requiredPoints,
+        affordable: card.pointBalance >= t.requiredPoints,
+      })),
+    };
+  }
+
+  const mechanics = readStampMechanics(card.programVersion.mechanics, { programVersionId: card.programVersion.id });
+  return {
+    ...base,
+    earnMode: mechanics.earnMode,
+    cardType: CardType.STAMP,
     stampBalance: card.stampBalance,
     rewardBalance: card.rewardBalance,
     stampsRequiredPerReward: mechanics.stampsRequiredPerReward,
     stampsToNextReward: mechanics.stampsRequiredPerReward - (card.stampBalance % mechanics.stampsRequiredPerReward),
-    expiresAt: card.expiresAt,
-    lastActivityAt: card.lastActivityAt,
   };
+}
+
+/** True when this card is a stamp card. Narrows the union for callers that only handle one kind. */
+export function isStampCard(card: CardSearchResult): card is StampCardSearchResult {
+  return card.cardType === CardType.STAMP;
 }
 
 /** Scanner path 1: the customer shows their QR. */

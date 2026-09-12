@@ -93,11 +93,17 @@ describe("message files", () => {
 
   it("translates the Arabic, apart from the few strings that are identical on purpose", () => {
     /*
-     * A string that is byte-identical in both files is usually an untranslated copy. Three here
-     * are legitimately identical and are listed so a fourth has to be argued for: a
-     * placeholder-only subtitle, and two phone placeholders that are digits.
+     * A string that is byte-identical in both files is usually an untranslated copy. Four here are
+     * legitimately identical and are listed so a fifth has to be argued for: a placeholder-only
+     * subtitle, two phone placeholders that are digits, and the product name — which is the same
+     * word in every locale, because a translated product name is a different product.
      */
-    const deliberatelyIdentical = new Set(["Join.subtitle", "Join.phonePlaceholder", "Scanner.phonePlaceholder"]);
+    const deliberatelyIdentical = new Set([
+      "Brand.productName",
+      "Join.subtitle",
+      "Join.phonePlaceholder",
+      "Scanner.phonePlaceholder",
+    ]);
     const en = byLocale.get("en")!;
     const ar = byLocale.get("ar")!;
 

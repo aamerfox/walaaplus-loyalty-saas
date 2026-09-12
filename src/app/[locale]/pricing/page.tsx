@@ -1,5 +1,6 @@
 "use client";
 
+import { Wordmark } from "@/components/brand/Wordmark";
 import { useLocale } from "next-intl";
 import { Link } from "@/i18n/routing";
 import { Check, ArrowRight, Building2, Store } from "lucide-react";
@@ -51,7 +52,7 @@ export default function PricingPage() {
         "عملاء بطاقات غير محدود",
         "نظام جمع التقييمات (Feedback)",
         "تحليلات RFM المتقدمة",
-        "إزالة شعار WalaaPlus"
+        "إزالة شعار Zademi"
       ],
       featuresEn: [
         "10 Geofencing Locations",
@@ -103,10 +104,7 @@ export default function PricingPage() {
       <nav className="fixed top-0 inset-x-0 z-50 bg-white/80 dark:bg-zinc-950/80 backdrop-blur-xl border-b border-zinc-200 dark:border-zinc-800">
         <div className="max-w-7xl mx-auto px-6 h-20 flex items-center justify-between">
           <Link href="/" className="flex items-center gap-3">
-             <div className="w-10 h-10 rounded-xl bg-indigo-600 flex items-center justify-center shadow-lg shadow-indigo-600/20">
-                <span className="text-white font-black text-xl">W</span>
-             </div>
-             <span className="font-black text-2xl tracking-tighter">WalaaPlus</span>
+             <Wordmark />
           </Link>
           <div className="flex items-center gap-4">
              <Link href="/auth/login" className="hidden sm:block font-bold text-sm tracking-wide text-zinc-600 dark:text-zinc-300 hover:text-indigo-600">

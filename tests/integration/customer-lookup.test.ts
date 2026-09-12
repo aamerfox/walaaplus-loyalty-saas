@@ -11,7 +11,16 @@ import { MembershipRole, OperationKind, OperationSource, UnitType } from "@prism
 import { beforeAll, describe, expect, it } from "vitest";
 import { prisma } from "@/server/db";
 import { ForbiddenError, NotFoundError } from "@/server/errors";
-import { findCardByQrToken, findCardBySerial, findCardsByPhone, listCardOperations, listCustomers } from "@/server/customers/lookup";
+import {
+  findCardByQrToken,
+  findCardBySerial,
+  findCardsByPhone,
+  isStampCard,
+  listCardOperations,
+  listCustomers,
+  type CardSearchResult,
+  type StampCardSearchResult,
+} from "@/server/customers/lookup";
 import { awardManualStamps } from "@/server/stamp/engine";
 import {
   createStaff,
@@ -22,6 +31,18 @@ import {
   uniqueSyrianPhone,
   type StampCafeFixture,
 } from "../setup/fixtures";
+
+/**
+ * Narrow a lookup result to a stamp card.
+ *
+ * `CardSearchResult` became a union on `cardType` when the scanner learned about points cards, so a
+ * test that reads `stampBalance` has to say which kind it expects. Saying it out loud is the point:
+ * a card that came back as the other kind is a failure, not a field that happens to be undefined.
+ */
+function asStampCard(card: CardSearchResult): StampCardSearchResult {
+  if (!isStampCard(card)) throw new Error(`expected a stamp card, got ${card.cardType}`);
+  return card;
+}
 
 const key = () => `k-${randomUUID()}`;
 
@@ -55,9 +76,9 @@ describe("customer lookup", () => {
       const found = await findCardByQrToken(cafe.ctx, hereCard.qrToken);
       expect(found.customerCardId).toBe(hereCard.customerCardId);
       expect(found.firstName).toBe("ليلى");
-      expect(found.stampBalance).toBe(4);
-      expect(found.stampsRequiredPerReward).toBe(10);
-      expect(found.stampsToNextReward).toBe(6);
+      expect(asStampCard(found).stampBalance).toBe(4);
+      expect(asStampCard(found).stampsRequiredPerReward).toBe(10);
+      expect(asStampCard(found).stampsToNextReward).toBe(6);
       expect(found.phone).toBe(`+963 ${sharedPhone.slice(4, 7)} ${sharedPhone.slice(7, 10)} ${sharedPhone.slice(10)}`);
     });
 
@@ -98,8 +119,8 @@ describe("customer lookup", () => {
       expect(here[0].customerCardId).toBe(hereCard.customerCardId);
       expect(there[0].customerCardId).toBe(thereCard.customerCardId);
       // Balances are independent: the rival sees none of this café's stamps.
-      expect(here[0].stampBalance).toBe(4);
-      expect(there[0].stampBalance).toBe(0);
+      expect(asStampCard(here[0]).stampBalance).toBe(4);
+      expect(asStampCard(there[0]).stampBalance).toBe(0);
     });
 
     it("returns nothing for a stranger, and for an unparseable query", async () => {

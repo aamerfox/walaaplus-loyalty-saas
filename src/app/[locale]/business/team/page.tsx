@@ -1,22 +1,32 @@
-import { MembershipRole } from "@prisma/client";
+import { MembershipRole, Permission } from "@prisma/client";
 import { getTranslations } from "next-intl/server";
 import { redirect } from "next/navigation";
+import { Badge, Card, Notice, PageHeader } from "@/components/ui";
 import { getCurrentUserId } from "@/server/auth/session";
+import { listBusinessLocations } from "@/server/tenant/locations";
 import { listBusinessStaff } from "@/server/tenant/memberships";
 import { resolveScannerContext } from "@/server/tenant/scanner-context";
 import CashierForm from "./CashierForm";
+import StaffMemberControls from "./StaffMemberControls";
 
 /**
- * The minimal staff screen Phase 1a needs: make an account for the person on the till.
+ * Staff, their access, and where they may work.
  *
- * Not a staff-management page. There is no role picker, no permission editor, no location
- * assignment and no way to change or remove an existing membership — all of that is Phase 1b, and
- * shipping half of it now would mean shipping a screen that implies capabilities the server
- * refuses. The list below is read-only for the same reason.
+ * Phase 1a's version of this page was a read-only list and a cashier form, because the server had
+ * nothing else: no role change, no permission editor, no location assignment. Phase 1b built those,
+ * so the screen now exposes them — and exposes exactly them.
  *
- * Creation is owner-only, enforced by the service on the ROLE. A manager reaching this page sees
- * the list and a form that the server will refuse, which is the honest outcome: the alternative is
- * hiding a button and letting them believe the permission does not exist.
+ * Three things this page does NOT do, each for a reason the server enforces anyway:
+ *
+ *  - it shows no control on the reader's own row (**nobody edits their own membership**, not even an
+ *    owner — an owner who removes their own last permission locks the business out of itself);
+ *  - it offers no OWNER option in the role picker (promoting an owner is not a staff screen's job);
+ *  - it shows no permission editor to a member who could not grant what it contains. The grant
+ *    ceiling — nobody hands out access they do not hold — is enforced in the service, and a picker
+ *    full of permanently refused checkboxes would be a worse way to learn that.
+ *
+ * Personal data is the minimum a manager needs to tell two people apart: name, email, role. No
+ * phone, no password state, no last-seen.
  */
 export default async function TeamPage({
   params,
@@ -34,58 +44,82 @@ export default async function TeamPage({
   const t = await getTranslations("Staff");
   const resolved = await resolveScannerContext(userId, b ?? null);
   if (resolved.kind !== "ready") {
-    return <p className="text-zinc-500">{t("none")}</p>;
+    return <Notice tone="warn">{t("none")}</Notice>;
   }
 
-  const { ctx } = resolved.context;
-  // Through the service, like every other read: the tenant filter and the permission check live
-  // there, so a page cannot forget either of them.
-  const staff = await listBusinessStaff(ctx);
+  const { ctx, businessName } = resolved.context;
+  if (!ctx.permissions.has(Permission.VIEW_STAFF)) {
+    return (
+      <>
+        <PageHeader title={t("title")} subtitle={businessName} />
+        <Notice tone="warn" testId="staff-forbidden">
+          {t("forbidden")}
+        </Notice>
+      </>
+    );
+  }
+
+  // Both through services: the tenant filter and the permission check live there, so a page cannot
+  // forget either of them.
+  const staff = await listBusinessStaff(ctx, { includeInactive: true });
+  const locations = ctx.permissions.has(Permission.VIEW_LOCATIONS) ? await listBusinessLocations(ctx) : [];
 
   const isOwner = ctx.role === MembershipRole.OWNER;
+  const canEdit = ctx.permissions.has(Permission.EDIT_STAFF);
 
   return (
-    <div className="space-y-6">
-      <header>
-        <h1 className="text-3xl font-bold tracking-tight text-zinc-900 dark:text-zinc-100">{t("title")}</h1>
-        <p className="mt-1 text-zinc-500 dark:text-zinc-400">{t("subtitle")}</p>
-      </header>
+    <>
+      <PageHeader title={t("title")} subtitle={businessName} />
 
       {isOwner ? (
         <CashierForm businessId={ctx.businessId} />
       ) : (
-        <p className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-300">
+        <Notice tone="info" testId="staff-owner-only">
           {t("ownerOnly")}
-        </p>
+        </Notice>
       )}
 
-      <section>
-        <h2 className="mb-3 text-lg font-semibold text-zinc-900 dark:text-zinc-100">{t("listTitle")}</h2>
-        <div className="overflow-hidden rounded-2xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
-          <table className="w-full text-start text-sm">
-            <thead className="border-b border-zinc-200 text-xs uppercase tracking-wide text-zinc-500 dark:border-zinc-800">
-              <tr>
-                <th className="px-4 py-3 text-start">{t("firstName")}</th>
-                <th className="px-4 py-3 text-start">{t("email")}</th>
-                <th className="px-4 py-3 text-start">{t("role")}</th>
-              </tr>
-            </thead>
-            <tbody data-testid="staff-rows">
-              {staff.map((member) => (
-                <tr key={member.id} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/60">
-                  <td className="px-4 py-3 font-medium text-zinc-900 dark:text-zinc-100">
-                    {[member.user.firstName, member.user.lastName].filter(Boolean).join(" ") || "—"}
-                  </td>
-                  <td className="px-4 py-3 text-zinc-500" dir="ltr">
-                    {member.user.email}
-                  </td>
-                  <td className="px-4 py-3 text-zinc-500">{member.role}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </section>
-    </div>
+      <ul className="space-y-4" data-testid="staff-rows">
+        {staff.map((member) => (
+          <Card as="li" key={member.id} className="space-y-3">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="font-semibold text-ink">
+                  {[member.user.firstName, member.user.lastName].filter(Boolean).join(" ") || t("unnamed")}
+                </p>
+                <p className="truncate text-sm text-ink-muted" dir="ltr">
+                  {member.user.email}
+                </p>
+              </div>
+              <div className="flex shrink-0 flex-wrap gap-2">
+                <Badge tone="brand">{t(`roles.${member.role}`)}</Badge>
+                <Badge tone={member.active ? "success" : "warn"}>{member.active ? t("active") : t("inactive")}</Badge>
+              </div>
+            </div>
+
+            {member.permissions.length > 0 ? (
+              <p className="text-xs text-ink-muted">
+                {t("extraPermissions", { list: member.permissions.join(", ") })}
+              </p>
+            ) : null}
+
+            <StaffMemberControls
+              membershipId={member.id}
+              role={member.role}
+              active={member.active}
+              isSelf={member.id === ctx.membershipId}
+              canEdit={canEdit}
+              assignedLocationIds={member.locationIds}
+              locations={locations.filter((l) => l.active).map((l) => ({ id: l.id, name: l.name }))}
+              unrestrictedLocations={member.unrestrictedLocations}
+            />
+          </Card>
+        ))}
+      </ul>
+
+      <Notice tone="info" testId="staff-rules-note">
+        {t("rulesNote")}
+      </Notice>
+    </>
   );
 }

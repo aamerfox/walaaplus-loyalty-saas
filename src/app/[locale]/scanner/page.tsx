@@ -2,6 +2,7 @@ import { getTranslations } from "next-intl/server";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { getCurrentUserId } from "@/server/auth/session";
+import { getScannerScope } from "@/server/program/program-detail";
 import { resolveScannerContext } from "@/server/tenant/scanner-context";
 import ScannerClient from "./ScannerClient";
 
@@ -14,8 +15,9 @@ import ScannerClient from "./ScannerClient";
  * the same thing a third time; a page that "already checked" is not an authorization for a route.
  *
  * A user may hold memberships in several businesses, so the acting business is resolved rather
- * than assumed. There is no location anywhere on this screen: Phase 1a operates at Main, the
- * server resolves it, and the UI says so rather than offering a choice that does not exist.
+ * than assumed. Locations now appear on this screen, but only where one is a real decision: a
+ * program that runs at Main only sends no location at all, and a program that runs at several
+ * requires the cashier to say which — because the server refuses to guess between them.
  */
 export default async function ScannerPage({
   params,
@@ -62,5 +64,12 @@ export default async function ScannerPage({
   }
 
   const { ctx, businessName } = resolved.context;
-  return <ScannerClient businessId={ctx.businessId} businessName={businessName} />;
+  /*
+   * What this member may operate, resolved on the server before the screen renders.
+   *
+   * The picker below is built from this and nothing else: a location the member is not assigned to
+   * never reaches the browser, so the screen cannot offer an option the write would refuse.
+   */
+  const scope = await getScannerScope(ctx);
+  return <ScannerClient businessId={ctx.businessId} businessName={businessName} scope={scope} />;
 }

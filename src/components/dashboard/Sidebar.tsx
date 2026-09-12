@@ -2,89 +2,75 @@
 
 import { useTranslations } from "next-intl";
 import { Link, usePathname } from "@/i18n/routing";
-import { LayoutDashboard, Users, CreditCard, Settings, LogOut, QrCode, PieChart, ShieldCheck, MapPin, BellRing, Star, Share2, FileText, Server, Layers, ScanLine } from "lucide-react";
+import { CreditCard, LayoutDashboard, MapPin, ScanLine, ShieldCheck, Users } from "lucide-react";
+import { Wordmark } from "@/components/brand/Wordmark";
 import { cn } from "@/lib/utils";
+import SignOutButton from "./SignOutButton";
 
 /**
- * Routes with a real implementation behind them. Every other entry below has NO page: the visual
- * prototypes were deleted, because hiding a link is not access control. Each of those pages
- * rendered invented figures - segment counts, a hard-coded join URL, "MRR $4,450" - to any
- * signed-in user who typed the URL, cashiers included, and none of them checked a membership or a
- * role. A greyed-out control is a promise and an unlinked page is a promise someone will find.
+ * The merchant navigation.
  *
- * The entries stay in the list below so the intended shape of the product is still visible; the
- * filter removes them until a real page exists. Add a route here in the same commit that
- * implements it, and delete nothing from this list to make a link appear.
+ * **Every entry here has a real page behind it.** The list used to carry seventeen items and filter
+ * fifteen of them out, because the visual prototypes they pointed at were deleted: each rendered
+ * invented figures to any signed-in user who typed the URL, cashiers included. The filter was the
+ * right fix at the time; keeping a list of links to pages that do not exist is not, because the
+ * next person to add a page adds it to the wrong list and the entry appears before the
+ * authorization does.
+ *
+ * So the rule is now simpler and harder to get wrong: **to add a link, build the page.** What the
+ * product intends to become lives in `docs/PHASE-PLAN.md`, which is where a roadmap belongs.
  */
-const IMPLEMENTED_ROUTES: ReadonlySet<string> = new Set([
-  "/business",
-  "/business/program",
-  "/business/customers",
-  "/business/team",
-  "/scanner",
-]);
 
-export default function Sidebar() {
+export default function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   const t = useTranslations("Navigation");
   const pathname = usePathname();
-  
+
   const navItems = [
     { name: t("dashboard"), href: "/business", icon: LayoutDashboard },
-    { name: t("program"), href: "/business/program", icon: CreditCard },
+    { name: t("programs"), href: "/business/programs", icon: CreditCard },
     { name: t("scanner"), href: "/scanner", icon: ScanLine },
     { name: t("customers"), href: "/business/customers", icon: Users },
-    { name: t("rfm"), href: "/business/rfm", icon: PieChart },
-    { name: t("cards"), href: "/business/cards/templates", icon: CreditCard },
-    { name: t("templates"), href: "/business/cards/builder", icon: Layers },
-    { name: t("forms"), href: "/business/forms", icon: FileText },
-    { name: t("distribution"), href: "/business/distribution", icon: QrCode },
     { name: t("locations"), href: "/business/locations", icon: MapPin },
-    { name: t("push"), href: "/business/push", icon: BellRing },
-    { name: t("feedback"), href: "/business/feedback", icon: Star },
-    { name: t("referrals"), href: "/business/referrals", icon: Share2 },
-    { name: t("developer"), href: "/business/developer", icon: Server },
     { name: t("team"), href: "/business/team", icon: ShieldCheck },
-    { name: t("billing"), href: "/business/billing", icon: CreditCard },
-    { name: t("settings"), href: "/business/settings", icon: Settings },
-  ].filter((item) => IMPLEMENTED_ROUTES.has(item.href));
+  ];
 
   return (
-    <aside className="w-64 bg-white dark:bg-zinc-950 border-e border-zinc-200 dark:border-zinc-800 flex flex-col h-screen transition-all duration-300 shadow-sm">
-      <div className="p-6 border-b border-zinc-200 dark:border-zinc-800 flex items-center gap-3">
-        <div className="w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center shadow-inner">
-             <span className="text-white font-bold text-lg">W</span>
-        </div>
-        <span className="font-bold text-xl tracking-tight text-zinc-900 dark:text-zinc-100">WalaaPlus</span>
+    <aside className="flex h-full w-64 flex-col border-e border-border bg-surface">
+      <div className="border-b border-border p-5">
+        <Link href="/business" onClick={onNavigate} className="inline-flex" aria-label="Zademi">
+          <Wordmark />
+        </Link>
       </div>
-      
-      <nav className="flex-1 p-4 space-y-2 overflow-y-auto">
+
+      <nav aria-label={t("primary")} className="flex-1 space-y-1 overflow-y-auto p-3">
         {navItems.map((item) => {
-          const isActive = pathname === item.href;
+          // `startsWith` so a detail page keeps its section highlighted, with the dashboard pinned
+          // to an exact match - otherwise "/business" would light up on every page below it.
+          const isActive = item.href === "/business" ? pathname === item.href : pathname.startsWith(item.href);
           const Icon = item.icon;
-          
+
           return (
             <Link
               key={item.href}
               href={item.href}
+              onClick={onNavigate}
+              aria-current={isActive ? "page" : undefined}
               className={cn(
-                "flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 font-medium whitespace-nowrap",
-                isActive 
-                  ? "bg-indigo-50 text-indigo-600 dark:bg-indigo-500/10 dark:text-indigo-400" 
-                  : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800/50 hover:text-zinc-900 dark:hover:text-zinc-100"
+                "flex items-center gap-3 rounded-xl px-4 py-3 font-medium transition-colors",
+                isActive
+                  ? "bg-navy-50 text-navy-900 dark:bg-navy-800 dark:text-white"
+                  : "text-ink-muted hover:bg-surface-muted hover:text-ink",
               )}
             >
-              <Icon className={cn("w-5 h-5 flex-shrink-0", isActive ? "text-indigo-600 dark:text-indigo-400" : "text-zinc-400")} />
-              {item.name}
+              <Icon className="size-5 shrink-0" aria-hidden="true" />
+              <span className="truncate">{item.name}</span>
             </Link>
           );
         })}
       </nav>
 
-      <div className="p-4 border-t border-zinc-200 dark:border-zinc-800">
-        <button className="flex items-center gap-3 px-4 py-3 w-full rounded-xl text-rose-600 font-medium hover:bg-rose-50 dark:hover:bg-rose-500/10 transition-colors">
-          <LogOut className="w-5 h-5 flex-shrink-0" />
-          {t("logout")}
-        </button>
+      <div className="border-t border-border p-3">
+        <SignOutButton />
       </div>
     </aside>
   );

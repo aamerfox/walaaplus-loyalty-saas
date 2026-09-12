@@ -41,11 +41,34 @@ export function assertNoLocationInRequest(value: unknown, depth = 0): void {
   }
 }
 
+export interface ReadJsonOptions {
+  /**
+   * Allow a TOP-LEVEL `locationId`, for the authenticated scanner writes that legitimately name a
+   * counter (Phase 1b).
+   *
+   * Deliberately not a blanket exemption. A route that opts in still gets the nested check - a body
+   * like `{ award: { locationId } }` is refused whatever this flag says - and it must then parse the
+   * field with a strict schema and hand it to a service that validates it against the card's pinned
+   * `availableLocations` and the member's own assignment, inside the write transaction. The flag
+   * only says "this endpoint has a location to talk about"; it never says the value is trusted.
+   */
+  allowLocation?: boolean;
+}
+
 /** Parse a JSON body, or refuse with the same generic 400 every route uses. */
-export async function readJsonObject(req: Request): Promise<Record<string, unknown>> {
+export async function readJsonObject(req: Request, options: ReadJsonOptions = {}): Promise<Record<string, unknown>> {
   const body: unknown = await req.json().catch(() => null);
   if (!body || typeof body !== "object" || Array.isArray(body)) throw new ValidationError("JSON body required");
-  assertNoLocationInRequest(body);
+
+  if (options.allowLocation === true) {
+    // Check every nested value, and only the nested ones: the top level is this route's business.
+    for (const [key, nested] of Object.entries(body as Record<string, unknown>)) {
+      if (/^location(Id)?$/i.test(key)) continue;
+      assertNoLocationInRequest(nested, 1);
+    }
+  } else {
+    assertNoLocationInRequest(body);
+  }
   return body as Record<string, unknown>;
 }
 

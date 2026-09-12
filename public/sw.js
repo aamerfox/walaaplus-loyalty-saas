@@ -1,5 +1,5 @@
 /**
- * WalaaPlus customer-card service worker.
+ * Zademi customer-card service worker.
  *
  * This file is deliberately almost empty, and that is the design.
  *
@@ -32,7 +32,12 @@
  * installed card is an ordinary online page in an app window.
  */
 
-const SW_VERSION = "walaaplus-card-v1";
+/*
+ * The cache prefix is part of the rebrand only because the cleanup below matches on it. This worker
+ * caches NOTHING, so there is no cached content to migrate: the rename simply means the sweep that
+ * deletes stale caches keeps deleting the old `walaaplus-` ones as well as any future `zademi-` one.
+ */
+const SW_VERSION = "zademi-card-v1";
 
 self.addEventListener("install", () => {
   // Take over immediately rather than waiting for every tab of this card to close. Safe precisely
@@ -46,7 +51,7 @@ self.addEventListener("activate", (event) => {
       // Belt and braces: if a future version ever caches something and is then rolled back, this
       // removes what it left behind rather than serving it forever.
       const names = await caches.keys();
-      await Promise.all(names.filter((name) => name.startsWith("walaaplus-")).map((name) => caches.delete(name)));
+      await Promise.all(names.filter((name) => /^(walaaplus|zademi)-/.test(name)).map((name) => caches.delete(name)));
       await self.clients.claim();
     })(),
   );

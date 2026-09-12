@@ -103,8 +103,26 @@ describe("ScannerClient — the camera", () => {
     expect(source).not.toMatch(/console\s*\./);
   });
 
-  it("sends no location, still", () => {
-    expect(code).not.toContain("locationId");
+  /**
+   * Phase 1b Prompt 2 replaced this test's original claim, deliberately.
+   *
+   * It used to assert the component contained no `locationId` at all, which was the right assertion
+   * while Phase 1a ran one counter: the server resolved Main and a location in a request body was a
+   * scope violation. Multi-location changed what "correct" means — the server now REFUSES to guess
+   * between several counters, so a screen that sent nothing would be unusable at exactly the
+   * businesses the feature is for.
+   *
+   * What must still hold is the part that was actually protecting anything: the component never
+   * invents a location. It sends one only when a person chose it from a list the SERVER produced
+   * from their own membership, and it sends no field at all when they have not chosen.
+   */
+  it("sends a location only when one was chosen, and never invents one", () => {
+    expect(code).toContain('locationId !== "" ? { locationId } : {}');
+    // The list comes from the server-resolved scope, not from anything the component derives.
+    expect(code).toContain("scope.programs.find");
+    // No default, no fallback, no "first location" anywhere in the component.
+    expect(code).not.toMatch(/locationId\s*=\s*["'][a-z0-9-]{8,}["']/i);
+    expect(code).not.toContain("defaultLocationId ??");
   });
 });
 

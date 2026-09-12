@@ -1,5 +1,6 @@
 "use client";
 
+import { Wordmark } from "@/components/brand/Wordmark";
 import { useTranslations, useLocale } from "next-intl";
 import { Link } from "@/i18n/routing";
 import { ArrowRight, Smartphone, Globe, Zap } from "lucide-react";
@@ -15,12 +16,7 @@ export default function LandingPage() {
       {/* Navigation */}
       <nav className="fixed top-0 inset-x-0 z-50 bg-white/80 dark:bg-zinc-950/80 backdrop-blur-xl border-b border-zinc-200 dark:border-zinc-800">
         <div className="max-w-7xl mx-auto px-6 h-20 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-             <div className="w-10 h-10 rounded-xl bg-indigo-600 flex items-center justify-center shadow-lg shadow-indigo-600/20">
-                <span className="text-white font-black text-xl">W</span>
-             </div>
-             <span className="font-black text-2xl tracking-tighter">WalaaPlus</span>
-          </div>
+          <Wordmark />
 
           <div className="hidden md:flex items-center gap-8 font-bold text-sm text-zinc-600 dark:text-zinc-400">
              <Link href="/" className="hover:text-indigo-600 transition-colors">{t('navHome')}</Link>

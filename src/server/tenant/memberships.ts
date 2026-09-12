@@ -293,6 +293,30 @@ export async function setMembershipLocations(ctx: TenantContext, membershipId: s
   });
 }
 
+/**
+ * The signed-in person, as the shell displays them.
+ *
+ * Initials are computed HERE rather than in the layout, for the boring structural reason: a page or
+ * a layout may not reach for Prisma (PRODUCT-SPEC §2.6), and "read the user row" is a database read
+ * however small the field. It returns initials and nothing else — no email, no phone, no name — so
+ * the avatar in the corner cannot become a quiet leak of the account's address into the DOM.
+ */
+export async function getStaffInitials(userId: string): Promise<string> {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { firstName: true, lastName: true, email: true },
+  });
+  if (!user) return "?";
+
+  const fromName = [user.firstName, user.lastName]
+    .filter((part): part is string => typeof part === "string" && part.trim() !== "")
+    .map((part) => [...part.trim()][0]!.toUpperCase())
+    .join("")
+    .slice(0, 2);
+  // No name on the account yet: the first letter of the address, which is at least theirs.
+  return fromName || [...user.email][0]!.toUpperCase();
+}
+
 /** Businesses the user can act in. Used by the shell to pick a current business. */
 export async function listUserBusinesses(userId: string) {
   return prisma.businessMembership.findMany({

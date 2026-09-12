@@ -1,26 +1,192 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/**
+ * The Zademi design tokens.
+ *
+ * Everything visible in this product takes its colour, radius and type from this file. That is the
+ * whole point of it existing: the screens it replaced carried `indigo-600` in forty places, so a
+ * brand change meant forty edits and a guaranteed miss, and a contrast decision made once in a
+ * component was unmade three screens later by whoever typed the next hex value.
+ *
+ * ## The palette, and where each colour may be used
+ *
+ * | Token | Hex | Use | Contrast on white |
+ * |---|---|---|---|
+ * | navy-900 | #0B2D5B | primary surface, primary button, headings | 12.6:1 |
+ * | turquoise-500 | #00B3A4 | fills, borders, progress, accents | 2.6:1 — **never small text** |
+ * | turquoise-700 | #00796F | interactive text and links on light ground | 4.9:1 |
+ * | mint-500 | #2ED47A | progress and success fills | 1.9:1 — **never text** |
+ * | mint-700 | #18794E | success text | 4.8:1 |
+ * | gray-50 | #F4F6F8 | app background |  |
+ * | charcoal | #1F2937 | body text | 13.6:1 |
+ *
+ * The two "never text" rows are the reason the accents have a darker sibling. A turquoise headline
+ * on white looks like the brand and fails WCAG AA at body size; `turquoise-700` is the same hue,
+ * passes, and is what every link and interactive label uses.
+ *
+ * ## Semantic tokens
+ *
+ * Components address `--color-surface`, `--color-ink`, `--color-border` and friends rather than the
+ * raw palette, so dark mode is a redefinition here instead of a `dark:` class on every element.
+ */
+
+@theme {
+  /* Brand ramp */
+  --color-navy-50: #f2f6fb;
+  --color-navy-100: #e3ecf6;
+  --color-navy-200: #c2d5e9;
+  --color-navy-600: #17457f;
+  --color-navy-700: #103a6d;
+  --color-navy-800: #0d3363;
+  --color-navy-900: #0b2d5b;
+  --color-navy-950: #071d3b;
+
+  --color-turquoise-50: #eefbfa;
+  --color-turquoise-100: #d5f4f1;
+  --color-turquoise-200: #a8e9e3;
+  --color-turquoise-500: #00b3a4;
+  --color-turquoise-600: #009b8e;
+  --color-turquoise-700: #00796f;
+  --color-turquoise-800: #045f58;
+
+  --color-mint-50: #effaf3;
+  --color-mint-100: #d8f5e4;
+  --color-mint-500: #2ed47a;
+  --color-mint-600: #22b566;
+  --color-mint-700: #18794e;
+
+  --color-charcoal: #1f2937;
+  --color-cloud: #f4f6f8;
+
+  /* Type. Latin headings in Nunito, Latin body in Inter, Arabic in Cairo — all self-hosted by
+     next/font at build time, so no request leaves the browser to a font CDN at runtime. */
+  --font-sans: var(--font-inter), var(--font-cairo), system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-display: var(--font-nunito), var(--font-cairo), system-ui, sans-serif;
+
+  --radius-card: 1rem;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+/* ── Semantic tokens: light ─────────────────────────────────────────────────── */
+:root {
+  --color-app: #f4f6f8;
+  --color-surface: #ffffff;
+  --color-surface-muted: #f8fafc;
+  --color-ink: #1f2937;
+  --color-ink-muted: #5b6673;
+  --color-ink-faint: #7c8794;
+  --color-border: #e2e7ec;
+  --color-border-strong: #cbd3db;
+  --color-brand: #0b2d5b;
+  --color-brand-ink: #ffffff;
+  --color-accent: #00b3a4;
+  --color-accent-ink: #00796f;
+  --color-success-ink: #18794e;
+  --color-success-bg: #d8f5e4;
+  --color-warn-ink: #92400e;
+  --color-warn-bg: #fef3c7;
+  --color-danger-ink: #b42318;
+  --color-danger-bg: #fee4e2;
+  --color-focus: #00b3a4;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    --color-app: #071d3b;
+    --color-surface: #0d2748;
+    --color-surface-muted: #102e53;
+    --color-ink: #eef3f9;
+    --color-ink-muted: #a9bad0;
+    --color-ink-faint: #8298b4;
+    --color-border: #1b3b63;
+    --color-border-strong: #2a5285;
+    --color-brand: #ffffff;
+    --color-brand-ink: #0b2d5b;
+    --color-accent: #2ed4c4;
+    --color-accent-ink: #7ceade;
+    --color-success-ink: #7ee3aa;
+    --color-success-bg: #0f3d2a;
+    --color-warn-ink: #fcd34d;
+    --color-warn-bg: #3f2d10;
+    --color-danger-ink: #fca5a5;
+    --color-danger-bg: #451a1a;
+    --color-focus: #2ed4c4;
   }
 }
 
+@theme inline {
+  --color-app: var(--color-app);
+  --color-surface: var(--color-surface);
+  --color-surface-muted: var(--color-surface-muted);
+  --color-ink: var(--color-ink);
+  --color-ink-muted: var(--color-ink-muted);
+  --color-ink-faint: var(--color-ink-faint);
+  --color-border: var(--color-border);
+  --color-border-strong: var(--color-border-strong);
+  --color-brand: var(--color-brand);
+  --color-brand-ink: var(--color-brand-ink);
+  --color-accent: var(--color-accent);
+  --color-accent-ink: var(--color-accent-ink);
+  --color-success-ink: var(--color-success-ink);
+  --color-success-bg: var(--color-success-bg);
+  --color-warn-ink: var(--color-warn-ink);
+  --color-warn-bg: var(--color-warn-bg);
+  --color-danger-ink: var(--color-danger-ink);
+  --color-danger-bg: var(--color-danger-bg);
+}
+
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--color-app);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/*
+ * Arabic is set in Cairo first, and this is not decoration.
+ *
+ * Inter and Nunito carry no Arabic glyphs, so an Arabic string in a Latin-only stack falls through
+ * to whatever the device happens to have — which on a Windows desktop is a stiff Naskh face at the
+ * wrong optical size, and on some Androids is a tofu box. The whole product is Arabic-first.
+ */
+:lang(ar),
+[dir="rtl"] {
+  --font-sans: var(--font-cairo), system-ui, sans-serif;
+  --font-display: var(--font-cairo), system-ui, sans-serif;
+  font-family: var(--font-cairo), system-ui, sans-serif;
+}
+
+/* Arabic numerals stay Western (0-9) so a balance reads the same to staff in both locales. */
+:lang(ar) {
+  font-variant-numeric: lining-nums;
+}
+
+h1,
+h2,
+h3,
+.font-display {
+  font-family: var(--font-display);
+  letter-spacing: -0.01em;
+}
+
+/*
+ * One visible focus ring for the whole product, on the keyboard path only.
+ *
+ * `:focus-visible` rather than `:focus` so a mouse click on a card does not draw a ring, while Tab
+ * always does. A scanner used all day with a thumb and a dashboard driven from a keyboard are the
+ * same app, and the second one is unusable without this.
+ */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+  border-radius: 0.375rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
