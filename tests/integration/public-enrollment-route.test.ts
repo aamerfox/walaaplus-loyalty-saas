@@ -7,6 +7,8 @@
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { POST } from "@/app/api/enroll/route";
 import { HONEYPOT_FIELD } from "@/app/api/enroll/route";
+import { getPublicCardView } from "@/server/customers/card-view";
+import { ENROLLMENT_CONSENT_VERSION } from "@/server/customers/consent";
 import { prisma } from "@/server/db";
 import { env } from "@/server/env";
 import { createStampCafe, expectReconciled, resetDatabase, uniqueSyrianPhone, type StampCafeFixture } from "../setup/fixtures";
@@ -79,8 +81,10 @@ describe("POST /api/enroll", () => {
       const again = await post({ sourceToken: welcoming.program.directSourceToken, phone });
 
       expect(first.status).toBe(200);
-      expect(again.body.cardToken).toBe(first.body.cardToken);
-
+      expect(again.status).toBe(200);
+      // The repeat reaches the SAME card - checked in the database, not by comparing tokens. A
+      // repeat deliberately no longer returns the existing card's token; see the disclosure test
+      // below.
       const card = await prisma.customerCard.findFirstOrThrow({ where: { shareToken: String(first.body.cardToken) } });
       expect(card.stampBalance).toBe(2);
       expect(await prisma.loyaltyOperation.count({ where: { customerCardId: card.id, kind: "WELCOME_BONUS" } })).toBe(1);
@@ -92,10 +96,12 @@ describe("POST /api/enroll", () => {
       const first = await post({ sourceToken: cafe.program.directSourceToken, phone, firstName: "First" });
       const repeat = await post({ sourceToken: cafe.program.directSourceToken, phone, firstName: "Second" });
 
-      // Same status, same keys, same token: nothing here says "you were already a customer".
+      // Same status, same keys, same token SHAPE: nothing here says "you were already a customer".
+      // The value differs on purpose - returning the existing token would answer the question by
+      // handing over the card itself.
       expect(repeat.status).toBe(first.status);
       expect(Object.keys(repeat.body)).toEqual(Object.keys(first.body));
-      expect(repeat.body.cardToken).toBe(first.body.cardToken);
+      expect(String(repeat.body.cardToken)).toHaveLength(String(first.body.cardToken).length);
       expect(await prisma.customerCard.count({ where: { profile: { customer: { normalizedPhone: phone } } } })).toBe(1);
     });
 
@@ -103,8 +109,16 @@ describe("POST /api/enroll", () => {
       const local = "0955887766";
       const a = await post({ sourceToken: cafe.program.directSourceToken, phone: local });
       const b = await post({ sourceToken: cafe.program.directSourceToken, phone: "+963 955 887 766" });
-      expect(b.body.cardToken).toBe(a.body.cardToken);
+      expect(b.status).toBe(200);
+      // One customer and one card, whichever spelling was typed. Asserted in the database: the
+      // second call is a repeat, so it does not return the card's token.
       expect(await prisma.customer.count({ where: { normalizedPhone: "+963955887766" } })).toBe(1);
+      expect(
+        await prisma.customerCard.count({ where: { profile: { customer: { normalizedPhone: "+963955887766" } } } }),
+      ).toBe(1);
+      await expect(getPublicCardView(String(a.body.cardToken))).resolves.toMatchObject({
+        businessName: expect.any(String),
+      });
     });
   });
 
@@ -255,4 +269,103 @@ describe("POST /api/enroll", () => {
     await expectReconciled(cafe.businessId);
     await expectReconciled(welcoming.businessId);
   });
+  it("records WHEN the customer consented and to WHICH text, on the real route", async () => {
+    /*
+     * PRODUCT-SPEC §6.1 requires the exact consent text version stored. The schema and the
+     * service supported it from Phase 0 and the screen never sent one, so every real enrolment
+     * stored NULL for both fields — while this very file passed, because its other tests go
+     * through fixtures that supply a version by hand. The route now stamps it server-side.
+     */
+    const phone = uniqueSyrianPhone();
+    const answer = await post({ sourceToken: cafe.program.directSourceToken, phone, marketingConsent: true });
+    expect(answer.status).toBe(200);
+
+    const profile = await prisma.customerBusinessProfile.findFirstOrThrow({
+      where: { businessId: cafe.businessId, customer: { normalizedPhone: phone } },
+      select: { marketingConsent: true, consentTextVersion: true, privacyConsentAt: true },
+    });
+
+    expect(profile.marketingConsent).toBe(true);
+    expect(profile.consentTextVersion).toBe(ENROLLMENT_CONSENT_VERSION);
+    // The timestamp is the point: "they agreed" without "when" answers half the question.
+    expect(profile.privacyConsentAt).toBeInstanceOf(Date);
+  });
+
+  it("records the consent event even when the marketing box is left unticked", async () => {
+    // Submitting the form IS the privacy-note consent; the checkbox is a separate question.
+    const phone = uniqueSyrianPhone();
+    await post({ sourceToken: cafe.program.directSourceToken, phone, marketingConsent: false });
+
+    const profile = await prisma.customerBusinessProfile.findFirstOrThrow({
+      where: { businessId: cafe.businessId, customer: { normalizedPhone: phone } },
+      select: { marketingConsent: true, consentTextVersion: true, privacyConsentAt: true },
+    });
+    expect(profile.marketingConsent).toBe(false);
+    expect(profile.consentTextVersion).toBe(ENROLLMENT_CONSENT_VERSION);
+    expect(profile.privacyConsentAt).toBeInstanceOf(Date);
+  });
+
+  it("ignores a consent version supplied by the caller", async () => {
+    // The browser does not get to say what it showed. A forged version would be a consent record
+    // pointing at words nobody read.
+    const phone = uniqueSyrianPhone();
+    await post({
+      sourceToken: cafe.program.directSourceToken,
+      phone,
+      marketingConsent: true,
+      consentTextVersion: "1999-01-01.9",
+    });
+
+    const profile = await prisma.customerBusinessProfile.findFirstOrThrow({
+      where: { businessId: cafe.businessId, customer: { normalizedPhone: phone } },
+      select: { consentTextVersion: true },
+    });
+    expect(profile.consentTextVersion).toBe(ENROLLMENT_CONSENT_VERSION);
+  });
+
+  it("never hands back an existing customer's card, however well you know their number", async () => {
+    /*
+     * The enrolment link is public by design - printed on the counter, published as a QR. If a
+     * repeat enrolment returned the existing card's token, then link + phone number would open
+     * that person's card: their name, balances, serial, and the scanner token they present at the
+     * till. Knowing a number is not knowing a customer.
+     */
+    const phone = uniqueSyrianPhone();
+    const first = await post({ sourceToken: cafe.program.directSourceToken, phone, firstName: "ليلى" });
+    expect(first.status).toBe(200);
+    const realToken = String(first.body.cardToken);
+    await expect(getPublicCardView(realToken)).resolves.toMatchObject({ businessName: expect.any(String) });
+
+    // Someone else, with the public link and the number, tries again.
+    const repeat = await post({ sourceToken: cafe.program.directSourceToken, phone, firstName: "Impostor" });
+
+    // Same status, same shape, same single key: no signal that the number was already enrolled.
+    expect(repeat.status).toBe(first.status);
+    expect(Object.keys(repeat.body)).toEqual(Object.keys(first.body));
+    expect(String(repeat.body.cardToken)).toHaveLength(realToken.length);
+
+    // But a different value, and one that opens nothing.
+    expect(repeat.body.cardToken).not.toBe(realToken);
+    await expect(getPublicCardView(String(repeat.body.cardToken))).rejects.toThrow();
+
+    // The real card is untouched: no second card, no renamed profile.
+    const cards = await prisma.customerCard.findMany({
+      where: { businessId: cafe.businessId, profile: { customer: { normalizedPhone: phone } } },
+      select: { shareToken: true },
+    });
+    expect(cards).toHaveLength(1);
+    expect(cards[0].shareToken).toBe(realToken);
+  });
+
+  it("gives a working card to a genuinely new customer, every time", async () => {
+    // The guard above must not have broken the case the endpoint exists for.
+    for (let i = 0; i < 2; i += 1) {
+      const answer = await post({ sourceToken: cafe.program.directSourceToken, phone: uniqueSyrianPhone() });
+      expect(answer.status).toBe(200);
+      await expect(getPublicCardView(String(answer.body.cardToken))).resolves.toMatchObject({
+        businessName: expect.any(String),
+      });
+    }
+  });
+
 });
