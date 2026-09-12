@@ -80,7 +80,8 @@ nothing was pushed.
 | 20 | `d7e9013` | docs: the registration remediation |
 | 21 | `32c18df` | docs: fill in row 20 |
 | 22 | `28050e1` | fix(scanner): scan on iPhone Safari, and stop losing a granted camera on Android |
-| 23 | (this commit) | docs: the camera remediation |
+| 23 | `91e074d` | docs: the camera remediation |
+| 24 | (this commit) | docs: fill in row 23 |
 
 Files in commit 1:
 
