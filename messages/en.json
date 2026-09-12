@@ -257,5 +257,32 @@
     "welcomeHelp": "Given once when a customer joins. Leave at 0 for none; it must be fewer than the stamps needed for a reward.",
     "welcomeLabel": "Welcome stamps",
     "welcomeSummary": "{count} welcome stamps"
+  },
+  "Register": {
+    "back": "Back",
+    "businessName": "Business name",
+    "email": "Email",
+    "errorBusinessName": "Enter your business name.",
+    "errorEmail": "Enter a valid email address.",
+    "errorFirstName": "Enter your first name.",
+    "errorFix": "Check the fields marked below.",
+    "errorPassword": "Use at least 10 characters.",
+    "errorRateLimited": "Too many attempts. Please wait a few minutes and try again.",
+    "firstName": "First name",
+    "haveAccount": "Already have an account?",
+    "lastName": "Last name",
+    "localBusinessOnly": "WalaaPlus is currently onboarding local businesses. Agency accounts are not available yet.",
+    "optional": "Optional",
+    "password": "Password",
+    "passwordHelp": "At least 10 characters.",
+    "signIn": "Sign in",
+    "signInManually": "Your details were submitted. Please sign in to continue.",
+    "splashBody": "Set up your stamp card, share its QR code, and start rewarding regulars.",
+    "splashTitle": "Start building a following of loyal customers.",
+    "submit": "Create account",
+    "submitting": "Creating your account…",
+    "subtitle": "One account for your business. It takes about a minute.",
+    "terms": "By signing up you agree to the WalaaPlus terms of service.",
+    "title": "Create your account"
   }
 }
