@@ -23,7 +23,16 @@
 
 # misc
 .DS_Store
+
+# Key and credential material. `*.pem` alone was the whole of this list, so an id_rsa, a .p12 or a
+# service-account json would have been committable.
 *.pem
+*.key
+*.p12
+*.pfx
+*.jks
+id_rsa*
+*service-account*.json
 
 # debug
 npm-debug.log*

@@ -10,7 +10,10 @@ export function errorResponse(e: unknown): NextResponse {
   if (isAppError(e)) {
     return NextResponse.json({ error: { code: e.code, message: e.message } }, { status: e.status });
   }
-  console.error("[api] unhandled error", e instanceof Error ? { name: e.name, message: e.message } : e);
+  // The Error branch is narrowed to name and message. The other branch used to log the thrown
+  // value whole, which is a standing invitation for the first non-Error throw to print
+  // whatever it happens to carry.
+  console.error("[api] unhandled error", e instanceof Error ? { name: e.name, message: e.message } : { type: typeof e });
   return NextResponse.json({ error: { code: "INTERNAL", message: "Internal server error" } }, { status: 500 });
 }
 

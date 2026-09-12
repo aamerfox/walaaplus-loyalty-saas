@@ -29,7 +29,24 @@ export default function LoginPage() {
    */
   const destination = (() => {
     const requested = searchParams.get('callbackUrl');
-    if (requested && requested.startsWith('/') && !requested.startsWith('//')) return requested;
+    if (!requested) return `/${locale}/business`;
+    try {
+      /*
+       * Parse it, do not pattern-match it.
+       *
+       * The previous test was `startsWith('/') && !startsWith('//')`, which rejects `//evil.tld`
+       * and accepts `/\evil.tld`. Browsers treat a backslash as a forward slash in a URL with a
+       * special scheme, so that resolves to `https://evil.tld/` — an open redirect that fires
+       * AFTER a successful sign-in, which is the most valuable kind to a phisher: the victim
+       * really did authenticate, on the real domain, and is then handed to a clone.
+       *
+       * Comparing the parsed origin leaves nothing to enumerate.
+       */
+      const url = new URL(requested, window.location.origin);
+      if (url.origin === window.location.origin) return url.pathname + url.search + url.hash;
+    } catch {
+      // Not a URL at all. Fall through to the default rather than guess.
+    }
     return `/${locale}/business`;
   })();
 

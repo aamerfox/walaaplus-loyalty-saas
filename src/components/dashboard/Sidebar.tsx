@@ -6,9 +6,15 @@ import { LayoutDashboard, Users, CreditCard, Settings, LogOut, QrCode, PieChart,
 import { cn } from "@/lib/utils";
 
 /**
- * Routes with a real implementation behind them. Every other entry below is a visual prototype
- * from the original mock-up and stays HIDDEN until its phase lands (docs/PHASE-PLAN.md), so no one
- * mistakes a mock for a feature. Add a route here in the same commit that implements it.
+ * Routes with a real implementation behind them. Every other entry below has NO page: the visual
+ * prototypes were deleted, because hiding a link is not access control. Each of those pages
+ * rendered invented figures - segment counts, a hard-coded join URL, "MRR $4,450" - to any
+ * signed-in user who typed the URL, cashiers included, and none of them checked a membership or a
+ * role. A greyed-out control is a promise and an unlinked page is a promise someone will find.
+ *
+ * The entries stay in the list below so the intended shape of the product is still visible; the
+ * filter removes them until a real page exists. Add a route here in the same commit that
+ * implements it, and delete nothing from this list to make a link appear.
  */
 const IMPLEMENTED_ROUTES: ReadonlySet<string> = new Set([
   "/business",

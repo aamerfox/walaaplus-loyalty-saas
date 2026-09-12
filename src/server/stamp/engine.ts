@@ -1,4 +1,4 @@
-import { CardStatus, OperationKind, OperationSource, UnitType } from "@prisma/client";
+import { CardStatus, OperationKind, OperationSource, Permission, UnitType } from "@prisma/client";
 import { prisma, type Tx } from "../db";
 import { ConflictCode, ConflictError, NotFoundError, ValidationError } from "../errors";
 import { runIdempotent } from "../ledger/idempotency";
@@ -9,7 +9,7 @@ import { AWARD_KINDS } from "../ledger/visits";
 import { getDefaultLocationId } from "../program/stamp-program";
 import { planStampConversion, readStampMechanics, stampsForPurchase, StampEarnMode, type StampMechanics } from "../program/mechanics";
 import { businessDayRange } from "../time/business-day";
-import type { TenantContext } from "../tenant/context";
+import { requirePermission, type TenantContext } from "../tenant/context";
 
 /**
  * The stamp engine: the only way a café's loyalty value changes.
@@ -553,6 +553,10 @@ export async function grantWelcomeStamps(
 
 /** Read-only snapshot for the scanner screen. Tenant-scoped. */
 export async function getCardBalances(ctx: TenantContext, customerCardId: string) {
+  // Every sibling read gates on a permission; this one did not. Harmless in Phase 1a - all three
+  // roles hold VIEW_CUSTOMERS - and live the moment Phase 1b's permission editor can mint a
+  // membership without it. The tenant filter below was never the issue; the missing gate was.
+  requirePermission(ctx, Permission.VIEW_CUSTOMERS);
   const card = await prisma.customerCard.findFirst({
     where: { id: customerCardId, businessId: ctx.businessId },
     select: { id: true, status: true, stampBalance: true, rewardBalance: true, expiresAt: true, programVersion: { select: { id: true, mechanics: true } } },

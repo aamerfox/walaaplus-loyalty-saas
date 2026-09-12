@@ -30,7 +30,14 @@ export default function CardPwa({ locale, shareToken }: { locale: string; shareT
 
   useEffect(() => {
     if (!("serviceWorker" in navigator)) return;
-    const scope = `/${locale}/card/${shareToken}`;
+    /*
+     * The trailing slash matters. Service-worker scope is matched as a STRING PREFIX, not by path
+     * segment, so a scope of `/en/card/ABC` would also control `/en/card/ABCDEF`. Today no token
+     * can prefix another because every share token is exactly 32 characters — but that is an
+     * invariant of the token generator holding up a security property two files away, which is
+     * not a load a constant should carry. With the slash the property is true of any token.
+     */
+    const scope = `/${locale}/card/${shareToken}/`;
     // Registration failures are not worth interrupting a customer over: the card is a normal page
     // and works without a worker. Installability is the only thing lost.
     void navigator.serviceWorker.register("/sw.js", { scope }).catch(() => undefined);
