@@ -12,6 +12,10 @@
 **PASS — the configuration is written, validated locally, and ready for review.** It has not been
 deployed, and deploying it is not part of this task.
 
+**Round 7 (§14): real-device testing began, and found the camera unusable on BOTH phones —
+for two different reasons.** Fixed in code; **neither device has been retested on the fixed
+build, and the manual gate is NOT complete.** See §14.
+
 **Round 6 (§13): a real staging owner could not register at all.** The registration page was a
 preserved prototype that never called its own, already-tested API. Fixed. See §13.
 
@@ -74,7 +78,9 @@ nothing was pushed.
 | 18 | `dbc5d80` | test(daily-limit): pin the hour in the two-timezone test, which was a coin flip |
 | 19 | `6aa6aed` | fix(auth): connect the registration page to the registration API |
 | 20 | `d7e9013` | docs: the registration remediation |
-| 21 | (this commit) | docs: fill in row 20 |
+| 21 | `32c18df` | docs: fill in row 20 |
+| 22 | `28050e1` | fix(scanner): scan on iPhone Safari, and stop losing a granted camera on Android |
+| 23 | (this commit) | docs: the camera remediation |
 
 Files in commit 1:
 
@@ -1255,4 +1261,184 @@ GATE PASSED in 301.0s (15/15 steps)
 
 ---
 
-**PASS — REAL OWNER REGISTRATION REMEDIATION COMPLETE — READY TO UPDATE STAGING**
+---
+
+## 14. Round 7 — real-device camera testing, and the two defects it found
+
+**This section records a manual gate that is still OPEN.** Code is fixed; the phones have not been
+retested.
+
+### 14.1 What the devices did
+
+Real-device testing finally began, which §12 and §13 made possible. It found the camera unusable
+on both phones tried, in two different ways:
+
+| Device | Symptom |
+|---|---|
+| **iPhone, Safari** | `/en/scanner` showed "The camera is not available on this device or browser" **before any permission prompt** — on a phone with two working cameras |
+| **Huawei, Android** | The permission prompt appeared and permission was **granted**. Then nothing: no preview, no scanning |
+
+Neither is a browser setting. They are two separate defects in the same lifecycle.
+
+### 14.2 Defect one — capability confused with consent
+
+The scanner supported only the native `BarcodeDetector`. Safari does not implement it, and the
+code treated its absence as "no camera at all":
+
+```ts
+if (!detectorCtor || !navigator.mediaDevices?.getUserMedia) { setCameraError(true); return; }
+```
+
+Android Chrome has that detector, so Android worked and iOS was told it had no camera. The message
+was not just unhelpful, it was **false**, and it appeared before the person was ever asked for
+permission. Half the phones in a café pilot are iPhones, so the Phase 1a manual gate could not be
+completed at all.
+
+**Capability and consent are now separate questions.** `selectQrEngine` answers the first without
+touching the camera:
+
+| Browser | Engine |
+|---|---|
+| `BarcodeDetector` present (Android Chrome) | **native** — nothing downloaded, decoding in the browser's own code |
+| `getUserMedia` present, no detector (iOS Safari) | **fallback** — ZXing, imported dynamically at that moment |
+| No `getUserMedia` (insecure context) | **unsupported** — and now the message is true |
+
+### 14.3 Defect two — a granted camera attached to nothing
+
+The Huawei symptom is the worse of the two, because the person had already done the only thing
+they were asked to do.
+
+The component rendered its `<video>` conditionally as `{cameraOn && <video …>}` and set `cameraOn`
+in the same tick it acquired the stream. React had not re-rendered when the stream arrived, so
+`videoRef.current` was still `null`. The old code read it, found nothing, and **quietly returned** —
+leaving an approved camera stream attached to no element, with the camera light on and no preview,
+no decoder loop and no message.
+
+The fix closes it twice over, because one half alone is not enough:
+
+1. **The preview is shown BEFORE the camera is requested.** A granted stream then attaches to a
+   *visible* element. Attaching to a `display:none` video is its own trap: browsers do not reliably
+   play or produce frames from one, so "always mounted but hidden" would have swapped this bug for
+   a quieter one.
+2. **`startQrCamera` takes a getter, not an element**, and waits up to two seconds of frames for it
+   to appear. If it never does, the camera is **handed back** — tracks stopped — rather than held
+   open behind a blank screen.
+
+### 14.4 What did not change
+
+- **No camera data leaves the device.** Frames are decoded in the page. No image, frame or decoded
+  value goes anywhere except through the existing same-origin lookup the cashier already triggers
+  by typing a code. There is no scanning service.
+- **Nothing is logged.** A decoded QR is a capability token and a phone number is customer data; a
+  test asserts no `console` call in either file.
+- **Authorization, tenant isolation, idempotency, location handling and the ledger are untouched.**
+  The scanner still sends no `locationId`, and one scan still produces exactly one lookup.
+- **Paste and phone lookup are unchanged**, still tested, and still the fallback the screen points
+  a cashier at in every failure message.
+
+### 14.5 Four honest states instead of one misleading one
+
+`cameraUnavailable` is gone. It said the same thing whether the browser had no camera API, the
+person declined, or the camera was busy — and it sent a cashier to look for a broken camera when
+the real answer was a permission dialog.
+
+| State | When |
+|---|---|
+| `cameraUnsupported` | No `getUserMedia`. Use paste or phone lookup |
+| `cameraDenied` | Permission declined. How to allow it, or use phone lookup |
+| `cameraFailed` | The camera could not start. Close whatever else is using it |
+| `cameraStarting` / `cameraScanning` | Starting, and running |
+
+All five in English and Arabic, asserted present, non-empty, different from each other and actually
+in Arabic.
+
+### 14.6 The dependency
+
+`@zxing/browser` 0.2.1 (MIT) over `@zxing/library` 0.23.0 (Apache-2.0). Imported **dynamically,
+only by the scanner client, and only when there is no native detector**, so Android Chrome
+downloads none of it. `npm audit` reports 0 vulnerabilities on the full tree and on production
+dependencies at high and above.
+
+### 14.7 Tests — 39 focused, and what they cannot prove
+
+`tests/unit/qr-camera.test.ts` (23) drives the decoder with **injected** browser capabilities,
+which is the whole reason the module takes them that way:
+
+| Requirement | Test |
+|---|---|
+| Safari-like: `getUserMedia`, no `BarcodeDetector` → fallback, not rejection | engine is `fallback`, and explicitly not `unsupported` |
+| Native preferred when present | engine is `native`, and the fallback is never downloaded |
+| Camera not requested until the action | `selectQrEngine` calls no `getUserMedia`; `startQrCamera` calls it exactly once, with `facingMode: { ideal: "environment" }` |
+| **Late-mounting element** | a ref that fills in after several frames: the stream attaches to the element that eventually appears, and decoding then works — on **both** engines |
+| **Element never mounts** | tracks stopped, failure reported, decoder never downloaded |
+| Permission denied | its own `denied` state, not "unsupported" |
+| One scan, one lookup | three decoder callbacks produce exactly one `onDecode` |
+| Release on every path | stop, double stop, unmount-after-stop, late frame after stop, decoder load failure, decoder throwing while stopping — tracks stopped exactly once in each |
+
+`tests/unit/scanner-client-camera.test.ts` (16) holds the component: it uses the tested module and
+has no `BarcodeDetector` of its own, never calls `getUserMedia` directly, starts only from the
+button, releases on unmount, shows the preview **before** requesting the camera, passes the getter,
+keeps paste and phone lookup, and logs nothing.
+
+**Mocks are not phones.** These prove selection and lifecycle. They cannot prove that Safari's
+camera pipeline decodes a printed QR at arm's length in café lighting, or that a Huawei's rear
+camera focuses close enough. That is hardware, and it stays a manual check.
+
+### 14.8 Verification, on `28050e1`
+
+```
+GATE SUMMARY
+PASS  dependency audit (prod, high+)             1326 ms
+PASS  prisma generate                            2552 ms
+PASS  lint                                       7921 ms
+PASS  typecheck                                  5867 ms
+PASS  prisma validate                            1691 ms
+PASS  unit tests                                 1761 ms
+PASS  test db up                                 1000 ms
+PASS  migrate deploy (test db, migrator role)    6094 ms
+PASS  migrate status (test db)                   5928 ms
+PASS  runtime role grants (test db)               339 ms
+PASS  integration tests                        247129 ms
+PASS  worker build                                223 ms
+PASS  production build                          17844 ms
+PASS  migrate image dependencies               111670 ms
+PASS  web image container health                55090 ms
+GATE PASSED in 466.4s (15/15 steps)
+```
+
+| Check | Result |
+|---|---|
+| unit / integration | **256** / **380** (636 total, 48 files) |
+| `npm run test:e2e` | **9 passed (52.0 s)** |
+| `npm audit --omit=dev --audit-level=high` | **0 vulnerabilities** |
+| `npm audit` (full tree) | **0 vulnerabilities** |
+| `git diff --check` | clean |
+
+### 14.9 The manual gate is NOT complete
+
+**Both device checks remain unperformed on the fixed build, and nothing here claims otherwise.**
+The fix is committed and pushed; staging still runs the build that failed.
+
+| # | Check | Device | Status |
+|---|---|---|---|
+| 1 | Permission prompt appears, and the fallback decoder starts | iPhone, Safari | ⬜ **not retested** — the fixed build is not deployed |
+| 2 | Permission granted, **rear-camera preview visibly starts**, then a QR decodes | Huawei, Android | ⬜ **not retested** — same |
+| 3 | Denied permission falls back to phone lookup with no dead end | either | ⬜ not performed |
+| 4 | The rest of §8's checklist: installability, three separate cards, service worker caches nothing, RTL and LTR on a real phone | both | ⬜ not performed |
+
+The sequence from here is: deploy this build to staging, then retest on the real phones, then
+record the results. **Until both devices pass on the deployed fixed build, Phase 1a Prompt 2's
+manual gate stays open.**
+
+### 14.10 What this round did not do
+
+- **No staging action of any kind.** No OCI host contacted, no deployment, no Caddy, DNS, secret or
+  Compose change.
+- **No device test is claimed to have passed.**
+- **No server behaviour changed.** The commit touches the scanner client, one new client module,
+  the message files, two test files and `package.json`.
+- `master` is untouched at `b9ee686`.
+
+---
+
+**PASS — IOS SAFARI QR SCANNER REMEDIATION COMPLETE — READY TO UPDATE STAGING**

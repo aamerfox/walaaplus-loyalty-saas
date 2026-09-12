@@ -417,12 +417,20 @@ them on physical phones.** Record who ran each one and what happened in
 | 1 | Android Chrome offers "Install app" on a card page | Android | The prompt appears; the installed icon opens the card standalone, with no browser chrome |
 | 2 | iOS Safari "Add to Home Screen" | iPhone | Standalone card with the right name and icon |
 | 3 | Three cards from three businesses install as three separate icons | Android | Three icons, three scopes; opening one never shows another's balance |
-| 4 | Real camera scan of a printed card QR | Android | The scanner resolves the customer and can award a stamp |
+| 4a | Real camera scan of a printed card QR | **Android** | Permission granted, **rear-camera preview visibly starts**, then the QR decodes and the scanner resolves the customer |
+| 4b | Real camera scan of a printed card QR | **iPhone, Safari** | The permission prompt appears at all, then the fallback decoder scans. Safari has no `BarcodeDetector`; this path exists only because of that |
 | 5 | Camera permission denied | Android | The scanner falls back to phone lookup with no dead end |
 | 6 | Service worker caches nothing | Either, DevTools | Application → Cache Storage is empty; no cached card responses |
 | 7 | Arabic RTL and English LTR | Both | Layout correct in both locales at phone width |
 
-Only when 1 through 7 have been performed and recorded may Phase 1a Prompt 2 be called complete.
+Only when every row above has been performed and recorded may Phase 1a Prompt 2 be called
+complete.
+
+**Rows 4a and 4b both failed on the first real attempt**, for two different reasons: Safari was
+told it had no camera before any prompt, and Android granted permission and then showed nothing
+at all. Both are fixed in code (evidence §14) and **neither has been retested**, because the
+fixed build is not deployed. Retest both after the next staging update; a pass on one is not a
+pass on the other, and they failed for unrelated reasons.
 
 ---
 
