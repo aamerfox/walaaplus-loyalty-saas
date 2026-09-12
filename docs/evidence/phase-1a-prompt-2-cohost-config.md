@@ -66,7 +66,8 @@ nothing was pushed.
 | 13 | `05c89e3` | docs: the web container health remediation |
 | 14 | `0c1db70` | docs: fill in row 13 |
 | 15 | `7cf9e37` | feat(business): the owner can create the loyalty card, and get the link customers scan |
-| 16 | (this commit) | docs: the owner bootstrap remediation |
+| 16 | `bc6745a` | docs: the owner bootstrap remediation |
+| 17 | (this commit) | docs: fill in row 16 |
 
 Files in commit 1:
 
