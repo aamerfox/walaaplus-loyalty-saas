@@ -9,8 +9,9 @@
 
 ## 1. Result
 
-**PASS.** Four Critical/High findings were found and fixed with regression tests. Sixteen
-Medium/Low findings are recorded in §7 with severity, rationale, owner and phase.
+**PASS.** **Five High findings** were found and fixed with regression tests; no Critical finding
+was found. **Twenty-two Medium and Low findings** are recorded in §7 with severity, rationale,
+owner and phase.
 
 | Check | Result |
 |---|---|
