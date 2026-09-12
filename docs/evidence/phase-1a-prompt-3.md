@@ -32,7 +32,7 @@ phase.
 | `npm audit --omit=dev --audit-level=high` | **0 vulnerabilities** |
 | `git diff --check` | clean |
 | CI on the exact commit | §8 |
-| **Enrolment-existence oracle** | **OPEN — §12** |
+| **Enrolment-existence oracle** | **OPEN when this was written. Closed on 2026-09-12 by owner decision B7 option 3 — see §12.4 and [phase-1a-b7-option-3.md](phase-1a-b7-option-3.md). This gate must be re-run** |
 
 **Precondition met.** Prompt 2's manual-gate closure is present on the branch (`c294d81`,
 "the owner's real-device results close the Phase 1a Prompt 2 manual gate") and
@@ -438,6 +438,14 @@ inventing something in its place would be exactly the insecure workaround the co
 
 Nothing was implemented in the meantime, deliberately. Option 2 is a decision to record, not code
 to write; options 1 and 3 both change the product.
+
+> **Decided 2026-09-12 — the owner chose option 3.** Public self-service enrolment is withdrawn and
+> card issuance moved to the authenticated counter, with a staff-assisted restore. No verification
+> provider was added; D2 and D4 stay deferred. The implementation and its evidence are in
+> [phase-1a-b7-option-3.md](phase-1a-b7-option-3.md).
+>
+> **This engineering gate still does not pass.** It must be re-run against the branch as it stands
+> after that change; this document describes the state before it.
 
 ### 12.5 What was preserved
 

@@ -142,9 +142,13 @@ simply no match.
 
 ## 6. Enrollment, and why it is written with `ON CONFLICT DO NOTHING`
 
-`enrollCustomer` is **public**: no session, no tenant context, no merchant login anywhere in the
-path. The link's opaque token is the only input that says which program is being joined, and every
-business fact is derived from it.
+`enrollCustomer` in `src/server/customers/enrollment.ts` is the one writer that issues a card. It
+takes a program source token and derives every business fact from it.
+
+**It has exactly one caller, and that caller is authenticated.** Owner decision B7 option 3
+withdrew public self-service enrolment (§6.1); the source token is now resolved on the server from
+the staff member's own session, never supplied by the caller. The service itself did not need to
+change — what changed is who can reach it.
 
 Two taps on a slow connection, or a customer and a cashier enrolling the same person at once, must
 produce one customer, one profile and one card. Prisma's `upsert` is read-then-write and loses that
@@ -159,12 +163,45 @@ transaction that actually inserted the card, so exactly one caller writes the we
 the same transaction. No idempotency key is involved, so the bonus cannot be duplicated by a retry
 that forgot one or lost by a retry that reused one.
 
-A repeat enrollment **does not overwrite the stored name or consent**. Anyone can open a public
-enrollment form and type someone else's number; letting a second submission rewrite the first would
-let a stranger rename a profile or flip its marketing consent.
+A repeat enrollment **does not overwrite the stored name or consent**. A number can be typed at the
+counter by anyone who knows it; letting a second submission rewrite the first would let a stranger
+rename a profile or flip its marketing consent. It is also what makes a repeated staff enrolment
+safe: the second attempt returns the existing card and grants no second welcome bonus.
 
 Welcome stamps are written with a system actor and source `ENROLLMENT`, so the Phase 0 visit policy
 records `countsAsVisit = false` without anyone having to say so: nobody came in.
+
+### 6.1 Why public self-service enrolment was withdrawn
+
+A public enrolment form has to answer two cases differently at the level of physics, not wording:
+a number with no card gets a live card, and a number that already has one must not have its card
+handed to whoever typed the number. Whoever submits the form can tell those two apart — the first
+yields a working card page, the second does not — so the form reports whether a given phone number
+is already a customer of that business, to anyone, at scale. Hiding the difference in the response
+body does not close it; the previous attempt did exactly that and the redirect still leaked it.
+
+Closing it properly requires proving the submitter owns the number, and every channel that could
+do so (SMS, WhatsApp) is unauthorized in Phase 1a. The owner decided B7 as **option 3 on
+2026-09-12**: drop self-service issuance. Cards are issued by staff at the counter, where the
+person is standing in front of the cashier, and a lost link is restored the same way.
+
+| Surface | Before | Now |
+|---|---|---|
+| `/{locale}/join/{token}` | Public enrolment form | A static notice. **The token is never read**, so a real link and an invented one render identically |
+| `POST /api/enroll` | Issued cards | `410` with a fixed body. The handler **takes no arguments**, so it cannot branch on input |
+| `GET /api/enroll` | — | The same `410`, so probing the method changes nothing |
+| Owner program screen | Published the link and a QR | Points staff at the Scanner. No link, no QR, no copy button |
+| Counter | — | `POST /api/scanner/enroll` (§10.5) |
+
+`publicEnrollmentUrl` is deleted rather than left unused; `src/server/program/public-urls.ts`
+(renamed from `enrollment-url.ts`) now builds only card URLs. Nothing left in the codebase can
+construct a public enrolment address.
+
+**Not touched:** existing cards, card URLs, balances, ledger rows, programs and source records all
+remain exactly as they were. A customer who already holds their link still opens it.
+
+**Re-enabling public enrolment is gated on B7, not on taste.** It must not return until proof of
+phone ownership exists and has been independently audited.
 
 ---
 
@@ -259,8 +296,17 @@ Resolved from the database on every request, never from the session token.
 | Award, redeem | `MAKE_ACCRUALS` / `MAKE_REDEMPTIONS`, plus location access |
 | Reverse | both accrual and redemption permissions |
 | Look up by QR, phone, serial | `VIEW_CUSTOMERS` |
+| **Enrol a customer at the counter** | `EDIT_CUSTOMERS` (owner, manager, cashier) |
+| **Reveal a customer's card link** | `VIEW_CUSTOMERS` |
 | Browse the customer directory | `VIEW_CUSTOMERS` **and** role owner or manager |
 | Read a card's operations | `VIEW_OPERATIONS`, narrowed to assigned locations |
+
+**`EDIT_CUSTOMERS` was added to the CASHIER defaults** when public enrolment was withdrawn (§6.1).
+The cashier is the only person who can hand a card over now, so refusing them that bit would leave
+a merchant unable to sign anyone up on a shift the owner does not work. Nothing else in Phase 1a
+guards `EDIT_CUSTOMERS`, so the grant opens exactly one capability, and the service checks tenancy
+and the business independently of it. `ROLE_DEFAULT_PERMISSIONS` carries that note beside the
+grant, because the next thing to guard with that bit must decide whether a cashier may do it.
 
 Cashier creation checks the **role**, so it cannot be widened by granting `EDIT_STAFF` to a
 manager. A cashier holds `VIEW_CUSTOMERS`, but that is scoped to "the scanned or searched customer"
@@ -290,26 +336,22 @@ bounds a transaction that is genuinely stuck.
 Pages and route handlers call the services above. None of them builds a ledger row, writes a
 balance, or reaches for Prisma to change anything.
 
-### 10.1 Public enrollment — `/{locale}/join/{token}`
+### 10.1 The withdrawn public enrolment routes
 
-No session anywhere in the path. The opaque link token is the only input; business, program and
-offer are derived from it. The page shows the business name, the program, the offer and any
-welcome bonus — nothing else, and no identifier.
+`/{locale}/join/{token}` renders a fixed notice telling the reader to ask a member of staff. The
+page **resolves nothing**: it does not read the token, look up a source, or touch the database, so a
+printed link from before the change and a string someone invented produce the same bytes. Response
+time does not separate them either, because neither performs a query.
 
-`POST /api/enroll` adds the two controls a public write needs (PRODUCT-SPEC §6.1):
+`POST /api/enroll` and `GET /api/enroll` return `410 ENROLLMENT_MOVED` with one constant body. The
+handlers are declared to take **no parameters at all** — not an ignored `Request`, none — so there
+is no input in scope to branch on and no later edit can reintroduce one without changing the
+signature. The rate limiter and honeypot that used to guard the write are gone with the write.
 
-- **A database-backed rate limit**, per client address and per link, reusing the Prompt 0.3
-  limiter. The per-link window is what holds when no trusted proxy supplies an address, and it
-  matches the actual threat: farming a welcome bonus means hammering one merchant's link.
-- **A honeypot field**, hidden with the clip-based `sr-only` pattern rather than `display:none`
-  (which many bots skip) and rather than a large negative offset — that pushes the document's edge
-  and, in RTL, moves every other control out from under the pointer. A filled honeypot is answered
-  like an ordinary failure and still counts against the rate limit, so a script pays for being
-  caught and learns nothing.
-
-**No enumeration.** A first enrollment and a repeat return the same status and the same body. The
-response carries the card's page token and nothing else — no ids, no phone number, and no `created`
-flag that would say "you were already a customer here".
+This is verified by `tests/integration/enrollment-withdrawn.test.ts`, which asserts the handler
+arity structurally (`enrollPost.length === 0`), and by `tests/e2e/enrollment-enumeration.spec.ts`,
+which compares a real token against an invented one through a browser and byte-compares the `410`
+bodies for an enrolled number, a new number, a dead token and an empty body.
 
 ### 10.2 The customer card — `/{locale}/card/{shareToken}`
 
@@ -361,16 +403,52 @@ Authorization is resolved three times on the way to a write: the proxy refuses a
 request, the page re-reads the membership, and the API route does it again. A page that "already
 checked" is not an authorization for a route.
 
-### 10.5 Owner screens
+### 10.5 Counter enrolment and card restore — the Scanner
+
+`src/server/customers/counter-enrollment.ts` holds both actions. Everything that decides *which*
+business, *which* program, *which* source and *which* location is resolved on the server from the
+staff member's session; the request body carries a phone number, an optional name and a consent
+tick, and a strict schema **refuses** any attempt to send a source token, template id, location,
+balance or welcome-stamp count rather than ignoring it.
+
+**`enrollAtCounter`** requires `EDIT_CUSTOMERS`, resolves the business's active `direct` source,
+and delegates to `enrollCustomer` (§6) — so a repeat is still one customer, one card and one
+welcome bonus, decided by the same `INSERT … ON CONFLICT` arbitration. It stores the consent
+version and the consent-text digest (`src/server/customers/consent.ts`) with the server's own
+timestamp, never a client's. A business with no program yet gets a `404` telling staff to create
+the loyalty card first, because there is nothing to enrol into.
+
+**`revealCardLink`** requires `VIEW_CUSTOMERS` and looks the card up **filtered by `businessId`**,
+so another tenant's card id is "not found". It returns the card URL and a server-rendered QR. This
+is the restore path: the reason the public "type your number to get your card back" page could be
+removed without stranding a customer who lost their link.
+
+Both write an audit row — `CARD_ISSUED_AT_COUNTER` and `CARD_LINK_REVEALED` — and **neither row
+contains the card token, the card URL, the phone number or the name.** The issue row's metadata is
+`{created, welcomeStampsGranted}`; the reveal row's metadata is empty. An audit log is read by more
+people and kept longer than the screen that legitimately shows a link, and a reveal row that
+carried the link would be a second, quieter copy of the capability it was recording.
+
+In the UI, the enrolment panel appears only when a **phone** search finds nobody, and it reuses the
+number that was just searched rather than offering a second field — retyping is how a card ends up
+on the wrong number. A QR that matches nothing stays a plain "not found": that is someone else's
+card or a mistyped code, not a new customer. After enrolling, the customer's card is loaded so the
+cashier can award the first stamp without searching again.
+
+### 10.6 Owner screens
 
 `/{locale}/business/customers` (list with phone-normalised search and cursor paging),
 `/{locale}/business/customers/{cardId}` (card balances and the immutable operation history), and
 `/{locale}/business/team` (the owner-only cashier form and a read-only staff list). Every one reads
 through a tenant-scoped service; no page queries Prisma.
 
+`/{locale}/business/program` shows what the card offers and **no enrolment link or QR**. In its
+place is a short instruction to enrol from the Scanner, with links to the Scanner and to the team
+screen — the two things a merchant actually needs after creating the card.
+
 The sidebar shows only routes that exist. The remaining prototype pages stay hidden.
 
-### 10.6 Tests
+### 10.7 Tests
 
 `npm run gate` keeps unit and integration. Browser tests are a **separate command**,
 `npm run test:e2e`, and a separate CI workflow (`.github/workflows/e2e.yml`): a browser run needs a

@@ -426,8 +426,18 @@ affect any of it — a new service worker, a new manifest, or anything touching 
 | 5 | Camera permission denied | Android | The scanner falls back to phone lookup with no dead end |
 | 6 | Service worker caches nothing | Either, DevTools | Application → Cache Storage is empty; no cached card responses |
 | 7 | Arabic RTL and English LTR | Both | Layout correct in both locales at phone width |
+| 8 | **Counter enrolment** — search a number that has no card, fill the panel, tick consent, submit | Either | A card is created, its link and QR appear on the Scanner, and the card loads so a stamp can be awarded at once |
+| 9 | **Counter enrolment, repeated** — search the same number again, and enrol again if offered | Either | No second card and no second welcome bonus. The balance is unchanged |
+| 10 | **Card restore** — find an existing customer by phone and reveal their link | Either | The same link as row 8, shown on screen and copyable |
+| 11 | **An old printed enrolment link** (`/join/<token>`) | Either | A notice to ask a member of staff. No form, no card, and the same page for a token that never existed |
 
-Every row above has been performed and recorded, so Phase 1a Prompt 2's manual gate is complete.
+Rows 1 to 7 have been performed and recorded, so Phase 1a Prompt 2's manual gate is complete.
+
+**Rows 8 to 11 are new and have NOT been performed.** They arrived with owner decision B7 option 3,
+which withdrew public self-service enrolment and moved card issuance to the counter. They are
+covered by automated browser tests, not by any device run: staging has not been updated to a build
+that contains them. They are not part of Prompt 2's closed manual gate, and nothing here claims
+they passed.
 
 **Rows 4a and 4b both failed on the first real attempt**, for two different and unrelated reasons:
 Safari was told it had no camera before any prompt, and Android granted permission and then showed
@@ -507,11 +517,11 @@ application simply declines to believe them in this shape.
 |---|---|
 | Per-IP window on registration | **unavailable** |
 | Per-IP window on sign-in | **unavailable** |
-| Per-IP window on public enrolment | **unavailable** |
+| Per-IP window on public enrolment | **not applicable** — public enrolment was withdrawn by owner decision B7 option 3; `/api/enroll` answers `410` and writes nothing |
 | Per-submitted-email window on registration | **active** |
 | Per-identifier window on sign-in | **active** — this is the one that stops credential stuffing against one account |
-| **Per-enrolment-link window**, database-backed | **active** — and it is the right shape for the real threat anyway: farming a welcome bonus means hammering one merchant's link |
-| Enrolment honeypot, idempotency, tenant isolation, append-only ledger | unaffected |
+| **Per-enrolment-link window**, database-backed | **not applicable** — it guarded the public write that no longer exists. Enrolment now requires a staff session, which is itself rate-limited at sign-in |
+| Per-identifier window on scanner writes, idempotency, tenant isolation, append-only ledger | unaffected |
 
 The application reports no client address at all rather than a forgeable one, so the windows above
 simply do not open. Nothing silently degrades to a weaker limit.

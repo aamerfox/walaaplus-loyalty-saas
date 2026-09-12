@@ -26,7 +26,7 @@ These must be answered before infrastructure, CI or deployment work proceeds.
 
 Service workers, installability and web push **refuse to run without TLS**, except on `localhost`. Staging cannot verify the PWA card without a real certificate.
 
-**B1, B2 and B3 are answered.** Staging is live over HTTPS and the Phase 1a Prompt 2 real-device checks passed against it on 2026-09-12. B4 to B6 remain open.
+**B1, B2, B3 and B7 are answered.** Staging is live over HTTPS and the Phase 1a Prompt 2 real-device checks passed against it on 2026-09-12. B7 was decided on 2026-09-12 and is implemented. B4 to B6 remain open.
 
 | # | Decision | Recommended default | Status |
 |---|---|---|---|
@@ -36,7 +36,7 @@ Service workers, installability and web push **refuse to run without TLS**, exce
 | B4 | **Production domain.** | Decided before the café pilot goes live | ⬜ |
 | B5 | **Secrets provisioning.** Who creates the `.env` values on each server, and where are they stored? | Owner provisions server environment files directly; agent supplies variable names and generation commands only | ⬜ |
 | B6 | **Production deployment authority.** | Owner only. Agent never deploys to production | ⬜ |
-| B7 | **Phone-ownership verification at enrolment.** **Blocks the Phase 1a engineering gate.** Public self-service enrolment must issue a live card to a new number and reveal nothing for an existing one. Those two are distinguishable by whoever receives the result, for any implementation, unless the submitter can be shown to own the number. Three options, costed in `docs/evidence/phase-1a-prompt-3.md` §12.4: **(1)** authorize a channel (D2 SMS or D4 WhatsApp) and verify before issuing; **(2)** accept the residual risk in writing for the pilot — the leak is bounded to "this number is a customer here", never the card; **(3)** drop self-service issuance and hand the link over at the counter | Owner's call. Option 2 is defensible for one café and must be recorded, not assumed | ⬜ |
+| B7 | **Phone-ownership verification at enrolment.** Public self-service enrolment had to issue a live card to a new number and reveal nothing for an existing one; those two outcomes are distinguishable by whoever receives the result, for any implementation, unless the submitter can be shown to own the number. Options were costed in `docs/evidence/phase-1a-prompt-3.md` §12.4. | **✅ Decided 2026-09-12 — Option 3: public self-service enrolment is withdrawn.** Cards are issued by authenticated staff at the counter, and a lost link is restored the same way. No SMS or WhatsApp verification is added: D2/D4 stay deferred. **Public enrolment must not be re-enabled until proof of phone ownership exists and has been independently audited.** Implementation and evidence: [phase-1a-b7-option-3.md](evidence/phase-1a-b7-option-3.md) | ✅ |
 
 ---
 

@@ -17,7 +17,7 @@ The complete MVP loop:
 
 ```
 Merchant creates a loyalty program
-  → Customer joins through a QR or link
+  → Staff enrol the customer at the counter and hand over their card link
   → Customer opens the PWA card and adds it to the home screen
   → Staff scans the QR or enters the phone number
   → Staff awards or redeems loyalty value
@@ -331,7 +331,7 @@ utmCampaign, welcomeUnitQuantity, welcomeBonusExpiresAfterDays,
 enrollmentTitle, enrollmentImageUrl, active, createdAt, updatedAt
 ```
 
-Every template gets a default link named **Direct** with `utmSource = direct` at creation. There is no separate generic enrollment token, so **every issued card always carries source attribution**.
+Every template gets a default link named **Direct** with `utmSource = direct` at creation. There is no separate generic enrollment token, so **every issued card always carries source attribution**. Since B7 option 3 the Direct link's `publicToken` is **server-side only** — it is resolved from the staff session at counter enrollment and is never published, rendered or returned to any client.
 
 Uniqueness: `publicToken` is globally unique; `name` is unique **per template**. `utmSource` is deliberately *not* unique — several links (two Instagram campaigns, two in-store table codes) may share one source and differ by name, medium or campaign.
 
@@ -418,18 +418,43 @@ Per-stamp and per-point FIFO lot expiry is **deferred**. It requires lot trackin
 
 ### 6.1 Enrollment flow
 
+Enrollment is **staff-assisted**, from the authenticated Scanner. Public self-service enrollment was
+withdrawn by owner decision **B7 option 3** on 2026-09-12; see §6.1.1.
+
 ```
-Public QR or link carrying a UtmSourceLink publicToken
-  → resolve source → template → business
-  → Arabic RTL enrollment form
-  → mandatory phone, consent capture
+Staff search a phone number in the Scanner and find no customer
+  → server resolves business → template → Direct UtmSourceLink from the STAFF SESSION
+  → mandatory phone (the one just searched), optional name, explicit consent tick
   → match or create Customer by normalized phone
   → match or create CustomerBusinessProfile
   → issue CustomerCard (unique per profile+template)
   → card issuance recorded in AuditLog; WELCOME_BONUS operation when configured
-  → PWA install guidance
-  → customer opens their card
+  → staff hand over the card link or QR, on screen
+  → customer opens their card and installs it
 ```
+
+Requirements: `EDIT_CUSTOMERS`, re-verified against an active membership of **that** business; the
+caller supplies no business, tenant, source token, location, balance or reward setting; idempotent
+enrollment, so a repeat returns the existing card and grants no second welcome bonus; per-source
+welcome bonus overrides the template default; the exact consent text version and the server's own
+timestamp stored; no card token, card URL, phone number or name in logs, error responses or audit
+metadata.
+
+#### 6.1.1 Why public self-service enrollment is withdrawn
+
+A public form must issue a live card to a number with no card, and must **not** hand an existing
+customer's card to whoever typed their number. Those two outcomes are distinguishable by whoever
+submits the form, in any implementation, so the form reports whether a phone number belongs to a
+customer of that business — to anyone, at scale. Suppressing the difference in the response body
+does not close it.
+
+Closing it requires proving the submitter owns the number, and no verification channel is
+authorized in Phase 1a (D2 SMS and D4 WhatsApp remain deferred). **Public enrollment must not
+return until proof of phone ownership exists and has been independently audited.**
+
+**Card restore** follows the same rule: a customer who loses their link asks staff, who look the
+number up in the Scanner and show the card link and QR again. That reveal is audited, without the
+token or the URL in the audit record. There is no public restore page.
 
 **Card issuance is audited, not ledgered.** An earlier draft of this flow wrote a `CARD_ISSUED`
 operation. The ledger refuses zero-quantity rows — that invariant is what makes every ledger row a
@@ -439,7 +464,8 @@ recorded by `CustomerCard.issuedAt`, `CustomerCard.utmSourceLinkId` and an `Audi
 `CARD_ISSUED` kind is unused. A welcome bonus, which does move value, remains a real operation.
 See [PHASE-1A-IMPLEMENTATION.md](PHASE-1A-IMPLEMENTATION.md) §4.
 
-Requirements: no merchant login anywhere in the path; high-entropy public tokens; idempotent enrollment; per-source welcome bonus overrides the template default; exact consent text version stored; required and unique enrollment fields validated; rate limiting and a honeypot field, because welcome bonuses make enrollment an abuse target.
+High-entropy public tokens still apply to the **card** link the customer walks away with, which is
+a capability: it is never written to an audit record, a log line or an error response.
 
 ### 6.2 The card is its own PWA
 
@@ -497,7 +523,7 @@ Kiosk mode, scanner sound preferences, offline operation queue, promotion redemp
 - **Reconciliation** asserts that the sum of ledger operations equals each card's materialized balance, and alerts on drift. The query and test utility land in Phase 0; the scheduled nightly job in Phase 1.5.
 - **Backups**: nightly database dump to owner-chosen storage with a documented restore drill.
 - **Monitoring**: health checks for the web process, the worker, and job failure rates.
-- **Security**: no hardcoded fallback secrets anywhere; environment validation at startup that fails fast; Argon2 or bcrypt password hashing; HTTP-only session cookies; rate limits on login, enrollment, and scanner writes; validated request bodies; encrypted external credentials; no secrets in logs.
+- **Security**: no hardcoded fallback secrets anywhere; environment validation at startup that fails fast; Argon2 or bcrypt password hashing; HTTP-only session cookies; rate limits on login and scanner writes; validated request bodies; encrypted external credentials; no secrets in logs.
 
 ---
 
