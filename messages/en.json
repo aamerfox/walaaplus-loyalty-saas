@@ -20,7 +20,8 @@
     "billing": "Billing & SaaS",
     "settings": "Settings",
     "logout": "Log out",
-    "scanner": "Scanner"
+    "scanner": "Scanner",
+    "program": "Loyalty card"
   },
   "Landing": {
     "heroTitle": "The Ultimate Loyalty Engine",
@@ -224,5 +225,37 @@
     "role": "Role",
     "none": "No cashiers yet",
     "passwordHint": "At least 10 characters"
+  },
+  "Program": {
+    "copied": "Copied",
+    "copy": "Copy link",
+    "create": "Create the card",
+    "created": "Your loyalty card is ready. Share the link or print the QR code below.",
+    "creating": "Creating…",
+    "forbidden": "Only the owner or a manager can set up the loyalty card.",
+    "intro": "Create your stamp card once. Customers join by scanning its QR code or opening its link.",
+    "invalid": "Check the details above. A welcome bonus must be smaller than the stamps needed for a reward.",
+    "linkHelp": "Print the QR code for the counter, or send the link. Anyone who opens it can join this card.",
+    "linkLabel": "Customer enrolment link",
+    "nameHelp": "What customers see at the top of their card.",
+    "nameLabel": "Card name",
+    "namePlaceholder": "Coffee card",
+    "nextCashier": "Add a cashier",
+    "nextHelp": "Create an account for whoever works the till, or open the scanner yourself.",
+    "nextScanner": "Open the scanner",
+    "nextTitle": "What next",
+    "noBusiness": "This account is not linked to a business yet.",
+    "optional": "Optional.",
+    "rewardDescriptionLabel": "Reward details",
+    "rewardHelp": "What the customer gets when the card is full.",
+    "rewardLabel": "Reward",
+    "rewardPlaceholder": "Free coffee",
+    "stampsHelp": "A full card earns the reward below.",
+    "stampsLabel": "Stamps needed for one reward",
+    "summary": "{stamps} stamps for {reward}",
+    "title": "Loyalty card",
+    "welcomeHelp": "Given once when a customer joins. Leave at 0 for none; it must be fewer than the stamps needed for a reward.",
+    "welcomeLabel": "Welcome stamps",
+    "welcomeSummary": "{count} welcome stamps"
   }
 }

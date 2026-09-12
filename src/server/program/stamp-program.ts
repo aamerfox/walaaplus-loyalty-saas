@@ -208,3 +208,39 @@ export async function getActiveStampProgram(ctx: TenantContext): Promise<ActiveS
     mechanics: readStampMechanics(version.mechanics, { programVersionId: version.id }),
   };
 }
+
+export interface StampProgramOverview extends ActiveStampProgram {
+  /**
+   * The `direct` source's opaque public token: the thing a QR and a link carry, and the only
+   * value on this object that is a capability. Null only if the source was deactivated, which
+   * Phase 1a offers no way to do.
+   */
+  directSourceToken: string | null;
+}
+
+/**
+ * Everything the owner's program screen needs, in one tenant-scoped read.
+ *
+ * Separate from `getActiveStampProgram` because it returns a CAPABILITY. The token in it is
+ * enough to enrol customers into this business, so the lookup is filtered by `businessId` on the
+ * template — a template id from another tenant finds nothing rather than finding a token — and it
+ * inherits VIEW_TEMPLATES, which a CASHIER does not hold.
+ */
+export async function getStampProgramOverview(ctx: TenantContext): Promise<StampProgramOverview | null> {
+  const program = await getActiveStampProgram(ctx);
+  if (!program) return null;
+
+  const source = await prisma.utmSourceLink.findFirst({
+    where: {
+      templateId: program.templateId,
+      utmSource: DIRECT_UTM_SOURCE,
+      active: true,
+      // Belt and braces: the template was already resolved under this tenant, and the join is
+      // repeated here so a future refactor of the line above cannot widen this one.
+      template: { businessId: ctx.businessId },
+    },
+    select: { publicToken: true },
+  });
+
+  return { ...program, directSourceToken: source?.publicToken ?? null };
+}

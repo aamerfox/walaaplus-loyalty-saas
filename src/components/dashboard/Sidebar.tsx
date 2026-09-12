@@ -12,6 +12,7 @@ import { cn } from "@/lib/utils";
  */
 const IMPLEMENTED_ROUTES: ReadonlySet<string> = new Set([
   "/business",
+  "/business/program",
   "/business/customers",
   "/business/team",
   "/scanner",
@@ -23,6 +24,7 @@ export default function Sidebar() {
   
   const navItems = [
     { name: t("dashboard"), href: "/business", icon: LayoutDashboard },
+    { name: t("program"), href: "/business/program", icon: CreditCard },
     { name: t("scanner"), href: "/scanner", icon: ScanLine },
     { name: t("customers"), href: "/business/customers", icon: Users },
     { name: t("rfm"), href: "/business/rfm", icon: PieChart },
