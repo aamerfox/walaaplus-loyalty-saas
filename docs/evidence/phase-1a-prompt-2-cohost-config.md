@@ -12,6 +12,9 @@
 **PASS — the configuration is written, validated locally, and ready for review.** It has not been
 deployed, and deploying it is not part of this task.
 
+**Round 6 (§13): a real staging owner could not register at all.** The registration page was a
+preserved prototype that never called its own, already-tested API. Fixed. See §13.
+
 **Round 5 (§12): staging is LIVE and healthy, and the product had a hole in the middle of it.**
 `https://staging.truebiznes.com` serves, but no owner-facing screen created a loyalty program, so
 no enrolment link existed and real-device testing could not begin. Fixed. See §12.
@@ -67,7 +70,10 @@ nothing was pushed.
 | 14 | `0c1db70` | docs: fill in row 13 |
 | 15 | `7cf9e37` | feat(business): the owner can create the loyalty card, and get the link customers scan |
 | 16 | `bc6745a` | docs: the owner bootstrap remediation |
-| 17 | (this commit) | docs: fill in row 16 |
+| 17 | `6bdf2a5` | docs: fill in row 16 |
+| 18 | `dbc5d80` | test(daily-limit): pin the hour in the two-timezone test, which was a coin flip |
+| 19 | `6aa6aed` | fix(auth): connect the registration page to the registration API |
+| 20 | (this commit) | docs: the registration remediation |
 
 Files in commit 1:
 
@@ -1098,4 +1104,154 @@ GATE PASSED in 275.2s (15/15 steps)
 
 ---
 
-**PASS — OWNER PILOT BOOTSTRAP COMPLETE — READY TO UPDATE STAGING**
+---
+
+## 13. Round 6 — the registration page was never connected to its API
+
+### 13.1 What a real staging owner hit
+
+A real owner test on live staging found that `/en/auth/register` **did not register anyone**.
+
+The page was preserved prototype markup from the original mock-up:
+
+- its inputs were uncontrolled and had no submission behaviour;
+- "Create Account" was a **`Link` to `/business`**, not a submit control;
+- it never called `POST /api/auth/register`;
+- so no `User` and no `Business` were created;
+- and the credentials sign-in that followed correctly returned **401**.
+
+**The registration service and its route were correct and tested the whole time.** They had unit
+and integration coverage, the API's non-enumerating 202 contract was already implemented, and
+none of it was reachable from the page that was supposed to call it.
+
+This is the same shape of defect as §12, one step earlier in the journey, and it invalidated the
+owner-to-program real-world journey even though every server-side test passed. **A form that
+navigates on submit is worse than no form at all, because it reports success.**
+
+### 13.2 What was changed — `6aa6aed`
+
+The page is now a real client registration flow:
+
+| Requirement | How |
+|---|---|
+| Submits the fields as JSON to `POST /api/auth/register` | first name, optional last name, business name, email, password, `locale`, and the Syria-first defaults `currency=SYP` and `timezone=Asia/Damascus`, sent explicitly so the values a business is created with are visible at the call site |
+| The prototype "Agency" option | **Removed**, not disabled. Phase 1a onboards local businesses, and a greyed-out control is still a promise. The page says so in one line instead |
+| Controlled fields, client validation, loading state | All five fields controlled; required values and the 10-character password rule checked before anything is sent; the button disables and changes label while in flight |
+| Accessible errors | Per-field messages tied to their input with `aria-describedby`, `aria-invalid` on the field, `role="alert"` on the form-level error and `role="status"` on the neutral notice |
+| No navigation until the API responds | There is no navigation control on the form at all. The only `router.push` runs after a successful sign-in |
+| Nothing added | No agency onboarding, billing, GHL, or any field the service does not accept |
+
+### 13.3 The privacy contract is preserved, and the UI does not undo it
+
+The API answers a **duplicate email and a new account with the same 202 and the same body**, by
+design. The page therefore:
+
+- **does not read or branch on that body at all.** The only branch after acceptance is whether the
+  subsequent sign-in worked — which tells the person holding the right password what they need,
+  and tells a prober nothing. A static test asserts the accepted branch contains no
+  `response.json()` and no mention of existence;
+- **never logs.** No `console` call anywhere in the file, asserted by test. An email and a password
+  in a browser console outlive the tab they were typed in;
+- shows the same neutral sentence — "Your details were submitted. Please sign in to continue." —
+  whether the address was new or already taken. A browser test asserts that notice contains none
+  of *exist*, *already*, *taken*, *registered*, *in use*, *duplicate*.
+
+On a successful sign-in the new owner is sent to `/business/program`: the first loyalty card, which
+is what §12 built and what they came to do.
+
+### 13.4 A second prototype habit removed
+
+Every visible string now comes from the message files. The prototype wrote both languages inline as
+`locale === 'ar' ? … : …` ternaries, which is how two locales drift apart. A test asserts **no
+Arabic character survives in the page source**, so a future edit cannot reintroduce an untranslated
+string.
+
+Login is unchanged, as required. Its `callbackUrl` handling was already restricted to same-site
+paths and needed nothing.
+
+### 13.5 Tests
+
+**Five browser tests** in `tests/e2e/owner-registration.spec.ts` — the central assertion is not
+that the form looks right, it is that **a request left the browser and a row appeared in the
+database**:
+
+| Requirement | Covered by |
+|---|---|
+| A real `POST /api/auth/register` occurs | the request is captured and its body checked field by field, including `SYP`, `Asia/Damascus` and the absence of `account_type` |
+| The owner is signed in and reaches first-card setup | lands on `/en/business/program` with the card form visible; the database shows the user, one OWNER membership, the business with the right currency and timezone, and one default location |
+| No prototype link | the submit control is a `BUTTON` with `type="submit"`, and **no anchor on the page has an href leading to `/business`** |
+| Invalid input does not submit | empty form and short password both show field errors, the page never navigates, and **zero requests are made** |
+| Duplicate email stays non-enumerating | the same 202, the neutral notice, no words that leak existence, nothing created for the prober, and the real owner's password still works afterwards |
+| Arabic and English render | `dir` correct in both, headings translated, and the local-business-only line present in both |
+
+**Eight static guards** in `tests/unit/register-page-wiring.test.ts` catch the specific regressions
+that would bring the prototype back, in milliseconds: the fetch call, every field, both defaults,
+`type="submit"`, no dashboard link, no console call, no "agency", no inline Arabic, the sign-in
+attempt, and the non-branching accepted path.
+
+### 13.6 An unrelated flaky test the gate caught — `dbc5d80`
+
+The gate failed on `tests/integration/daily-limit.test.ts`, which this work had not touched. It had
+passed all morning and failed at 08:00 UTC.
+
+The test took the current instant and a row 20 hours old, on the reasoning that *"the two zones are
+25 hours apart, so a 20-hour-old row cannot be inside both"*. **That is false.** Each local day is
+24 hours long, and Kiritimati (UTC+14) and Niue (UTC-11) are offset by exactly **one** hour modulo
+24 — so whenever both businesses are more than 20 hours into their local day, the same row sits
+inside both. Measured: two hours out of every 24.
+
+Pinning the hour removes the coin flip and makes the test stronger, because the old version only
+exercised the interesting case some of the time. At 12:00 UTC one zone is 2 hours into its day and
+the other 1 hour, so a row placed between the two local midnights belongs to exactly one of them on
+every run — now asserted directly rather than derived from whatever the clock said. Verified across
+all 24 possible suite start hours.
+
+**No product code changed.** It is recorded here because it is outside this task's scope and was
+fixed anyway: a gate that fails for two hours a day teaches people to re-run it.
+
+### 13.7 Verification, on `6aa6aed`
+
+```
+GATE SUMMARY
+PASS  dependency audit (prod, high+)             1477 ms
+PASS  prisma generate                            2334 ms
+PASS  lint                                       8141 ms
+PASS  typecheck                                  3615 ms
+PASS  prisma validate                            1719 ms
+PASS  unit tests                                 1797 ms
+PASS  test db up                                 1059 ms
+PASS  migrate deploy (test db, migrator role)    5895 ms
+PASS  migrate status (test db)                   5895 ms
+PASS  runtime role grants (test db)               194 ms
+PASS  integration tests                        223437 ms
+PASS  worker build                                236 ms
+PASS  production build                          15746 ms
+PASS  migrate image dependencies                 2593 ms
+PASS  web image container health                26813 ms
+GATE PASSED in 301.0s (15/15 steps)
+```
+
+| Check | Result |
+|---|---|
+| unit / integration | **217** / **380** (597 total, 46 files) |
+| `npm run test:e2e` | **9 passed (42.8 s)** |
+| `npm audit --omit=dev --audit-level=high` | **0 vulnerabilities** |
+| `npm audit` (full tree) | **0 vulnerabilities** |
+| `git diff --check` | clean |
+
+**No migration was added** and no schema changed.
+
+### 13.8 What this round did not do
+
+- **No staging deployment.** The fix is committed and pushed; updating staging is the owner's step.
+- **No real-device check was performed, and none is claimed.** The manual checklist in §8 remains
+  entirely unperformed. What has changed across §12 and §13 is that the path to it now exists: an
+  owner can register, sign in, create a card and get a link — which is what those checks need.
+- **The registration service's behaviour is unchanged**, including its account-enumeration
+  contract. Only the page that calls it changed.
+- **Login is unchanged.**
+- `master` is untouched at `b9ee686`.
+
+---
+
+**PASS — REAL OWNER REGISTRATION REMEDIATION COMPLETE — READY TO UPDATE STAGING**
