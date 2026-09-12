@@ -1,9 +1,9 @@
-# Phase 1b — Merchant MVP: the server and domain core
+# Phase 1b — Merchant MVP
 
-Prompt 1 builds the server side of the Merchant MVP: points programs with reward tiers,
-multi-location operations, full staff management, named enrolment sources, and the read models a
-real dashboard is derived from. **No merchant-facing UI, no dashboard pages and no deployment
-changes** — those are Prompt 2.
+Phase 1b ships in two prompts. **Prompt 1** built the server side: points programs with reward
+tiers, multi-location operations, full staff management, named enrolment sources, and the read models
+a dashboard is derived from. **Prompt 2** built the merchant interface on top of it and rebranded the
+product to **Zademi** (§10–§13).
 
 Phase 1a's documentation is [PHASE-1A-IMPLEMENTATION.md](PHASE-1A-IMPLEMENTATION.md), and the rules
 it records still hold unless a section below says otherwise and says why.
@@ -14,17 +14,16 @@ it records still hold unless a section below says otherwise and says why.
 
 | In | Out, and which phase owns it |
 |---|---|
-| Points mechanics contract, reward tiers, the points engine | Template/settings UI, manager and location screens, dashboard pages, source-link UI (Prompt 2) |
-| Multi-location for authenticated staff operations | Wallet passes, push, offline caching (1.5) |
-| Managers, configurable permissions, active/inactive staff, location assignment | SMS OTP, public self-enrolment (blocked by decision **B7** until phone ownership can be proved and independently audited) |
-| Named source links as server-side attribution records | CSV, campaigns, GHL, billing, cashback, discounts, coupons, gift and membership cards |
+| Points mechanics contract, reward tiers, the points engine | Wallet passes, push, offline caching (1.5) |
+| Multi-location for authenticated staff operations | SMS OTP, public self-enrolment (blocked by decision **B7** until phone ownership can be proved and independently audited) |
+| Managers, configurable permissions, active/inactive staff, location assignment | CSV, campaigns, GHL, billing, cashback, discounts, coupons, gift and membership cards |
+| Named source links as server-side attribution records | Publishing a new program version, location management, source-link mutation from the UI (§12) |
 | Tenant-scoped dashboard read models derived from the ledger | Production deployment |
+| The merchant interface and the Zademi brand system (§10, §11) | |
 
-**No HTTP route changed in this prompt.** The API surface is still Phase 1a's, and
-`assertNoLocationInRequest` still refuses a location at that boundary. The location parameter this
-phase adds lives on the SERVICES; Prompt 2 opens it at the edge together with the picker that makes
-it usable. A service that accepts a location while the only route to it refuses one is not an
-inconsistency — it is the order the two prompts were split in.
+**Sections 2 to 9 describe Prompt 1 and were written when no HTTP route had changed.** Prompt 2 then
+opened the location parameter at the edge, together with the picker that makes it usable — §10.2 says
+exactly which routes and under what guard. Everything else in those sections still holds.
 
 ---
 
@@ -315,3 +314,95 @@ new grouped reads. Safe on existing data: Phase 1a creates exactly one tier per 
 
 Browser tests are unchanged: no HTTP route or screen changed in this prompt, and a browser test that
 exercised nothing new would only slow the suite down.
+
+---
+
+## 10. The merchant interface (Prompt 2)
+
+Prompt 1 deliberately shipped no screens. Prompt 2 builds them, and the rule it works under is that
+**a control exists only when the server behind it does**: no greyed-out promises, no settings the
+domain does not have, and no button whose only possible outcome is a refusal.
+
+| Screen | What it does | Server behind it |
+|---|---|---|
+| `/business` | Ledger-derived dashboard over the last 30 days, with per-program and per-location rows | `getBusinessMetrics` |
+| `/business/programs` | Every program, stamp or points, with status, reward count and locations | `listBusinessPrograms` |
+| `/business/programs/[id]` | One program: earning rule, daily limit, welcome bonus, locations, rewards, its own activity, and where its cards came from | `getProgramDetail`, `getBusinessMetrics`, `listSourceLinks` |
+| `/business/programs/new` | Create an additional program, stamp or points, with a tier editor | `POST /api/staff/programs` |
+| `/business/locations` | The counters the business operates, read-only | `listBusinessLocations` |
+| `/business/team` | Staff, roles, extra permissions, assignments, activate/deactivate | `listBusinessStaff`, `POST /api/staff/membership` |
+| `/scanner` | Both card kinds, with a location choice where the program has one | `/api/scanner/*` |
+
+### 10.1 Three things the screens refuse to do
+
+**They never decide access.** Every page resolves the membership from the database on the request
+and every route re-checks it. A hidden button is a courtesy; the refusal is in the service.
+
+**They never guess a location.** Where a program runs at several counters the actions stay disabled
+until the cashier chooses, because the server refuses to guess and a default would attribute revenue
+to the wrong branch silently. The picker is built from a scope the server resolved from the member's
+own assignment, so it cannot offer an option the write would refuse.
+
+**They never publish a capability.** No owner screen carries an enrolment link or QR (B7), and the
+customer's card link appears only after staff press reveal — which is audited, without the token.
+
+### 10.2 New routes
+
+| Route | Shape |
+|---|---|
+| `POST /api/staff/programs` | Strict discriminated union on `cardType`. Creates an additional program; the name rule protects the double-click. Returns no source token |
+| `POST /api/staff/membership` | Strict union on `action`: role, permissions, locations, deactivate, reactivate. OWNER is not an option the schema offers. Returns `{ok:true}` and nothing else, so the screen re-reads the list |
+| `POST /api/scanner/points` | Strict union on `mode`: manual, visit, purchase, redeem |
+
+`/api/scanner/award`, `/redeem` and `/reverse` were rewritten with strict schemas in the same prompt.
+They used to read `String(body.x ?? "")` field by field, which accepted anything and coerced it.
+
+**`locationId` is now accepted on the scanner write routes and nowhere else.** `readJsonObject` gained
+an `allowLocation` option that permits a top-level `locationId` while still refusing a nested one;
+the value is then validated against the card's pinned `availableLocations` and the member's own
+assignment inside the write transaction. A reversal still refuses it outright.
+
+### 10.3 Two defects found and fixed in Prompt 2
+
+| What | Why it mattered |
+|---|---|
+| **The scanner lookup read every card through the STAMP contract.** One points card in a business made a phone lookup throw — and it took that customer's stamp cards down with it, because the lookup maps over every card the number matched | The engines were isolated; the read that feeds the counter was not. `CardSearchResult` is now a union on `cardType`, read through whichever contract owns the version |
+| **The sidebar's sign-out button had no handler.** It looked like a button, sat on every merchant screen, and did nothing | The only way to end a session on a shared till was to clear cookies, and the person who pressed it walked away believing they were signed out |
+
+---
+
+## 11. The brand system
+
+`docs/BRAND.md` is the authority. In short: one token file (`globals.css`) carries the palette and
+the semantic colours, components address the semantic tokens, and a unit test fails the build if a
+brand hex value appears in a component. Nunito and Inter for Latin, **Cairo for Arabic** — because
+Inter and Nunito carry no Arabic glyphs and the fallback on a Windows till is a stiff Naskh face at
+the wrong size. All three are downloaded at build time by `next/font`, so no request reaches a font
+CDN from a merchant's browser.
+
+**There is no approved logo asset in the repository.** The product ships a text wordmark and a
+neutral geometric mark; BRAND.md §1 lists the exact files needed and §6 records that installed PWA
+cards keep their cached icon until re-installed.
+
+---
+
+## 12. The contracts Prompt 2 needed and did not have
+
+Reported rather than invented, as the prompt requires. None of these was worked around with a
+schema change or a direct database write from a screen.
+
+| Missing contract | What it blocks | Consequence in the UI today |
+|---|---|---|
+| **Publish a new program version** | Editing a live program's mechanics, or editing/reordering its reward tiers. `reward_tier_protect` and `program_version_freeze` refuse every write once a version is ACTIVE — by design, so a card keeps the rules it was sold under | The program screen is read-only after creation and says so. Tiers are ordered at creation |
+| **Create, rename, deactivate a location** | Everything a locations screen would do beyond listing | `/business/locations` is read-only and says so |
+| **Create and deactivate a named source from the UI** | A source-link management screen | The program screen lists sources read-only |
+
+---
+
+## 13. Tests added in Prompt 2
+
+| File | Covers |
+|---|---|
+| `tests/integration/merchant-routes.test.ts` | Every new route at the HTTP boundary: strict schemas, unknown and privileged fields, tenant and permission boundaries, self-edit and grant-ceiling refusals, idempotent retry, location refusals, the reversal dispatch, and the points-card lookup regression |
+| `tests/e2e/merchant-ui.spec.ts` | An owner creating a points program with tiers and reading it back; invalid input that sends no request; the Arabic RTL interface; a points card served at a chosen counter; the card link staying hidden until revealed; and the rebrand |
+| `tests/unit/brand-scan.test.ts` | No old brand name in the user-facing tree, one product name in both locales, no brand hex outside the token file |

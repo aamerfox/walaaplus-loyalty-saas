@@ -11,6 +11,10 @@ Related documents: [PHASE-PLAN.md](PHASE-PLAN.md) · [BOOMERANGME-REFERENCE.md](
 
 WalaaPlus is an **Arabic-first, Syria-first digital loyalty and retention platform** for local businesses. It must work with no POS hardware, no wallet-pass availability, and no app-store distribution.
 
+The product is **Zademi**. Its identity, palette, type and the brand assets still missing are in
+[BRAND.md](BRAND.md); the merchant interface built on this spec is in
+[PHASE-1B-IMPLEMENTATION.md](PHASE-1B-IMPLEMENTATION.md) §10.
+
 The customer product is an **installable PWA loyalty card**. The staff product is an **authenticated scanner** with QR and manual phone lookup.
 
 The complete MVP loop:
