@@ -14,9 +14,14 @@ restore. No other feature work.
 token or phone number. Cards are issued by authenticated staff at the counter, and a lost card link
 is restored the same way.
 
-**The Phase 1a engineering gate is NOT claimed to pass.** `docs/evidence/phase-1a-prompt-3.md` is
-BLOCKED, and this change is exactly what it was blocked on, so that gate must be **re-run** against
-the branch as it now stands. Nothing in this document is a substitute for it.
+**When this was written the Phase 1a engineering gate was NOT claimed to pass**, because
+`docs/evidence/phase-1a-prompt-3.md` was BLOCKED on exactly this decision and had to be re-run.
+
+> **Since resolved.** That gate was re-run at `bdd8731b53b4ed352e82573c79b41a6ebc7cc853` and
+> **passed** — see `docs/evidence/phase-1a-prompt-3.md` §13, which is the authoritative result. The
+> re-run found no Critical or High finding and changed no code; it recorded five new Medium and Low
+> findings (M-10, M-11, L-15 to L-17). This document remains the implementation record for the
+> change itself.
 
 | Check | Result |
 |---|---|
@@ -201,10 +206,12 @@ values of an existing `String` column.
 
 ## 8. What is NOT claimed
 
-- **The Phase 1a engineering gate is not passed.** `phase-1a-prompt-3.md` is BLOCKED and must be
-  re-run against this branch.
-- **No device testing was performed.** Staging has not been updated, and nothing here was opened on
-  a phone. The runbook's new manual rows 8 to 11 are marked "not performed".
+- **The Phase 1a engineering gate was not passed by this document.** It was passed later, by the
+  re-run recorded in `phase-1a-prompt-3.md` §13.
+- **No device testing was performed *in this prompt*.** Staging had not been updated when this was
+  written, and nothing here was opened on a phone. The owner deployed this commit and ran the
+  manual counter-flow regression afterwards; those results are theirs and are recorded in
+  `phase-1a-prompt-3.md` §13.9.
 - **No deployment, no OCI contact, no Caddy, DNS or secret access.**
 - **No real customer data.** Every test uses generated Syrian phone numbers and generated emails.
 - **No SMS, OTP or external verification provider** was added, configured or contacted.

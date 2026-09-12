@@ -433,11 +433,12 @@ affect any of it — a new service worker, a new manifest, or anything touching 
 
 Rows 1 to 7 have been performed and recorded, so Phase 1a Prompt 2's manual gate is complete.
 
-**Rows 8 to 11 are new and have NOT been performed.** They arrived with owner decision B7 option 3,
-which withdrew public self-service enrolment and moved card issuance to the counter. They are
-covered by automated browser tests, not by any device run: staging has not been updated to a build
-that contains them. They are not part of Prompt 2's closed manual gate, and nothing here claims
-they passed.
+**Rows 8 to 11 were performed by the owner on 2026-09-12**, against staging running
+`bdd8731b53b4ed352e82573c79b41a6ebc7cc853`, together with an award-then-reversal check that
+restored the original balance. All passed. No names, phone numbers, card links, QR values or
+screenshots were recorded, by instruction. The results are in
+`docs/evidence/phase-1a-prompt-3.md` §13.9; the agent did not observe them and records them as the
+owner's results.
 
 **Rows 4a and 4b both failed on the first real attempt**, for two different and unrelated reasons:
 Safari was told it had no camera before any prompt, and Android granted permission and then showed
@@ -521,7 +522,9 @@ application simply declines to believe them in this shape.
 | Per-submitted-email window on registration | **active** |
 | Per-identifier window on sign-in | **active** — this is the one that stops credential stuffing against one account |
 | **Per-enrolment-link window**, database-backed | **not applicable** — it guarded the public write that no longer exists. Enrolment now requires a staff session, which is itself rate-limited at sign-in |
-| Per-identifier window on scanner writes, idempotency, tenant isolation, append-only ledger | unaffected |
+| Global window on registration, keyed on a constant | **active** — the one that survives having no client address |
+| Rate limiting of counter enrolment and scanner writes | **none exists.** Those paths require a staff session, which is itself limited at sign-in; there is no per-actor window behind it (Prompt 3 finding M-11) |
+| Idempotency, tenant isolation, append-only ledger | unaffected |
 
 The application reports no client address at all rather than a forgeable one, so the windows above
 simply do not open. Nothing silently degrades to a weaker limit.

@@ -9,30 +9,40 @@
 
 ## 1. Result
 
-**BLOCKED — this gate does not pass.** See **§12**, which supersedes the result this section
-originally carried.
+**PASS — the Phase 1a engineering gate passes**, at commit
+`bdd8731b53b4ed352e82573c79b41a6ebc7cc853`. The audit that establishes it is **§13**, which is the
+authoritative result for this document.
 
-Five High findings were found and fixed with regression tests, and no Critical finding was found.
-But one of those fixes — §3.1, the enrolment token — was **incomplete, and this document claimed
-otherwise.** The audit verified the API's response shape and stopped there; the public form
-redirects to the returned token, so the browser flow still distinguishes an existing customer from
-a new one. Closing it requires proof that the submitter owns the phone number, and every channel
-that could provide one is unauthorized in Phase 1a. That is a decision for the owner, not a defect
-to engineer around.
+This section previously read BLOCKED, and §§2–12 are kept exactly as they were written: they are
+the historical record of the first pass, of the correction that blocked it, and of why the block
+was a decision rather than a defect. Reading order is chronological — §§1–11 the first audit, §12
+the correction that blocked it, §13 the re-run that closes it.
 
-**Twenty-two Medium and Low findings** are recorded in §7 with severity, rationale, owner and
-phase.
+| | |
+|---|---|
+| First pass (§§2–11) | Five High findings found and fixed with regression tests; no Critical. Twenty-two Medium and Low recorded in §7 |
+| Correction (§12) | §3.1 was reported closed when it was only narrowed: the public enrolment form still distinguished an existing customer from a new one. **BLOCKED** |
+| Owner decision B7 | Option 3, authorized 2026-09-12: public self-service enrolment withdrawn; cards issued by staff at the counter. Implementation evidence: [phase-1a-b7-option-3.md](phase-1a-b7-option-3.md) |
+| **Re-run (§13)** | **The oracle is closed structurally. No Critical or High finding. Every check green on the exact deployed commit. PASS** |
+
+**Final result table — §13's run, not the first pass's:**
 
 | Check | Result |
 |---|---|
-| `npm run gate` | **PASS 15/15 in 281.9 s** |
-| `npm run test:e2e` | **9 passed (39.5 s)** |
-| unit / integration | **276** / **388** (664 total, 52 files) |
+| `npm run gate` | **PASS 15/15 in 285.9 s** |
+| `npm run test:e2e` | **12 passed (38.2 s)** |
+| unit / integration | **276** / **389** (665 total, 53 files) |
 | `npm audit` full tree | **0 vulnerabilities** |
 | `npm audit --omit=dev --audit-level=high` | **0 vulnerabilities** |
-| `git diff --check` | clean |
-| CI on the exact commit | §8 |
-| **Enrolment-existence oracle** | **OPEN when this was written. Closed on 2026-09-12 by owner decision B7 option 3 — see §12.4 and [phase-1a-b7-option-3.md](phase-1a-b7-option-3.md). This gate must be re-run** |
+| Migration status | **5 applied, none pending** |
+| Secret scan | **clean** (§13.7) |
+| `git diff --check` | **clean** |
+| CI on the exact commit `bdd8731` | **gate success, e2e success** (§13.8) |
+| Owner manual regression on staging | **7 of 7 passed** (§13.9) |
+| **Enrolment-existence oracle** | **CLOSED — §13.2** |
+
+**The first pass's own numbers, kept for the record:** gate PASS 15/15 in 281.9 s, e2e 9 passed,
+unit 276 / integration 388, both audits clean, `git diff --check` clean, CI §8.
 
 **Precondition met.** Prompt 2's manual-gate closure is present on the branch (`c294d81`,
 "the owner's real-device results close the Phase 1a Prompt 2 manual gate") and
@@ -444,8 +454,8 @@ to write; options 1 and 3 both change the product.
 > provider was added; D2 and D4 stay deferred. The implementation and its evidence are in
 > [phase-1a-b7-option-3.md](phase-1a-b7-option-3.md).
 >
-> **This engineering gate still does not pass.** It must be re-run against the branch as it stands
-> after that change; this document describes the state before it.
+> **At the time this note was added the gate still did not pass**: it had to be re-run against the
+> branch as it stood after that change. **That re-run is §13, and it passed** at `bdd8731`.
 
 ### 12.5 What was preserved
 
@@ -506,7 +516,232 @@ once before the pilot continues.
 ---
 
 **BLOCKED — PHASE 1A ENGINEERING GATE — PHONE-OWNERSHIP VERIFICATION DECISION REQUIRED**
+*(Historical. This was the result from the correction in §12 until the re-run in §13. It superseded
+the document's original PASS line; §13 supersedes it in turn.)*
 
 This supersedes the `PASS` line this document originally ended with. Five High findings were
 found and fixed and every automated check is green, but §3.1 was reported as closed when it was
 only narrowed, and §12 records why closing it is a decision rather than a change.
+
+---
+
+## 13. Re-run — the final Phase 1a engineering gate
+
+**Date:** 2026-09-12
+**Commit audited:** `bdd8731b53b4ed352e82573c79b41a6ebc7cc853`, the commit the owner reports
+deployed to staging and manually regression-tested.
+**Scope:** the complete final Phase 1a implementation — every original Prompt 3 requirement plus
+owner decision **B7 option 3**.
+
+**Result: PASS. No Critical or High finding.** Five new Medium and Low findings are recorded in
+§13.6 with owner, rationale and phase.
+
+### 13.1 What changed since the first pass, and what did not
+
+The first pass audited `e3e0880`. Everything since is the B7 change and documentation:
+
+```
+git diff --name-only e3e0880..HEAD -- src/server/ledger src/server/stamp src/server/security \
+  src/server/registration src/server/staff src/server/time src/server/db.ts src/server/env.ts \
+  src/server/errors.ts src/server/http.ts src/server/qr.ts src/server/auth prisma public
+→ (empty)
+```
+
+The stamp engine, the ledger and its reconciliation, idempotency, the security and rate-limit
+module, registration, the auth options, the Prisma schema and every PWA asset are **byte-identical**
+to the tree the four parallel audits examined. `git diff --shortstat e3e0880..HEAD -- src` is 18
+files, 686 insertions, 508 deletions, and all 18 are the enrolment change. So §§3–7 stand as
+audited, and this re-run concentrates on the B7 surface, then re-verifies the whole product by
+running every suite (§13.7).
+
+### 13.2 Public enrolment is structurally disabled
+
+| Claim | How it is enforced | How it is proven |
+|---|---|---|
+| `POST /api/enroll` is constant and parameter-independent | `export async function POST(): Promise<NextResponse>` — the handler is **declared with no parameters**, so no body, token or phone number is in scope to branch on. It parses nothing, normalises nothing, opens no rate-limit window and issues no query | `tests/integration/enrollment-withdrawn.test.ts` asserts the arity structurally (`enrollPost.length === 0`) and byte-compares the response for an enrolled number, a new number, a dead token and an empty body |
+| `GET /api/enroll` is the same | The same constant `410 ENROLLMENT_MOVED` body | Same test file; `tests/e2e/enrollment-enumeration.spec.ts` repeats it through a browser |
+| Every `/join/<token>` is token-independent | `JoinWithdrawnPage()` takes **no `params`**. No source lookup, no template read, no database call of any kind. There is no `generateMetadata` in the segment | The e2e spec loads a real `direct` token and an invented 32-character token and asserts the rendered text is identical |
+| It reveals no customer or program data | The page renders three fixed strings from the `Join` namespace | Same spec; the integration suite additionally asserts the owner program API returns no `enrollmentUrl`, no `enrollmentQrSvg` and never the source `publicToken` |
+| No public route can create, find, restore or validate a card | The public surface is `/`, `/pricing`, `/auth/*`, `/join/*`, `/card/*`, `/scanner/login`, plus `/api/auth/*`, `/api/enroll` and `/api/health`. None of them writes a card, and none accepts a phone number | Route-by-route review below |
+
+Route-by-route, on the public surface:
+
+- **`/api/enroll`** — constant `410`, no I/O.
+- **`/api/health`** — `SELECT 1`, answers `ok` or `degraded` and nothing else.
+- **`/api/auth/register`** — creates a *merchant* account, never a card; non-enumerating by
+  construction (§3.4 and its tests).
+- **`/card/<shareToken>`** and its manifest — these *do* distinguish a real token from an invented
+  one, and that is the product working as specified: the link is the capability, it is 192 bits of
+  `crypto.randomBytes` (`src/server/security/tokens.ts`), it is addressed by the page token and
+  never the scanner token, and it is what the owner's manual check confirmed still opens. It is not
+  an enumeration oracle because nothing public maps a phone number to it.
+- **`/join/*`** — the static notice above.
+
+`publicEnrollmentUrl` was **deleted**, not left unused: `src/server/program/public-urls.ts` exports
+only `publicCardUrl`, so no code path in the repository can construct a public enrolment address.
+The `direct` source rows and their tokens still exist — B7 removed the route, not the data — and
+`grep` finds the token reaching no client: the only reference outside `src/server` is an existence
+check in the program route's 409 branch, which returns the program's name and mechanics and not the
+token.
+
+### 13.3 Staff enrolment and restore
+
+| Requirement | Finding |
+|---|---|
+| Owner/cashier authorization correct | `requireScannerContext` calls `requireUserId`, then `requireBusinessMembership`, which re-reads an **active** membership from the database on every request; then `requirePermission(ctx, EDIT_CUSTOMERS)`. A deactivated membership loses access on the next request (`cashier.test.ts`) |
+| Cross-tenant requests fail | The card read in `revealCardLink` is **filtered** by `businessId` rather than checked afterwards, so another tenant's card id is `NotFoundError` — the same answer as a card that does not exist. Naming another business in `businessId` fails in `requireBusinessMembership` with `ForbiddenError`. Both are tested |
+| Caller cannot name business, source, template, location, balance or welcome settings | `z.strictObject` with exactly `{ businessId?, phone, firstName?, lastName?, marketingConsent? }`. Unknown keys are **refused**, not ignored, and `readJsonObject` refuses a `location`/`locationId` at any nesting before the schema runs. `businessId` is verified, never trusted. The source token is resolved by `resolveDirectSourceToken(ctx)` from the membership. Five refusal cases are tested individually |
+| One customer/business, one card, one welcome bonus | `enrollAtCounter` delegates to the unchanged `enrollCustomer`, whose `INSERT … ON CONFLICT DO NOTHING RETURNING` makes the card insert the sole arbiter of the bonus. Tested for a repeat and for two concurrent enrolments of the same number |
+| Consent text, timestamp and version stored | The version is stamped **server-side** from `ENROLLMENT_CONSENT_VERSION`; `privacyConsentAt` is set from the server clock whenever a version is supplied, which the counter always supplies. The two consent strings moved unchanged into a `Consent` namespace and the counter renders exactly those, so the recorded version still describes the words read aloud; `tests/unit/enrollment-consent.test.ts` hashes them and fails if they drift |
+| Reveal authorized, tenant-bound and audited without a token, URL, phone or name | `VIEW_CUSTOMERS`, tenant-filtered read, audit row written **before** the link is returned so a failed audit is a failed reveal. `CARD_LINK_REVEALED` carries `metadata: {}` and no `ipAddress`; `CARD_ISSUED_AT_COUNTER` carries `{created, welcomeStampsGranted}`. Tests assert the rows contain neither token, nor URL, nor the substring `http`, nor the phone, nor the name |
+| The cashier grant opens only what was intended | `EDIT_CUSTOMERS` is guarded in exactly one place in the repository — `enrollAtCounter`. No UI gates on it (`Permission.` appears in the app tree only for `VIEW_TEMPLATES`/`EDIT_TEMPLATES`), so no navigation changed. The existing boundary tests still hold: a cashier cannot create or change the program, cannot add staff, cannot browse the customer directory, sees operations only for their own location, and reaches no other business |
+
+### 13.4 Existing card, ledger and PWA behaviour
+
+Unchanged by construction (§13.1) and re-verified by running every suite:
+
+- **Existing personal links work.** `getPublicCardView` is keyed on the page token and was not
+  touched; the browser suite opens a card by its link after a counter enrolment, and the owner
+  confirmed it on a real device (§13.9).
+- **Scanner QR / phone / serial lookup, award, conversion, redemption, reversal, idempotency,
+  reconciliation, Main-only location and tenant isolation** — 389 integration tests across 33 files,
+  including `stamp-engine`, `ledger`, `reversal-race`, `idempotency`, `reconciliation`,
+  `daily-limit`, `transaction-group`, `tenant-guard`, `constraints`, `database-protection` and
+  `runtime-role`, all green in this run.
+- **PWA boundaries.** `public/sw.js` still registers **no `fetch` handler**, so nothing is cached;
+  the manifest is still generated per card and still carries only the business and program name.
+
+### 13.5 Counter-enrolment abuse surface, stated plainly
+
+The public enrolment route carried two rate-limit windows. Those windows guarded an anonymous
+write; the write behind the counter is not anonymous. What replaces them is authentication, audit
+and tenancy — every issuance carries `actorUserId`, and a cashier can only ever act inside their own
+business. What does **not** exist is a per-actor limit on how many cards one staff account may
+issue (M-11 below). The comparable fraud — a cashier awarding themselves stamps — is the more direct
+one, is bounded by the daily award limit, and is equally audited.
+
+### 13.6 New findings from this re-run
+
+None is Critical or High. Numbering continues from §7.
+
+| # | Sev | Finding | Rationale for deferring | Owner | Phase |
+|---|---|---|---|---|---|
+| M-10 | Medium | **The counter attribution audit row is written outside the enrolment transaction.** `enrollAtCounter` calls `enrollCustomer` (which writes `CARD_ISSUED` inside its own transaction) and then writes `CARD_ISSUED_AT_COUNTER` with the global client. A crash in that window leaves the issuance audited but **unattributed to the staff member** | Issuance itself stays transactionally audited and is reconstructible from `CustomerCard.issuedAt` and `utmSourceLinkId`; only the actor row is at risk, and only on a crash inside a few milliseconds. The fix threads a transaction client through `enrollCustomer`, whose `ON CONFLICT` arbitration deserves its own concurrency tests when it changes | development agent | 1b |
+| M-11 | Medium | **No per-actor rate limit on counter enrolment or scanner writes.** One staff account can issue unbounded cards, each granting a welcome bonus | The actor is authenticated, scoped to one tenant, and recorded on every row; the equivalent and more direct abuse (self-awarding stamps) is already bounded by the daily award limit. A per-actor window belongs with the wider staff-abuse work rather than bolted onto one route | development agent | 1b |
+| L-15 | Low | **Dead public-enrolment rate-limit code.** `consumeEnrollLimit`, the `enroll.ip`/`enroll.link` scopes and three `ENROLL_RATE_LIMIT_*` environment variables have no caller since B7, and `.env.example` still advertises them — a reader may conclude enrolment is limited when nothing calls the limiter | No behaviour: dead code cannot run. Removing it is a source change, and this gate's whole point is that the audited tree is the deployed tree | development agent | 1b |
+| L-16 | Low | **Stale schema comment.** `UtmSourceLink.publicToken` is still annotated "appears in QR/URL"; since B7 it appears in neither | Comment only | development agent | 1b |
+| L-17 | Low | **`revealCardLink` is not location-scoped**, only `VIEW_CUSTOMERS`. Phase 1a is Main-only so there is nothing to cross today; when 1b adds locations, a cashier at one branch could reveal a link for a customer served at another | Unreachable in this phase by construction. It belongs with the multi-location work that creates the boundary | development agent | 1b |
+
+**Two earlier findings are now moot rather than open:** the public enrolment honeypot and its
+windows (§4) no longer guard anything, which is L-15 above; and L-7 (the scanner token in a GET
+query string) is unchanged and still Low — the new card-link reveal deliberately uses `POST` for
+exactly that reason.
+
+**No Critical or High finding remains open**, and none was found in this re-run, so no code changed
+in this prompt. The tree audited here is the tree the owner deployed and regression-tested.
+
+### 13.7 Commands run, and what they returned
+
+All run locally on this branch at `bdd8731`, on 2026-09-12, against the gate's own Dockerised test
+database.
+
+| Command | Result |
+|---|---|
+| `npm run gate` | **PASS — 15/15 steps in 285.9 s** |
+| `npm run test:e2e` | **12 passed (38.2 s)** |
+| unit | **276 passed, 20 files** |
+| integration | **389 passed, 33 files** |
+| `npm audit` (full tree) | **found 0 vulnerabilities** |
+| `npm audit --omit=dev --audit-level=high` | **found 0 vulnerabilities** |
+| `npm run db:migrate:status` | **5 migrations found, schema up to date, none pending** |
+| `git diff --check` | **clean** |
+
+The gate's fifteen steps include the two container checks CI skips — `migrate image dependencies`
+and `web image container health` — and both passed here.
+
+**Secret scan.** Tracked files matching `.env`, `secret`, `credential`, `*.pem`, `*.key` or
+`id_rsa` are exactly two: `.env.example` and `.env.staging.example`, both **variable names with
+empty values**. A pattern search for assigned literals after `password|secret|token|api_key|passwd|
+pwd` across `src`, `scripts`, `prisma`, the compose files and the workflows returns nothing, and so
+does a search for fallback secrets (`?? "…"` / `|| "…"` on a secret-shaped name) — the Phase 0
+hygiene finding H-1 stays closed. `process.env` is read in exactly three places outside
+`src/server/env.ts`: the runtime switch in `instrumentation.ts` and `NEXTAUTH_SECRET` in the proxy,
+which refuses to serve protected routes when it is missing or shorter than 32 characters. No secret
+is logged: the only `console` call in `src` narrows a thrown value to `{name, message}`, and
+`errorResponse` returns a generic 500 body for anything that is not a domain error.
+
+**Index and query review.** The B7 change adds two query shapes. `resolveDirectSourceToken` filters
+`UtmSourceLink` on `utmSource` and `active` through the relation `template: { businessId, status }`;
+`ProgramTemplate` carries `@@index([businessId, status])` and `UtmSourceLink` carries
+`@@unique([templateId, name])`, whose prefix serves the `templateId` join, so the path is
+index-driven at any scale a pilot reaches. `revealCardLink` reads `CustomerCard` by primary key with
+a `businessId` predicate. Neither adds a sequential scan. The index findings from the first pass are
+unchanged and still deferred: **M-4** (no index on `CustomerBusinessProfile.customerId`, used by the
+scanner's phone lookup), **M-5** (no `@@index([businessId, id])` for the customer list's keyset
+page) and **L-12** (`@@unique([externalProvider, externalEventId])` indexing all-NULL rows on the
+ledger). Audit-log reads filtered by `action` fall back to the `(businessId, createdAt)` index and
+then filter; that is an admin-side read at pilot volume and is not worth an index today.
+
+### 13.8 CI evidence on the exact commit
+
+CI runs on the **private** deploy remote `aamerfox/walaaplus-platform`, on push to `rebuild/**`.
+Both workflows use ephemeral fixtures and no secrets, and neither deploys anything.
+
+| Workflow | Commit | Conclusion | Run |
+|---|---|---|---|
+| `gate` | `bdd8731` | **success** | [run 34694988125](https://github.com/aamerfox/walaaplus-platform/actions/runs/34694988125) |
+| `e2e` | `bdd8731` | **success** | [run 34694988173](https://github.com/aamerfox/walaaplus-platform/actions/runs/34694988173) |
+
+This is the **deployed** commit, not an ancestor of it: `git rev-parse HEAD`,
+`git ls-remote deploy rebuild/phase-0-foundation` and the two runs' `headSha` all read
+`bdd8731b53b4ed352e82573c79b41a6ebc7cc853`.
+
+The §8 caveat still holds and is repeated because it bears on what CI proves: `gate.yml` sets
+`GATE_SKIP_DOCKER: "1"`, so CI runs 12 of the 15 steps and skips the disposable-database step and
+the two image checks. Those three ran locally and passed (§13.7). Making CI run them stays **M-9**,
+Phase 1b.
+
+### 13.9 Owner manual regression on staging
+
+Reported by the owner against staging running `bdd8731`, with **no personal data recorded** — no
+names, phone numbers, card links, QR values or screenshots. The agent did not perform, observe or
+verify these; they are recorded as the owner's results.
+
+| # | Check | Result |
+|---|---|---|
+| 1 | Staff searched an unregistered test number and created one card at the counter | pass |
+| 2 | The card received its welcome stamp | pass |
+| 3 | Searching the same number again returned the same card — no duplicate card, no second welcome bonus | pass |
+| 4 | Staff revealed the personal card link, and it opened on another device | pass |
+| 5 | Award followed by reversal restored the original balance | pass |
+| 6 | `/en/join/test` showed only the public withdrawal notice | pass |
+| 7 | The counter-enrolment flow displayed correctly in Arabic RTL | pass |
+
+These close the four manual rows the runbook added for the counter flow (rows 8–11) and repeat the
+reversal path that the first pass's §3.2 fix touched. Rows 1–7 of the runbook's device table remain
+closed from Prompt 2.
+
+**No code changed in this prompt**, so the tree audited here is the tree that was deployed and the
+tree those checks ran against. Had anything needed fixing, this section could not have been used to
+support a pass.
+
+### 13.10 What this gate does and does not say
+
+- It is the **engineering** gate. `PHASE-PLAN.md`'s **pilot** gate — one café, real daily
+  transactions, an owner-defined minimum scan count, no unreconciled discrepancy — is a separate
+  question that nothing here speaks to.
+- **Twenty-seven Medium and Low findings** now stand recorded (§7 and §13.6), each with an owner, a
+  rationale and a phase. **M-1 in particular blocks Phase 1b's arbitrary-reversal picker.**
+- **Public enrolment must not be re-enabled** until proof of phone ownership exists and has been
+  independently audited (decision B7).
+- No OCI contact, no deployment, no Caddy, DNS, firewall or secret access, and no real customer
+  data was used anywhere in this prompt.
+
+---
+
+**PASS — PHASE 1A ENGINEERING GATE PASSED**
+
+Every original Prompt 3 requirement and owner decision B7 option 3, audited at
+`bdd8731b53b4ed352e82573c79b41a6ebc7cc853`: the enumeration oracle is closed structurally rather
+than hidden, no Critical or High finding remains, every suite and audit is green locally and in CI
+on that exact commit, and the owner's manual regression on the same commit passed.
