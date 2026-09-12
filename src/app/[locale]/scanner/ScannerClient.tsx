@@ -795,7 +795,7 @@ export default function ScannerClient({
                       placeholder={t("purchaseAmount")}
                       aria-label={t("purchaseAmount")}
                       data-testid="scanner-purchase-amount"
-                      className="w-32 rounded-xl bg-navy-950/60 px-3 py-3 ring-1 ring-white/10"
+                      className="min-w-0 flex-1 rounded-xl bg-navy-950/60 px-3 py-3 text-sm ring-1 ring-white/10"
                     />
                     <button
                       type="button"
@@ -855,7 +855,7 @@ export default function ScannerClient({
                         placeholder={t("purchaseAmount")}
                         aria-label={t("purchaseAmount")}
                         data-testid="scanner-points-purchase-amount"
-                        className="w-32 rounded-xl bg-navy-950/60 px-3 py-3 ring-1 ring-white/10"
+                        className="min-w-0 flex-1 rounded-xl bg-navy-950/60 px-3 py-3 text-sm ring-1 ring-white/10"
                       />
                       <button
                         type="button"

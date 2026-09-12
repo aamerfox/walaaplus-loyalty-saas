@@ -175,6 +175,14 @@ export default function RegisterPage() {
 
         <div className="max-w-md mx-auto w-full">
           <div className="mb-6 mt-10">
+            {/*
+             * The splash panel carries the mark on a desktop and is hidden below `lg`, which left a
+             * merchant signing up on a phone — the common case — on an unbranded form. The colour
+             * treatment here, because this column is light.
+             */}
+            <Link href="/" aria-label="Zademi" className="mb-6 inline-flex lg:hidden">
+              <Wordmark height={28} className="h-7 w-auto" />
+            </Link>
             <h1 className="font-display text-3xl font-extrabold text-ink">{t("title")}</h1>
             <p className="mt-2 leading-relaxed text-ink-muted">{t("subtitle")}</p>
           </div>
