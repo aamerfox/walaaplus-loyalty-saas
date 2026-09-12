@@ -1,59 +1,74 @@
+import Image from "next/image";
 import { cn } from "@/lib/utils";
 
 /**
- * The Zademi wordmark.
+ * The Zademi logo.
  *
- * ## Why this is a text wordmark and not the logo
+ * The approved masters live in `public/brand/` exactly as they were supplied — the two SVGs are the
+ * canonical artwork, the PNGs are the approved treatments, and nothing in this repository traces,
+ * recolours or rasterises them. Everything a screen draws comes from one of those five files, or
+ * from a derivative rendered off the approved icon by `scripts/make-icons.mjs`.
  *
- * There is **no approved Zademi logo asset in this repository** — no SVG, no PNG, no source file.
- * The only artwork that exists is inside a PDF, and tracing it, extracting its paths or
- * approximating it by eye would put a drawing nobody approved on every screen of the product and on
- * every customer's home screen, where it is hardest to take back.
+ * | Component | Asset | Where |
+ * |---|---|---|
+ * | `<Wordmark />` | `Zademi-Logo.svg` | headers, sign-in, anywhere with room for the full logo |
+ * | `<Wordmark tone="white" />` | `Zademi-Logo-White.png` | navy and dark surfaces |
+ * | `<Wordmark tone="dark" />` | `Zademi-Logo-Dark.png` | tinted light surfaces wanting one flat colour |
+ * | `<BrandMark />` | `Zademi-Symbol.svg` | compact navigation, avatars, tight spaces |
  *
- * So this renders the product name in the brand's own type, next to a deliberately NEUTRAL mark: a
- * rounded navy tile with a turquoise diamond, which is a placeholder that looks finished rather
- * than a placeholder that looks broken. When the real asset arrives it replaces `<BrandMark>` and
- * nothing else changes.
+ * The SVGs are served `unoptimized`: Next's image optimiser declines SVG by default, and a vector
+ * that is already 35 KB and scales to any size has nothing to gain from being turned into a raster.
  *
- * The exact missing asset is recorded in `docs/BRAND.md`.
+ * `alt` is empty and `aria-hidden` is set wherever the logo sits next to the product name in text,
+ * because a screen reader announcing "Zademi Zademi" is worse than one that announces it once. The
+ * `aria-label` on the link is what carries the name in those places.
  */
 
-export function BrandMark({ className }: { className?: string }) {
+/** Intrinsic ratio of the full logo: 2048 × 544 in the master, so 3.76 : 1. */
+const LOGO_RATIO = 2048 / 544;
+
+export type BrandTone = "colour" | "dark" | "white";
+
+const LOGO_SRC: Record<BrandTone, string> = {
+  colour: "/brand/Zademi-Logo.svg",
+  dark: "/brand/Zademi-Logo-Dark.png",
+  white: "/brand/Zademi-Logo-White.png",
+};
+
+export function BrandMark({ className, size = 36 }: { className?: string; size?: number }) {
   return (
-    <span
+    <Image
+      src="/brand/Zademi-Symbol.svg"
+      alt=""
       aria-hidden="true"
-      className={cn(
-        "inline-flex shrink-0 items-center justify-center rounded-xl bg-navy-900 text-white shadow-sm",
-        "size-9",
-        className,
-      )}
-    >
-      {/* A diamond, from the brand's layered-diamond language. Geometry only: nothing traced. */}
-      <svg viewBox="0 0 24 24" className="size-5" fill="none" role="presentation">
-        <path d="M12 3.2 20.8 12 12 20.8 3.2 12 12 3.2Z" fill="#00B3A4" />
-        <path d="M12 7.6 16.4 12 12 16.4 7.6 12 12 7.6Z" fill="#0B2D5B" />
-      </svg>
-    </span>
+      width={size}
+      height={size}
+      unoptimized
+      priority
+      className={cn("shrink-0", className)}
+    />
   );
 }
 
 export function Wordmark({
   className,
-  markClassName,
-  showName = true,
+  tone = "colour",
+  height = 32,
 }: {
   className?: string;
-  markClassName?: string;
-  showName?: boolean;
+  tone?: BrandTone;
+  /** Rendered height in pixels. The width follows the master's own ratio. */
+  height?: number;
 }) {
   return (
-    <span className={cn("inline-flex items-center gap-2.5", className)}>
-      <BrandMark className={markClassName} />
-      {showName ? (
-        // Not translated, and not a message key: a product name is the same word in every locale,
-        // and putting it in the message files invites a well-meaning translation of it.
-        <span className="font-display text-xl font-extrabold tracking-tight text-ink">Zademi</span>
-      ) : null}
-    </span>
+    <Image
+      src={LOGO_SRC[tone]}
+      alt="Zademi"
+      width={Math.round(height * LOGO_RATIO)}
+      height={height}
+      unoptimized={tone === "colour"}
+      priority
+      className={cn("h-8 w-auto", className)}
+    />
   );
 }

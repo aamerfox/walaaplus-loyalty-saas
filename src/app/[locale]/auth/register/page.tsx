@@ -1,6 +1,6 @@
 "use client";
 
-import { BrandMark } from "@/components/brand/Wordmark";
+import { Wordmark } from "@/components/brand/Wordmark";
 import { useState, type FormEvent } from "react";
 import { useLocale, useTranslations } from "next-intl";
 import { signIn } from "next-auth/react";
@@ -146,9 +146,9 @@ export default function RegisterPage() {
         <div className="absolute bottom-0 left-0 w-96 h-96 bg-rose-500/20 rounded-full blur-3xl translate-y-1/2 -translate-x-1/2" />
 
         <div className="relative z-10">
-          <Link href="/" className="flex items-center gap-3">
-            <BrandMark className="size-12 bg-white" />
-            <span className="font-display text-2xl font-extrabold tracking-tight text-white">Zademi</span>
+          <Link href="/" aria-label="Zademi" className="inline-flex">
+            {/* A navy splash panel: the approved white treatment, not the colour logo dimmed. */}
+            <Wordmark tone="white" height={40} className="h-10 w-auto" />
           </Link>
         </div>
 

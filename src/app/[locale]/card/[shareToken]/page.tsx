@@ -44,9 +44,12 @@ export async function generateMetadata({ params }: { params: Promise<{ shareToke
  * switcher entry with. It belongs in `viewport`, not `metadata` - Next reads it from here, warns
  * about it there, and a value it warns about is a value it does not apply. Same indigo as the
  * manifest's `theme_color`; the two disagreeing is visible on an installed card.
+ *
+ * Zademi navy since the official brand assets landed. An installed card keeps the colour it was
+ * installed with until the manifest is re-read, which is the same caveat as its icon.
  */
 export const viewport: Viewport = {
-  themeColor: "#4f46e5",
+  themeColor: "#0B2D5B",
 };
 
 export default async function CardPage({ params }: { params: Promise<{ locale: string; shareToken: string }> }) {

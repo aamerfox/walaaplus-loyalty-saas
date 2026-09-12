@@ -33,6 +33,34 @@ export async function generateMetadata({ params }: { params: Promise<{ locale: s
     title: { default: t("productName"), template: `%s · ${t("productName")}` },
     description: t("tagline"),
     applicationName: t("productName"),
+    /*
+     * Icons, all rendered from the approved master by `scripts/make-icons.mjs`.
+     *
+     * `/favicon.ico` is listed explicitly as well as the PNGs: a browser that finds no `<link>` —
+     * a bare fetch of that path, a feed reader, a crawler — asks for it by name regardless.
+     */
+    icons: {
+      icon: [
+        { url: "/icons/favicon-32.png", sizes: "32x32", type: "image/png" },
+        { url: "/icons/favicon-16.png", sizes: "16x16", type: "image/png" },
+        { url: "/favicon.ico", sizes: "any" },
+      ],
+      apple: [{ url: "/icons/apple-touch-icon.png", sizes: "180x180", type: "image/png" }],
+    },
+    /*
+     * A link to a Zademi page shows the product, not a blank card. There is nothing tenant-specific
+     * here on purpose: the pages worth sharing are marketing, and the pages that are not shareable
+     * are capabilities that must never render a preview of a customer's card.
+     */
+    openGraph: {
+      title: t("productName"),
+      description: t("tagline"),
+      siteName: t("productName"),
+      locale: locale === "ar" ? "ar_SY" : "en_US",
+      type: "website",
+      images: [{ url: "/icons/card-512.png", width: 512, height: 512, alt: t("productName") }],
+    },
+    twitter: { card: "summary", title: t("productName"), description: t("tagline"), images: ["/icons/card-512.png"] },
     // A loyalty product is not content to index, and several of its pages are capabilities.
     robots: { index: false, follow: false },
   };

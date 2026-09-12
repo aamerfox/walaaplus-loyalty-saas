@@ -89,7 +89,7 @@ export default async function ProgramDetailPage({
       />
 
       <div className="flex flex-wrap items-center gap-2">
-        <Badge tone={program.status === "ACTIVE" ? "success" : "warn"}>{t(`status.${program.status}`)}</Badge>
+        <Badge tone={program.status === "ACTIVE" ? "success" : "warn"}>{t(`statuses.${program.status}`)}</Badge>
         <Badge tone="brand">{t("versionNumber", { number: program.versionNumber })}</Badge>
       </div>
 

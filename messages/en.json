@@ -363,6 +363,12 @@
     "stampsPerReward": "{count} stamps",
     "stampsRequired": "Stamps needed",
     "status": "Status",
+    "statuses": {
+      "ACTIVE": "Live",
+      "PAUSED": "Paused",
+      "DRAFT": "Draft",
+      "ARCHIVED": "Archived"
+    },
     "theReward": "The reward",
     "title": "Loyalty programs",
     "usageLimit": "Max {count} per card",

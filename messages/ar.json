@@ -363,6 +363,12 @@
     "stampsPerReward": "{count} ختم",
     "stampsRequired": "الأختام المطلوبة",
     "status": "الحالة",
+    "statuses": {
+      "ACTIVE": "فعّال",
+      "PAUSED": "متوقف مؤقتاً",
+      "DRAFT": "مسودة",
+      "ARCHIVED": "مؤرشف"
+    },
     "theReward": "المكافأة",
     "title": "برامج الولاء",
     "usageLimit": "بحد أقصى {count} لكل بطاقة",

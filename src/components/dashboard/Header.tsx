@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Globe, Menu, X } from "lucide-react";
 import { useLocale, useTranslations } from "next-intl";
 import { useRouter, usePathname } from "@/i18n/routing";
+import { BrandMark } from "@/components/brand/Wordmark";
 import Sidebar from "./Sidebar";
 
 /**
@@ -39,6 +40,10 @@ export default function Header({ businessName, userInitials }: { businessName: s
         >
           <Menu className="size-6" aria-hidden="true" />
         </button>
+
+        {/* The symbol, not the full logo: at phone width the bar belongs to the business name, and
+            the drawer behind the menu button carries the wordmark. */}
+        <BrandMark size={28} className="lg:hidden" />
 
         <div className="min-w-0 flex-1">
           <p className="truncate font-display text-base font-bold text-ink sm:text-lg" data-testid="current-business">

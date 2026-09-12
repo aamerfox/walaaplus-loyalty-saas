@@ -87,7 +87,7 @@ export default async function ProgramsPage({ params }: { params: Promise<{ local
                 <div className="flex justify-between gap-3 py-1">
                   <dt>{t("status")}</dt>
                   <dd>
-                    <Badge tone={program.status === "ACTIVE" ? "success" : "warn"}>{t(`status.${program.status}`)}</Badge>
+                    <Badge tone={program.status === "ACTIVE" ? "success" : "warn"}>{t(`statuses.${program.status}`)}</Badge>
                   </dd>
                 </div>
                 <div className="flex justify-between gap-3 py-1">

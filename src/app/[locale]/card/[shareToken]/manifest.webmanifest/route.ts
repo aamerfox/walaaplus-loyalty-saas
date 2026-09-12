@@ -31,8 +31,11 @@ export async function GET(_req: Request, { params }: { params: Promise<{ locale:
         scope: start,
         display: "standalone",
         orientation: "portrait",
-        background_color: "#09090b",
-        theme_color: "#4f46e5",
+        // Zademi navy. This is the tint an installed card paints its status bar and task-switcher
+        // entry with, so it is brand surface rather than decoration - and it must match the
+        // `themeColor` the card page declares, or the two disagree on a real phone.
+        background_color: "#071D3B",
+        theme_color: "#0B2D5B",
         dir: locale === "ar" ? "rtl" : "ltr",
         lang: locale,
         icons: [
