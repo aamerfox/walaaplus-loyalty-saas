@@ -428,6 +428,24 @@ describe("stamp engine", () => {
       expect(reversal.stampBalance).toBe(0);
       expect(reversal.rewardBalance).toBe(0);
       expect(await prisma.loyaltyOperation.count({ where: { transactionGroupId: reversal.transactionGroupId } })).toBe(3);
+
+      /*
+       * Every snapshot inside the compensating group is non-negative.
+       *
+       * The rows of one group all share `createdAt` - it defaults to CURRENT_TIMESTAMP, which in
+       * PostgreSQL is the TRANSACTION timestamp - so the order the database returns them in is
+       * arbitrary. The reversal used to depend on that order and would be refused outright when
+       * the debit came first. Asserting the snapshots, rather than only the final balance, is what
+       * makes this test sensitive to the order at all.
+       */
+      const rows = await prisma.loyaltyOperation.findMany({
+        where: { transactionGroupId: reversal.transactionGroupId },
+        select: { unitType: true, quantity: true, balanceAfter: true },
+      });
+      for (const row of rows) {
+        expect(row.balanceAfter, `${row.unitType} ${row.quantity} snapshot`).toBeGreaterThanOrEqual(0);
+      }
+
       await expectReconciled(cafe.businessId);
     });
 

@@ -289,6 +289,44 @@ export interface ReverseGroupInput {
  *  - any resulting balance would go negative (e.g. the earned reward was already redeemed) —
  *    that case needs a manual correction, and the error says so.
  */
+/**
+ * The order compensating rows must be applied in: **every credit before every debit**.
+ *
+ * The previous code took the group `ORDER BY "createdAt" ASC` and reversed it. That reads as
+ * "undo in the opposite order", which is the right instinct and the wrong mechanism: `createdAt`
+ * defaults to `CURRENT_TIMESTAMP`, which in PostgreSQL is the **transaction** timestamp, so every
+ * row written by one group carries an identical value. The sort had nothing to order by, and
+ * PostgreSQL is free to return tied rows in any order it likes — which changes with the plan and
+ * with table size.
+ *
+ * That mattered because `appendOperationGroup` validates the balance after EVERY row, not just at
+ * the end. Undo an award that had converted to a reward, get the rows back in an unlucky order,
+ * and the running balance dips below zero mid-group: the reversal is refused with "dependent value
+ * was already consumed", blaming the merchant for a state that does not exist, and no retry ever
+ * succeeds. The two integration tests that cover reversal passed only because small result sets
+ * happen to come back in heap order.
+ *
+ * Applying all credits first maximises every intermediate balance, so if ANY order avoids a
+ * negative intermediate this one does, and if this one dips then no order would have worked and
+ * the refusal is real. Ties among credits, or among debits, cannot change that — which is why this
+ * sort does not need a tiebreaker to be deterministic in the property that matters.
+ *
+ * The durable fix is a `sequence` column written from the loop index, giving the group a true
+ * order for history and for a per-row `balanceAfter` audit. That needs a migration and is recorded
+ * as a Phase 1b item; this function is correct without it.
+ */
+export function orderCompensating<T extends { quantity: number }>(compensating: readonly T[]): T[] {
+  // Credits (positive) first, then debits. `sort` is stable in V8, so rows of the same sign keep
+  // the order the database gave them.
+  //
+  // Note the argument: these are the COMPENSATING rows, already negated — not the originals. The
+  // first attempt at this fix sorted the originals, which puts the row whose negation is a debit
+  // first and fails exactly as before. An integration test caught it; the unit test did not,
+  // because it was handed compensating rows directly and was therefore testing the right function
+  // called the wrong way.
+  return [...compensating].sort((a, b) => Math.sign(b.quantity) - Math.sign(a.quantity));
+}
+
 export async function reverseOperationGroup(input: ReverseGroupInput, db: DbClient = prisma): Promise<AppendResult> {
   validateActor(input.actor);
   if (!input.reason?.trim()) throw new ValidationError("A reversal requires a reason");
@@ -322,17 +360,19 @@ export async function reverseOperationGroup(input: ReverseGroupInput, db: DbClie
     });
     if (already > 0) throw new ConflictError("This transaction group has already been reversed", ConflictCode.ALREADY_REVERSED);
 
-    const compensating: OperationInput[] = [...originals].reverse().map((o) => ({
-      kind: OperationKind.REVERSAL,
-      unitType: o.unitType,
-      quantity: -o.quantity,
-      purchaseAmountMinor: o.purchaseAmountMinor == null ? null : -o.purchaseAmountMinor,
-      monetaryDeltaMinor: o.monetaryDeltaMinor == null ? null : -o.monetaryDeltaMinor,
-      redemptionValueMinor: o.redemptionValueMinor == null ? null : -o.redemptionValueMinor,
-      rewardTierId: o.rewardTierId,
-      reason: input.reason,
-      reversalOfOperationId: o.id,
-    }));
+    const compensating: OperationInput[] = orderCompensating(
+      originals.map((o) => ({
+        kind: OperationKind.REVERSAL,
+        unitType: o.unitType,
+        quantity: -o.quantity,
+        purchaseAmountMinor: o.purchaseAmountMinor == null ? null : -o.purchaseAmountMinor,
+        monetaryDeltaMinor: o.monetaryDeltaMinor == null ? null : -o.monetaryDeltaMinor,
+        redemptionValueMinor: o.redemptionValueMinor == null ? null : -o.redemptionValueMinor,
+        rewardTierId: o.rewardTierId,
+        reason: input.reason,
+        reversalOfOperationId: o.id,
+      })),
+    );
 
     try {
       return await appendOperationGroup(

@@ -49,8 +49,28 @@ export async function reconcileCardBalances(
     " AND ",
   );
 
+  /*
+   * The `cards` CTE exists so the ledger aggregate can be bounded by it.
+   *
+   * This query used to aggregate the WHOLE of `LoyaltyOperation` and then join the filtered card
+   * set to it. `cardFilter` sits on the preserved side of a LEFT JOIN, so PostgreSQL cannot push
+   * it into the nullable aggregated side — checking ONE card cost a full scan and hash-aggregate
+   * of every tenant's ledger. That is the fastest-growing table in the product and this is the
+   * query Phase 1.5 schedules nightly.
+   *
+   * The ledger is narrowed by CARD IDENTITY, not by `o."businessId"`. That distinction is the
+   * point: this function exists to detect corruption, and a detector must not filter its input by
+   * a column that could be part of the corruption. An operation row pointing at a card under
+   * review is counted here whatever its own `businessId` says — exactly as before.
+   */
   const rows = await db.$queryRaw<Row[]>`
-    WITH ledger AS (
+    WITH cards AS (
+      SELECT c.id, c."businessId",
+             c."stampBalance", c."pointBalance", c."rewardBalance", c."cashBalanceMinor", c."visitBalance"
+      FROM "CustomerCard" c
+      WHERE ${cardFilter}
+    ),
+    ledger AS (
       SELECT o."customerCardId" AS card_id,
              COALESCE(SUM(o.quantity) FILTER (WHERE o."unitType" = 'STAMP'),  0)::int AS l_stamp,
              COALESCE(SUM(o.quantity) FILTER (WHERE o."unitType" = 'POINT'),  0)::int AS l_point,
@@ -58,6 +78,7 @@ export async function reconcileCardBalances(
              COALESCE(SUM(o.quantity) FILTER (WHERE o."unitType" = 'CASH'),   0)::int AS l_cash,
              COALESCE(SUM(o.quantity) FILTER (WHERE o."unitType" = 'VISIT'),  0)::int AS l_visit
       FROM "LoyaltyOperation" o
+      WHERE o."customerCardId" IN (SELECT id FROM cards)
       GROUP BY o."customerCardId"
     )
     SELECT c.id, c."businessId",
@@ -67,9 +88,8 @@ export async function reconcileCardBalances(
            COALESCE(l.l_reward, 0) AS l_reward,
            COALESCE(l.l_cash, 0)   AS l_cash,
            COALESCE(l.l_visit, 0)  AS l_visit
-    FROM "CustomerCard" c
-    LEFT JOIN ledger l ON l.card_id = c.id
-    WHERE ${cardFilter}`;
+    FROM cards c
+    LEFT JOIN ledger l ON l.card_id = c.id`;
 
   const mismatches: BalanceMismatch[] = [];
   const pairs: Array<[UnitType, keyof Row, keyof Row]> = [
