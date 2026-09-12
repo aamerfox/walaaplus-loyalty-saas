@@ -12,6 +12,10 @@
 **PASS — the configuration is written, validated locally, and ready for review.** It has not been
 deployed, and deploying it is not part of this task.
 
+**Round 5 (§12): staging is LIVE and healthy, and the product had a hole in the middle of it.**
+`https://staging.truebiznes.com` serves, but no owner-facing screen created a loyalty program, so
+no enrolment link existed and real-device testing could not begin. Fixed. See §12.
+
 **Round 4 (§11): the second deployment attempt got further and found the next defect, also
 fixed.** Database healthy, migrations applied, runtime role created, `web` and `worker` started,
 and then the deployment correctly stopped before Caddy because the `web` container was unhealthy:
@@ -60,7 +64,9 @@ nothing was pushed.
 | 11 | `6f0c270` | docs(ops): correct the migrate failure message an operator will read |
 | 12 | `887d18a` | fix(deploy): bind the standalone server on container loopback, and prove it in a real container |
 | 13 | `05c89e3` | docs: the web container health remediation |
-| 14 | (this commit) | docs: fill in row 13 |
+| 14 | `0c1db70` | docs: fill in row 13 |
+| 15 | `7cf9e37` | feat(business): the owner can create the loyalty card, and get the link customers scan |
+| 16 | (this commit) | docs: the owner bootstrap remediation |
 
 Files in commit 1:
 
@@ -318,10 +324,10 @@ Every item here was in reach and was left alone on purpose.
 | # | Sev | Item | Follow-up |
 |---|---|---|---|
 | ~~C-1~~ | **CLOSED in round 2 (§9.1)** | ~~`TRUST_PROXY_HEADERS=true` trusts every local process here.~~ The setting is now `false` and a test prevents its return. The residual is that per-IP rate limiting is unavailable in this shape, which is a documented consequence rather than a defect | Recoverable by moving to a dedicated server (`docker-compose.staging.yml`) |
-| C-2 | Low | ~~The co-hosted stack has never been run.~~ **Two attempts: the first failed inside `migrate` (§10), the second reached a started application and failed its web healthcheck (§11). Both are fixed.** The stack still has not completed a full healthy start on that host | Owner/OCI agent, resume at runbook §13.4 |
+| ~~C-2~~ | **CLOSED (§12.1)** | ~~The co-hosted stack has never been run.~~ Three attempts: the first failed inside `migrate` (§10), the second failed its web healthcheck (§11), and the third **succeeded — staging is live and healthy at the staging hostname** | — |
 | C-3 | Low | `staging.truebiznes.com` is now hardcoded in the fragment | Correct for a reviewed fragment naming one site. If the hostname changes, the fragment changes with it |
 | C-4 | Low | Backups (§6) write to the same host they protect | Unchanged from before; owner decision C2 |
-| C-5 | Low | The real-device checklist (§12) is still unperformed | Blocked until staging is live; unchanged by this work |
+| C-5 | Low | The real-device checklist is still unperformed. **It is now possible**: staging is live and an owner can create a card and get a link to point a phone at (§12)** | Owner, runbook §13 checklist |
 
 ---
 
@@ -925,4 +931,170 @@ the schema is up to date, and `db-roles.mjs` will re-apply the grants it already
 
 ---
 
-**PASS — WEB CONTAINER HEALTH REMEDIATION COMPLETE — READY TO RESUME STAGING DEPLOYMENT**
+---
+
+## 12. Round 5 — staging is live, and the owner bootstrap that was missing
+
+### 12.1 Staging status
+
+**The deployment succeeded.** `https://staging.truebiznes.com` is live and healthy: the database
+came up, migrations applied, the restricted runtime role was created, `web` and `worker` started
+and both report healthy, and the host Caddy serves the site over HTTPS. The fixes from §10 and §11
+both held.
+
+**Real-device testing still could not begin**, for a reason that had nothing to do with the
+deployment.
+
+### 12.2 The gap
+
+A real owner could sign up and get a business, a Main location and an OWNER membership. The stamp
+engine could award, redeem and reverse. `createStampProgram()` already created the template, the
+immutable version, the reward tier and the direct enrolment source atomically, with a row lock and
+a one-program rule.
+
+**Nothing called it.** No owner-facing route or page invoked that service, so:
+
+- no merchant could create a loyalty card;
+- therefore no enrolment link or QR existed;
+- therefore no customer could join;
+- therefore the manual checklist in §8 — install the PWA, scan a card with a camera — had nothing
+  to point a phone at.
+
+Every service was in place and unreachable from a browser. The only ways to start a pilot were to
+seed the database by hand or to expose an admin endpoint, and both were explicitly ruled out: the
+first is not a product, and the second is a permanent hole opened to solve a temporary problem.
+
+### 12.3 What was built — `7cf9e37`
+
+`/{locale}/business/program`, owner-facing, with two states:
+
+| State | Screen |
+|---|---|
+| No card yet | A five-field form: card name, stamps per reward, reward name, optional reward description, optional welcome stamps |
+| A card exists | Its enrolment link, a QR, a copy action, and the next step — add a cashier, or open the scanner |
+
+The second state is not politeness. Phase 1a is one active program per business, enforced by the
+service with a row lock and a 409, and a screen that keeps offering a button the server will
+refuse teaches its user to distrust it.
+
+**No domain logic was added or duplicated.** `POST /api/staff/program` validates five fields, fills
+in the settings this phase does not offer, and calls `createStampProgram()`. The schema is
+**strict**, so a body carrying `earnMode`, `spendAmountPerBlockMinor`, `dailyAwardLimit`,
+`requirePurchaseAmount`, `rewardValueMinor`, `contractVersion` or `locationId` is refused rather
+than quietly honoured — each is a test case.
+
+**Phase 1a constraints preserved**, verified by grep and by test: one active program per business;
+Main location only, resolved server-side, with no screen, URL or body able to name a location; and
+no points, cashback, discount, multi-card, multi-location, template editing, version editing,
+automation or GHL surface anywhere in the flow. No Prisma call exists outside `src/server`.
+
+### 12.4 The enrolment token is treated as a capability
+
+It is enough to enrol customers into a business, so:
+
+- the read is tenant-scoped and requires `VIEW_TEMPLATES`, which a **CASHIER does not hold**.
+  A cashier who opens the page is told they cannot see it, not shown an empty form;
+- creation requires `EDIT_TEMPLATES` through the service, checked again beneath the route;
+- a **cross-tenant** caller naming someone else's business gets 403, and the response body contains
+  neither that business's token nor its name — asserted, not assumed;
+- **the token never reaches the audit log.** A test creates a program and asserts the token appears
+  in no audit row for that business. Audit rows are read by more people, and kept longer, than the
+  screen that legitimately shows it;
+- the **QR is rendered server-side as inline SVG**. A QR fetched from an image service would hand
+  the token to that service on every render. A test asserts the only URL in the markup is the SVG
+  namespace.
+
+### 12.5 Two details worth naming
+
+**The link carries no locale prefix.** `https://…/join/<token>` is negotiated to the visitor's
+language, falling back to Arabic. A printed QR outlives the decision about which language the
+person holding it reads. The origin comes from configuration, not from a request header: `Host`
+and `X-Forwarded-Host` are attacker-influenced, and this value gets printed onto a table card a
+merchant then trusts.
+
+**A second submission returns the existing program**, with `created: false`, rather than an error.
+A double tap on a slow connection should still land the owner on their link. Two racing requests
+are tested to produce exactly one program.
+
+### 12.6 A defect the browser test found
+
+The form called `router.refresh()` after a successful create. The refreshed server render replaced
+the component with the page's own "a program exists" branch, which has nothing to confirm — so the
+owner's "your card is ready" message appeared and **vanished**.
+
+It passed when run alone and failed in the full suite, because the race is only visible when the
+machine is busy. The response already carries everything the screen needs, including the QR, so
+the refresh is gone. The e2e still reloads the page afterwards to prove the link persists.
+
+### 12.7 Tests
+
+**Twelve integration tests** in `tests/integration/owner-program-route.test.ts`:
+
+| Requirement | Covered by |
+|---|---|
+| Owner creates exactly one program and receives its link | one template, one ACTIVE version, one tier, one source; the URL carries the source's token and neither the business id nor the template id |
+| Repeated submission creates no second program | a second call returns 200, `created: false`, the ORIGINAL name and link; template count stays 1 |
+| Double submission, raced | two concurrent calls: statuses `[200, 201]`, one template, identical links |
+| Existing owner sees the original link | through `getStampProgramOverview`, the same service the page uses, and the route agrees with it |
+| Cashier refused | 403 on create, and the tenant-scoped read rejects them too |
+| Cross-tenant refused | 403; the body leaks neither token nor business name; neither business is modified |
+| Public enrolment works from the displayed link | the token from the URL enrols a customer through the real public route; the card lands in the right business with the chosen welcome bonus |
+| QR resolves to the same URL | the returned SVG equals `qrSvg(enrollmentUrl)` exactly, and differs for a URL one character apart |
+
+Plus: unauthenticated refused; the strict-schema cases; the welcome-bonus rule from the mechanics
+contract; zero welcome stamps meaning none; and the audit-log check.
+
+**Playwright** — `tests/e2e/owner-bootstrap.spec.ts`, the complete owner-to-customer journey: an
+account exactly as registration leaves it, sign in, land on an empty card screen, fill five fields,
+see the confirmation, the QR and the link, reload and get the same link rather than a second form,
+then open that exact URL in a **second browser context** as a customer and join — arriving on a
+card with the welcome stamp the owner chose.
+
+### 12.8 Verification, on `7cf9e37`
+
+```
+GATE SUMMARY
+PASS  dependency audit (prod, high+)             1846 ms
+PASS  prisma generate                            1620 ms
+PASS  lint                                       5745 ms
+PASS  typecheck                                  5059 ms
+PASS  prisma validate                            1475 ms
+PASS  unit tests                                 1547 ms
+PASS  test db up                                  948 ms
+PASS  migrate deploy (test db, migrator role)    5916 ms
+PASS  migrate status (test db)                   5619 ms
+PASS  runtime role grants (test db)               153 ms
+PASS  integration tests                        203685 ms
+PASS  worker build                                136 ms
+PASS  production build                          14183 ms
+PASS  migrate image dependencies                 2715 ms
+PASS  web image container health                24595 ms
+GATE PASSED in 275.2s (15/15 steps)
+```
+
+| Check | Result |
+|---|---|
+| unit / integration | **209** / **380** (589 total, 45 files) |
+| `npm run test:e2e` | **4 passed**, run twice for stability |
+| `npm audit --omit=dev --audit-level=high` | **0 vulnerabilities** |
+| `npm audit` (full tree) | **0 vulnerabilities** |
+| `git diff --check` | clean |
+| Prisma writes outside `src/server` | **none** |
+| `locationId` anywhere under `src/app` | **none** |
+
+**No migration was added.** The schema is unchanged: this flow uses tables that already existed.
+
+### 12.9 What this round did not do
+
+- **No staging deployment.** The fix is committed and pushed; updating staging is the owner's step.
+- **No real-device check was performed.** §8's checklist remains unperformed — but it is now
+  *possible*, which it was not before, because an owner can obtain a link and a QR to point a
+  phone at.
+- **No database was seeded and no admin endpoint was exposed**, as required.
+- **No application behaviour outside this flow changed.** The stamp engine, the ledger, the
+  scanner, the enrolment route and the Compose files are untouched.
+- `master` is untouched at `b9ee686`.
+
+---
+
+**PASS — OWNER PILOT BOOTSTRAP COMPLETE — READY TO UPDATE STAGING**
