@@ -730,8 +730,9 @@ support a pass.
 - It is the **engineering** gate. `PHASE-PLAN.md`'s **pilot** gate — one café, real daily
   transactions, an owner-defined minimum scan count, no unreconciled discrepancy — is a separate
   question that nothing here speaks to.
-- **Twenty-seven Medium and Low findings** now stand recorded (§7 and §13.6), each with an owner, a
-  rationale and a phase. **M-1 in particular blocks Phase 1b's arbitrary-reversal picker.**
+- **Twenty-eight Medium and Low findings** now stand recorded, each with an owner, a rationale and
+  a phase: twenty-two in §7, **M-9** in §8, and five in §13.6. **M-1 in particular blocks Phase 1b's
+  arbitrary-reversal picker.**
 - **Public enrolment must not be re-enabled** until proof of phone ownership exists and has been
   independently audited (decision B7).
 - No OCI contact, no deployment, no Caddy, DNS, firewall or secret access, and no real customer
