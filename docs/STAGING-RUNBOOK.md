@@ -406,11 +406,15 @@ SMS provider, and any public API credential or webhook.
 
 ---
 
-## 12. After staging is live: the real-device checklist
+## 12. After staging is live: the real-device checklist — PASSED 2026-09-12
 
 These are the checks that HTTPS staging exists in order to make possible. **The owner performs
 them on physical phones.** Record who ran each one and what happened in
 `docs/evidence/phase-1a-prompt-2.md`; do not mark any of them as automated.
+
+**Status: every row below was performed by the owner on 2026-09-12 and passed**, against staging
+running commit `c759d78`. The table is kept as the procedure to repeat after a change that could
+affect any of it — a new service worker, a new manifest, or anything touching the camera.
 
 | # | Check | Device | Expected |
 |---|---|---|---|
@@ -423,14 +427,15 @@ them on physical phones.** Record who ran each one and what happened in
 | 6 | Service worker caches nothing | Either, DevTools | Application → Cache Storage is empty; no cached card responses |
 | 7 | Arabic RTL and English LTR | Both | Layout correct in both locales at phone width |
 
-Only when every row above has been performed and recorded may Phase 1a Prompt 2 be called
-complete.
+Every row above has been performed and recorded, so Phase 1a Prompt 2's manual gate is complete.
 
-**Rows 4a and 4b both failed on the first real attempt**, for two different reasons: Safari was
-told it had no camera before any prompt, and Android granted permission and then showed nothing
-at all. Both are fixed in code (evidence §14) and **neither has been retested**, because the
-fixed build is not deployed. Retest both after the next staging update; a pass on one is not a
-pass on the other, and they failed for unrelated reasons.
+**Rows 4a and 4b both failed on the first real attempt**, for two different and unrelated reasons:
+Safari was told it had no camera before any prompt, and Android granted permission and then showed
+nothing at all. Both were fixed in code (evidence §14) and **both have since been retested on the
+deployed build and passed** (evidence §15).
+
+That history is the reason 4a and 4b are separate rows and should stay separate: a pass on one has
+never been a pass on the other. Run both.
 
 ---
 

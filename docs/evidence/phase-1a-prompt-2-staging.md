@@ -296,28 +296,31 @@ workflows have not run on a server. Every figure above was produced locally.
 
 ---
 
-## 8. Real-device checklist — NOT performed
+## 8. Real-device checklist — PASSED, later, by the owner
 
-Preparing this checklist was task 5, and task 5 is conditional on staging being live. **It is
-not.** The checklist is written and waiting in
-[STAGING-RUNBOOK.md §12](../STAGING-RUNBOOK.md); every row is unperformed, and none may be
-recorded as automated.
+**When this file was written every row was unperformed, because staging did not exist.** That is
+what the rest of this document is about. Staging was later deployed, and on **2026-09-12** the
+owner performed every row on physical phones against the build running commit `c759d78`.
 
-| # | Check | Who performs it | Status |
+The canonical record is [phase-1a-prompt-2.md §8](phase-1a-prompt-2.md); this table is updated so
+it cannot be read later as an open item.
+
+| # | Check | Who performed it | Status |
 |---|---|---|---|
-| 1 | Android Chrome offers "Install app"; the icon opens standalone | Owner, on an Android phone | ⬜ not performed — no HTTPS origin |
-| 2 | iOS Safari "Add to Home Screen" gives a standalone card | Owner, on an iPhone | ⬜ not performed — no HTTPS origin |
-| 3 | Three cards install as three separate apps | Owner, on an Android phone | ⬜ not performed — no HTTPS origin |
-| 4 | Real camera scan of a printed card QR resolves the customer | Owner, on an Android phone | ⬜ not performed — camera needs a secure context |
-| 5 | Denied camera permission falls back to phone lookup | Owner, on a phone | ⬜ not performed — no HTTPS origin |
-| 6 | The service worker caches no card responses | Owner, DevTools on a phone | ⬜ not performed — no HTTPS origin |
-| 7 | Arabic RTL and English LTR reviewed at phone width | Owner, on a phone | ⬜ not performed — no device access |
+| 1 | Android Chrome offers "Install app"; the icon opens standalone | Owner, on an Android phone | ✅ passed |
+| 2 | iOS Safari "Add to Home Screen" gives a standalone card | Owner, on an iPhone | ✅ passed |
+| 3 | Three cards install as three separate apps, with no shared balances | Owner, on an Android phone | ✅ passed |
+| 4 | Real camera scan of a printed card QR resolves the customer | Owner, on **both** an Android phone and an iPhone | ✅ passed on both |
+| 5 | Denied camera permission falls back to mobile-number lookup | Owner, on a phone | ✅ passed |
+| 6 | The service worker caches no card responses | Owner, DevTools on a phone | ✅ passed — Cache Storage empty |
+| 7 | Arabic RTL and English LTR reviewed at phone width | Owner, on a phone | ✅ passed |
 
-The agent has no authorized physical device access, so no row could be performed by the agent
-either.
+The agent has no authorized physical device access, so no row was performed by the agent — then
+or now. Every result above is the owner's.
 
-**HTTPS verification:** not available. No certificate was requested, issued or inspected, because
-there is no hostname to request one for.
+**HTTPS verification:** not available *when this file was written*. No certificate was requested,
+issued or inspected at that time, because there was no hostname to request one for. Staging has
+since been deployed over HTTPS and the checks above ran against it.
 
 ---
 
@@ -394,8 +397,8 @@ No critical or high issue remains open. Everything below is Low unless marked.
 
 | # | Sev | Item | Why acceptable now | Follow-up |
 |---|---|---|---|---|
-| **B-1** | **Blocked** | No staging deployment exists; installability and camera scanning unverified | Requires B1, B2, B3 and explicit authorization. Nothing may be invented | Owner: B1–B3, then §8 |
-| **B-2** | **Blocked** | The staging stack has never been *run*, only validated | Compose validity, resolved exposure and startup order are proven statically; a first real `up` may still surface a host-specific problem (DNS, port 80 taken, an existing nginx) | Owner: first deployment, following the runbook |
+| ~~B-1~~ | **CLOSED** | ~~No staging deployment exists; installability and camera scanning unverified.~~ Staging was deployed, and the owner verified installability and camera scanning on real phones on 2026-09-12 (§8) | — |
+| ~~B-2~~ | **CLOSED** | ~~The staging stack has never been run, only validated.~~ It has been deployed and is serving; the problems a first `up` surfaced are recorded in `phase-1a-prompt-2-cohost-config.md` §10, §11 and §14, and all are fixed | — |
 | L-21 | Low | Copying dumps off the host is manual | It needs a storage credential the agent must never hold | Owner decision C2 |
 | L-22 | Low | The restore drill runs beside the live database, not on a separate host | It proves the archive restores and carries data; it does not prove a cold rebuild | Owner decision C3, before the pilot |
 | L-23 | Low | `.env.production.example` is stale and misleading | Predates the rebuild; names Stripe, Twilio, OneSignal, Apple/Google Wallet, SMTP, `DIRECT_URL`, none of which exist here. Git-ignored, never committed, and the template for nothing. Documented in runbook §11 | Owner deletes it; the agent did not, as it is a local file it did not create |
@@ -433,4 +436,7 @@ No critical or high issue remains open. Everything below is Low unless marked.
 
 ---
 
-**BLOCKED — PHASE 1A PROMPT 2 HTTPS STAGING — owner decisions B1 (hosting), B2 (staging domain) and B3 (HTTPS certificate and DNS readiness) are all still open, and no deployment authorization was given; there is no host, hostname or DNS record to deploy to, so no certificate could be issued and the seven real-device checks in §8 remain unperformed. The password-format blocker raised in review is fixed and verified (§8a). All staging configuration, the runbook, the backup and restore-verification scripts, and every local check are complete and passing on `29a1642`**
+**SUPERSEDED — this round ended BLOCKED on owner decisions B1, B2 and B3, which have since been
+answered. Staging was deployed, the real-device checks in §8 were performed by the owner on
+2026-09-12, and Phase 1a Prompt 2's manual gate is complete. The original blocking line is
+recorded in the git history of this file rather than restated here as though it still held.**

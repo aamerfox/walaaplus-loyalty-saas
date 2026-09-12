@@ -10,10 +10,13 @@
 
 ## 1. Result
 
-**BLOCKED on owner decision B3.** Every code deliverable and every automated check is complete and
-passing. The engineering gate for this prompt cannot be *claimed* complete because browser
-installability and real-camera scanning require an HTTPS staging URL that does not exist yet, and
-the prompt makes that a hard prerequisite.
+**COMPLETE.** Every code deliverable, every automated check, and — as of 2026-09-12 — every
+real-device manual check has passed. The manual rows were performed by the owner on physical
+phones against staging running commit `c759d78`; see §8.
+
+This file originally reported `BLOCKED on owner decision B3`, because there was no HTTPS staging to
+verify installability or camera scanning against. That was true when written. Staging now exists,
+the checks have been run, and §8.1 records what changed rather than overwriting it.
 
 | Check | Result |
 |---|---|
@@ -26,7 +29,7 @@ the prompt makes that a hard prerequisite.
 | `git diff --check`; working tree | clean; clean |
 | Typecheck, lint (`--max-warnings=0`), production build | pass, pass, pass |
 
-**What is blocked, precisely:** items 1–5 of the manual checklist in §8. Nothing else.
+**What was blocked, and no longer is:** items 1–5 of the manual checklist in §8. All now passed.
 
 Nothing was pushed, deployed or provisioned. No migration was required.
 
@@ -205,28 +208,63 @@ New in this prompt — 54 integration tests and the browser journey:
 
 ---
 
-## 8. Manual verification checklist — NOT automated, NOT performed
+## 8. Manual verification checklist — PASSED, by the owner, on real devices
 
-These require an HTTPS origin on a real device. **None of them has been done, and none is claimed.**
-Owner decisions B1 (hosting), B2 (staging domain) and B3 (HTTPS certificate) are all still open in
-`docs/DECISIONS-REQUIRED.md`.
+**Every row below was performed by the owner on physical phones and confirmed on 2026-09-12**,
+against the staging deployment running commit `c759d78`. None of these is automated, and none is
+claimed to be: they are a person holding a phone, which is the only way any of them can be
+answered.
 
-| # | Check | Needs | Status |
+No personal data is recorded here. No names, phone numbers, QR values, enrolment links,
+credentials or screenshots — a card's QR is a capability, and an evidence file is read by more
+people and kept longer than the screen that legitimately shows it.
+
+| # | Check | Device | Result |
 |---|---|---|---|
-| 1 | Android Chrome offers "Install app" on a card page, and the installed icon opens standalone | HTTPS staging | ⬜ not performed |
-| 2 | iOS Safari "Add to Home Screen" produces a standalone card with the right name and icon | HTTPS staging + a device | ⬜ not performed |
-| 3 | Three cards from three businesses install as **three separate** home-screen icons | HTTPS staging | ⬜ not performed |
-| 4 | A real camera scan of a printed card QR resolves the customer in the scanner | HTTPS (camera needs a secure context) + an Android device | ⬜ not performed |
-| 5 | Camera permission refusal degrades to phone lookup without a dead end | HTTPS + a device | ⬜ not performed |
-| 6 | The service worker registers, and the Application panel shows **no cached card responses** | HTTPS staging | ⬜ not performed |
-| 7 | Arabic RTL and English LTR reviewed on a real phone at both locales | a device | ⬜ not performed |
+| 1 | Android Chrome offers "Install app" on a card page, and the installed icon opens standalone | Android | ✅ passed |
+| 2 | iOS Safari "Add to Home Screen" produces a standalone card | iPhone, Safari | ✅ passed |
+| 3 | Three cards from three businesses install as **three separate** home-screen icons, and none shows another's balance | Android | ✅ passed — separate, no cross-exposure |
+| 4a | A real camera scan of a printed card QR resolves the customer | Android (Huawei) | ✅ passed |
+| 4b | A real camera scan of a printed card QR resolves the customer | iPhone, Safari | ✅ passed |
+| 5 | Camera permission refusal degrades to mobile-number lookup without a dead end | phone | ✅ passed — the cashier has a usable fallback |
+| 6 | The service worker registers, and Cache Storage shows **no cached card responses** | phone, DevTools | ✅ passed — Cache Storage empty |
+| 7 | Arabic RTL and English LTR reviewed on a real phone in both locales | phone | ✅ passed at phone width |
 
-What *is* automated and did pass: the manifest is served with the right `id`/`scope`/`display` and
-locale direction, every icon it names returns 200, `sw.js` is served and contains no cache or
-`fetch` handler, and the card renders its QR as inline SVG. Those are necessary conditions for
-installability, not proof of it.
+**The full café loop was exercised end to end on the deployed build**, beyond the seven rows
+above:
 
-**Has the owner supplied HTTPS staging?** No. This is the blocker.
+| Step | Result |
+|---|---|
+| Owner registration through the UI | ✅ |
+| Loyalty-program creation through the UI | ✅ |
+| Customer enrolment from the public link | ✅ |
+| Welcome stamp granted on enrolment | ✅ |
+| Stamp awarding at the counter | ✅ |
+| Automatic reward conversion on reaching the threshold | ✅ |
+| Reward redemption | ✅ |
+| Reversal of that redemption | ✅ — **the reversed reward reappeared correctly on the customer card** |
+
+That last row is the one worth naming. The ledger is append-only and a reversal is a new row
+rather than an edit, so "the reward came back" is the observable proof that the compensating entry
+was written and the balance recomputed from it — on a real device, through the real screens.
+
+What was **already** automated and passing, and remains so: the manifest is served with the right
+`id`, `scope` and `display` and the right locale direction, every icon it names returns 200,
+`sw.js` is served and contains no cache and no `fetch` handler, and the card renders its QR as
+inline SVG. Those were always necessary conditions for installability, never proof of it. Row 1
+and row 2 above are the proof.
+
+**Has the owner supplied HTTPS staging?** Yes. It is live, and these checks ran against it.
+
+### 8.1 What this supersedes
+
+This file previously ended with a `BLOCKED` line naming the absence of HTTPS staging, and §8 read
+"NOT performed". Both were true when written: there was no host, no hostname and no certificate,
+and owner decisions B1, B2 and B3 were open. All three have since been answered, staging was
+deployed, and two camera defects found by the first real-device attempt were fixed
+(`docs/evidence/phase-1a-prompt-2-cohost-config.md` §14). The blocking condition is gone, so the
+standing result is the one at the foot of this file; the earlier line is recorded here rather than
+quietly overwritten.
 
 ---
 
@@ -269,4 +307,4 @@ No critical or high issue remains. Everything below is Low unless marked.
 
 ---
 
-**BLOCKED — PHASE 1A PROMPT 2 — HTTPS staging is not available (owner decisions B1–B3 open), so browser installability and real-camera scanning in §8 items 1–7 could not be verified; all code, unit, integration and browser checks are complete and passing on `60d392e`**
+**PASS — PHASE 1A PROMPT 2 MANUAL GATE COMPLETE — READY FOR PHASE 1A PROMPT 3**

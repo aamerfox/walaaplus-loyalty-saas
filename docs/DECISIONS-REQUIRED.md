@@ -26,11 +26,13 @@ These must be answered before infrastructure, CI or deployment work proceeds.
 
 Service workers, installability and web push **refuse to run without TLS**, except on `localhost`. Staging cannot verify the PWA card without a real certificate.
 
+**B1, B2 and B3 are answered.** Staging is live over HTTPS and the Phase 1a Prompt 2 real-device checks passed against it on 2026-09-12. B4 to B6 remain open.
+
 | # | Decision | Recommended default | Status |
 |---|---|---|---|
-| B1 | **Hosting.** Where do the Next.js standalone container, the pg-boss worker container and PostgreSQL run? | One VPS running Docker Compose, in or near the target region | ⬜ |
-| B2 | **Staging domain.** | A subdomain of a domain the owner controls, for example `staging.walaaplus.<tld>` | ⬜ |
-| B3 | **HTTPS certificate for staging.** **Hard prerequisite for Phase 1a Prompt 2 verification.** | Caddy or nginx with Let's Encrypt automatic certificates | ⬜ |
+| B1 | **Hosting.** Where do the Next.js standalone container, the pg-boss worker container and PostgreSQL run? | One VPS running Docker Compose, in or near the target region | ✅ An OCI host, co-hosted with existing services; see [STAGING-RUNBOOK.md §13](STAGING-RUNBOOK.md) |
+| B2 | **Staging domain.** | A subdomain of a domain the owner controls, for example `staging.walaaplus.<tld>` | ✅ Supplied by the owner and serving |
+| B3 | **HTTPS certificate for staging.** ~~Hard prerequisite for Phase 1a Prompt 2 verification.~~ | Caddy or nginx with Let's Encrypt automatic certificates | ✅ The host's existing Caddy, over ACME. The Prompt 2 manual gate it blocked is complete |
 | B4 | **Production domain.** | Decided before the café pilot goes live | ⬜ |
 | B5 | **Secrets provisioning.** Who creates the `.env` values on each server, and where are they stored? | Owner provisions server environment files directly; agent supplies variable names and generation commands only | ⬜ |
 | B6 | **Production deployment authority.** | Owner only. Agent never deploys to production | ⬜ |

@@ -12,9 +12,12 @@
 **PASS — the configuration is written, validated locally, and ready for review.** It has not been
 deployed, and deploying it is not part of this task.
 
+**Round 8 (§15): the owner retested on both phones and every manual check passed.** Phase 1a
+Prompt 2's manual gate is **complete**. See §15.
+
 **Round 7 (§14): real-device testing began, and found the camera unusable on BOTH phones —
-for two different reasons.** Fixed in code; **neither device has been retested on the fixed
-build, and the manual gate is NOT complete.** See §14.
+for two different reasons.** Both fixed, and both since confirmed working on the deployed build.
+See §14.
 
 **Round 6 (§13): a real staging owner could not register at all.** The registration page was a
 preserved prototype that never called its own, already-tested API. Fixed. See §13.
@@ -81,7 +84,8 @@ nothing was pushed.
 | 21 | `32c18df` | docs: fill in row 20 |
 | 22 | `28050e1` | fix(scanner): scan on iPhone Safari, and stop losing a granted camera on Android |
 | 23 | `91e074d` | docs: the camera remediation |
-| 24 | (this commit) | docs: fill in row 23 |
+| 24 | `c759d78` | docs: fill in row 23 |
+| 25 | (this commit) | docs: record the owner's real-device results and close the manual gate |
 
 Files in commit 1:
 
@@ -342,7 +346,7 @@ Every item here was in reach and was left alone on purpose.
 | ~~C-2~~ | **CLOSED (§12.1)** | ~~The co-hosted stack has never been run.~~ Three attempts: the first failed inside `migrate` (§10), the second failed its web healthcheck (§11), and the third **succeeded — staging is live and healthy at the staging hostname** | — |
 | C-3 | Low | `staging.truebiznes.com` is now hardcoded in the fragment | Correct for a reviewed fragment naming one site. If the hostname changes, the fragment changes with it |
 | C-4 | Low | Backups (§6) write to the same host they protect | Unchanged from before; owner decision C2 |
-| C-5 | Low | The real-device checklist is still unperformed. **It is now possible**: staging is live and an owner can create a card and get a link to point a phone at (§12)** | Owner, runbook §13 checklist |
+| ~~C-5~~ | **CLOSED (§15)** | ~~The real-device checklist is still unperformed.~~ Every row was performed by the owner on real phones on 2026-09-12 and passed | — |
 
 ---
 
@@ -1415,21 +1419,21 @@ GATE PASSED in 466.4s (15/15 steps)
 | `npm audit` (full tree) | **0 vulnerabilities** |
 | `git diff --check` | clean |
 
-### 14.9 The manual gate is NOT complete
+### 14.9 The manual gate — open when this was written, closed in §15
 
-**Both device checks remain unperformed on the fixed build, and nothing here claims otherwise.**
-The fix is committed and pushed; staging still runs the build that failed.
+**At the time of round 7 both device checks were unperformed on the fixed build**, and this section
+said so. The build was then deployed and the owner retested; every row passed. The results are in
+**§15**, and the four rows below are kept as the record of what was outstanding.
 
-| # | Check | Device | Status |
-|---|---|---|---|
-| 1 | Permission prompt appears, and the fallback decoder starts | iPhone, Safari | ⬜ **not retested** — the fixed build is not deployed |
-| 2 | Permission granted, **rear-camera preview visibly starts**, then a QR decodes | Huawei, Android | ⬜ **not retested** — same |
-| 3 | Denied permission falls back to phone lookup with no dead end | either | ⬜ not performed |
-| 4 | The rest of §8's checklist: installability, three separate cards, service worker caches nothing, RTL and LTR on a real phone | both | ⬜ not performed |
+| # | Check | Device | Then | Now |
+|---|---|---|---|---|
+| 1 | Permission prompt appears, and the fallback decoder starts | iPhone, Safari | ⬜ not retested | ✅ passed (§15) |
+| 2 | Permission granted, **rear-camera preview visibly starts**, then a QR decodes | Huawei, Android | ⬜ not retested | ✅ passed (§15) |
+| 3 | Denied permission falls back to phone lookup with no dead end | either | ⬜ not performed | ✅ passed (§15) |
+| 4 | The rest of §8's checklist: installability, three separate cards, service worker caches nothing, RTL and LTR on a real phone | both | ⬜ not performed | ✅ passed (§15) |
 
-The sequence from here is: deploy this build to staging, then retest on the real phones, then
-record the results. **Until both devices pass on the deployed fixed build, Phase 1a Prompt 2's
-manual gate stays open.**
+The sequence named here — deploy, retest on real phones, record the results — is exactly what
+happened.
 
 ### 14.10 What this round did not do
 
@@ -1442,4 +1446,94 @@ manual gate stays open.**
 
 ---
 
-**PASS — IOS SAFARI QR SCANNER REMEDIATION COMPLETE — READY TO UPDATE STAGING**
+---
+
+## 15. Round 8 — the owner's real-device results, and the manual gate closes
+
+**Documentation only.** No code, test, dependency, Dockerfile, Compose, Caddy, DNS, OCI, secret,
+schema, migration or deployment configuration was touched in this round. Nothing was deployed and
+the OCI host was not contacted.
+
+### 15.1 The record
+
+| | |
+|---|---|
+| Performed by | **the owner**, on physical phones |
+| Confirmed | **2026-09-12** |
+| Runtime under test | staging running commit **`c759d78f079b04ae58fa57cc4185d94ab07d5c81`** — the scanner remediation build from §14 |
+| Devices | an iPhone running Safari, and a Huawei running Android |
+| Agent involvement | none. The agent has no authorized device access and performed no row |
+
+**No personal data is recorded**, here or anywhere in this file: no names, phone numbers, QR
+values, enrolment links, credentials or screenshots. A card's QR is a capability token, and an
+evidence file is read by more people and kept longer than the screen that legitimately shows one.
+
+### 15.2 Results
+
+**The product loop, end to end on real devices:**
+
+| Step | Result |
+|---|---|
+| Owner registration through the UI | ✅ |
+| Loyalty-program creation through the UI | ✅ |
+| Customer enrolment | ✅ |
+| Welcome stamp granted | ✅ |
+| Stamp awarding | ✅ |
+| Automatic reward conversion at the threshold | ✅ |
+| Reward redemption | ✅ |
+| Reversal — **the reversed reward reappeared correctly on the customer card** | ✅ |
+
+The reversal row is the one worth naming. The ledger is append-only and a reversal is a new
+compensating row rather than an edit, so "the reward came back" is the observable proof that the
+entry was written and the balance recomputed from it — through the real screens, on a real phone.
+
+**The camera, on both phones that failed in §14:**
+
+| Check | Device | Result |
+|---|---|---|
+| Real QR camera scanning | **iPhone, Safari** | ✅ **passed** — the defect in §14.2 is resolved on real hardware |
+| Real QR camera scanning | **Huawei, Android** | ✅ **passed** — the mount race in §14.3 is resolved on real hardware |
+| Permission denial leaves a usable mobile-number search fallback | phone | ✅ passed |
+
+Both camera defects were found by real devices and are now confirmed fixed by the same devices.
+Neither could have been caught by any test in this repository, and neither could have been closed
+by one.
+
+**The PWA:**
+
+| Check | Result |
+|---|---|
+| iPhone Safari "Add to Home Screen" | ✅ |
+| Android installation | ✅ |
+| Installed cards open in **standalone** mode | ✅ |
+| Three installed cards from three different businesses stay separate, with **no cross-exposure of balances** | ✅ |
+| Arabic RTL and English LTR at phone width | ✅ |
+| Service-worker Cache Storage **empty**; no card response cached | ✅ |
+
+The last row is the one the service worker was written for. It caches nothing on purpose: a card
+carries a balance and a scanner token, and a cache-first worker would leave both in cache storage
+and serve a stale balance at a counter. An empty Cache Storage on a real installed card is the
+confirmation that the deliberate omission survived into production behaviour.
+
+### 15.3 What this closes, and what it does not
+
+**Closes:** Phase 1a Prompt 2's real-device manual gate, in full. Every row of the checklist in
+`phase-1a-prompt-2.md` §8, `phase-1a-prompt-2-staging.md` §8 and `STAGING-RUNBOOK.md` §12 is now
+marked passed with this record behind it. Limitations C-2 and C-5 are closed.
+
+**Does not close, and is not claimed:** anything beyond that checklist. Web push, offline card
+state, install telemetry, multi-location, points, cashback and the rest remain deferred exactly as
+before. The pilot-gate criteria in `PHASE-PLAN.md` — merchants, consecutive days, scan volume —
+are a separate question this record says nothing about.
+
+### 15.4 The deployed runtime is unchanged
+
+**Staging continues to run commit `c759d78f079b04ae58fa57cc4185d94ab07d5c81`**, the build these checks were performed against.
+
+This documentation commit changes only Markdown. **It does not require a staging update**, and
+deploying it would change nothing a phone can see. The next staging deployment should happen when
+there is application code to deploy, not because of this file.
+
+---
+
+**PASS — PHASE 1A PROMPT 2 MANUAL GATE COMPLETE — READY FOR PHASE 1A PROMPT 3**
