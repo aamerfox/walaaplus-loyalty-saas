@@ -17,12 +17,26 @@ import {
   RateLimitScope,
   clearSignInLimit,
   consumeRegisterLimit,
+  resetRateLimit,
   consumeSignInLimit,
   hashKey,
   normalizeIdentifier,
   pruneExpiredRateLimits,
 } from "@/server/security/rate-limit";
 import { registerTestOwner, resetDatabase, TEST_PASSWORD } from "../setup/fixtures";
+
+/**
+ * The registration limiter now has a window keyed on a constant, shared by every caller — that is
+ * the point of it: per-email windows cannot stop someone who picks a fresh email each time.
+ *
+ * Shared state is shared in tests too, so a test that exhausts it would refuse the next test's
+ * first attempt. Clearing it before each test isolates them without weakening the rule: the
+ * behaviour under test is per-email and per-address, and there is a dedicated test below for the
+ * global window itself.
+ */
+beforeEach(async () => {
+  await resetRateLimit(RateLimitScope.REGISTER_GLOBAL, "all");
+});
 
 const REGISTER_MAX = env().AUTH_RATE_LIMIT_REGISTER_MAX;
 const SIGNIN_MAX = env().AUTH_RATE_LIMIT_SIGNIN_MAX;
@@ -387,5 +401,45 @@ describe("authentication rate limiting", () => {
       expect(dump).not.toContain(TEST_PASSWORD);
       expect(dump).not.toMatch(/password|passwordHash|secret|token/i);
     });
+  });
+});
+
+describe("the global registration window", () => {
+  /*
+   * Every other auth window is keyed on something the caller chooses, so a fresh email was a
+   * fresh allowance. Where no client address is trusted — the co-hosted staging posture, chosen
+   * deliberately — registration therefore had no ceiling at all, and each attempt costs a
+   * 12-round bcrypt before the transaction opens.
+   */
+  beforeEach(async () => {
+    await resetRateLimit(RateLimitScope.REGISTER_GLOBAL, "all");
+  });
+
+  it("stops a caller who uses a different email every time", async () => {
+    const max = env().AUTH_RATE_LIMIT_REGISTER_GLOBAL_MAX;
+    let refusedAt: number | null = null;
+
+    for (let i = 0; i < max + 1; i += 1) {
+      // A fresh identifier and no client address: every per-caller window is untouched.
+      const decision = await consumeRegisterLimit(null, `fresh-${randomUUID()}@example.test`);
+      if (!decision.allowed && refusedAt === null) refusedAt = i;
+    }
+
+    expect(refusedAt, "an unbounded run of unique emails must eventually be refused").toBe(max);
+  });
+
+  it("counts an attempt that supplies no email at all", async () => {
+    // `if (identifier)` skipped an empty string, so a body with `email: ""` consumed no window.
+    const max = env().AUTH_RATE_LIMIT_REGISTER_GLOBAL_MAX;
+    for (let i = 0; i < max; i += 1) await consumeRegisterLimit(null, "");
+    expect((await consumeRegisterLimit(null, "")).allowed).toBe(false);
+  });
+
+  it("does not refuse an ordinary pilot sign-up rate", async () => {
+    // The ceiling has to be well clear of real use, or it becomes the outage.
+    expect(env().AUTH_RATE_LIMIT_REGISTER_GLOBAL_MAX).toBeGreaterThanOrEqual(20);
+    for (let i = 0; i < 5; i += 1) {
+      expect((await consumeRegisterLimit(null, `merchant-${i}-${randomUUID()}@example.test`)).allowed).toBe(true);
+    }
   });
 });

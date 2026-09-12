@@ -103,6 +103,15 @@ const envSchema = z.object({
   AUTH_RATE_LIMIT_REGISTER_MAX: z.coerce.number().int().min(1).max(10_000).default(10),
   /** Registration window length, seconds. */
   AUTH_RATE_LIMIT_REGISTER_WINDOW_SECONDS: z.coerce.number().int().min(1).max(86_400).default(900),
+  /**
+   * Registrations allowed in one window across the WHOLE deployment.
+   *
+   * Every other auth window is keyed on something the caller picks, so a fresh email is a fresh
+   * allowance and registration had no effective ceiling wherever no client address is trusted.
+   * 40 per 15 minutes is far above any genuine pilot rate and far below what it takes to matter
+   * as a bcrypt CPU load.
+   */
+  AUTH_RATE_LIMIT_REGISTER_GLOBAL_MAX: z.coerce.number().int().min(1).max(100_000).default(40),
   /** Credential sign-in attempts allowed per identifier and per client address per window. */
   AUTH_RATE_LIMIT_SIGNIN_MAX: z.coerce.number().int().min(1).max(10_000).default(10),
   /** Sign-in window length, seconds. */

@@ -28,6 +28,22 @@ export const RateLimitScope = {
   REGISTER_IDENTIFIER: "auth.register.identifier",
   SIGNIN_IP: "auth.signin.ip",
   SIGNIN_IDENTIFIER: "auth.signin.identifier",
+  /**
+   * One window for ALL registrations, keyed on a constant.
+   *
+   * Every other auth window is keyed on something the caller chooses. Per-email is the right
+   * shape for "stop guessing at THIS account" and no shape at all for "stop creating accounts":
+   * a fresh email is a fresh window, so with no trusted client address - which is the co-hosted
+   * staging posture, deliberately (docker-compose.staging-cohost.yml) - registration had no
+   * effective limit. Each attempt costs a 12-round bcrypt on a 0.35-CPU container BEFORE the
+   * transaction opens, so unlimited registration is also a way to stop the till working.
+   *
+   * A global window can be exhausted on purpose, which pauses new sign-ups for the rest of the
+   * hour. For a pilot with a handful of merchants that is a far smaller harm than the one it
+   * closes, and it fails in the direction of "nobody registers" rather than "the café stops
+   * serving".
+   */
+  REGISTER_GLOBAL: "auth.register.global",
   /** Public customer enrollment. Welcome bonuses make this an abuse target (PRODUCT-SPEC §6.1). */
   ENROLL_IP: "enroll.ip",
   ENROLL_LINK: "enroll.link",
@@ -56,6 +72,9 @@ export function registerRules(): RateLimitRule[] {
     // limited even where no trusted proxy supplies one (see docs/PHASE-0-IMPLEMENTATION.md §9).
     { scope: RateLimitScope.REGISTER_IDENTIFIER, max, windowSeconds },
     { scope: RateLimitScope.REGISTER_IP, max, windowSeconds },
+    // The backstop that does not depend on the caller choosing anything. Generous next to the
+    // per-email window, because it is shared by every genuine sign-up at once.
+    { scope: RateLimitScope.REGISTER_GLOBAL, max: e.AUTH_RATE_LIMIT_REGISTER_GLOBAL_MAX, windowSeconds },
   ];
 }
 
@@ -161,7 +180,10 @@ export async function consumeRateLimit(rules: RateLimitRule[], identifiers: Part
   let decision: RateLimitDecision = { allowed: true, retryAfterSeconds: 0 };
   for (const rule of rules) {
     const identifier = identifiers[rule.scope];
-    if (identifier === undefined) continue; // nothing to key on (e.g. no client address)
+    // `undefined` means there is nothing to key on - no client address, say. An EMPTY STRING is
+    // different: it is a value the caller supplied, and skipping it on truthiness let a request
+    // with `email: ""` consume no window at all.
+    if (identifier === undefined) continue;
     const one = await consumeOne(rule, hashKey(rule.scope, identifier));
     if (!one.allowed && (decision.allowed || one.retryAfterSeconds > decision.retryAfterSeconds)) {
       decision = one;
@@ -211,8 +233,12 @@ async function maybePrune(): Promise<void> {
  * which is why the email window exists: it holds regardless of the network boundary.
  */
 export async function consumeRegisterLimit(clientIp: string | null, identifier?: string | null): Promise<RateLimitDecision> {
-  const identifiers: Partial<Record<RateLimitScopeName, string>> = {};
-  if (identifier) identifiers[RateLimitScope.REGISTER_IDENTIFIER] = identifier;
+  const identifiers: Partial<Record<RateLimitScopeName, string>> = {
+    // A constant, so this window is always open and always counted. It is the only registration
+    // rule an attacker cannot sidestep by changing what they submit.
+    [RateLimitScope.REGISTER_GLOBAL]: "all",
+  };
+  if (identifier !== undefined && identifier !== null) identifiers[RateLimitScope.REGISTER_IDENTIFIER] = identifier;
   if (clientIp) identifiers[RateLimitScope.REGISTER_IP] = clientIp;
   const decision = await consumeRateLimit(registerRules(), identifiers);
   await maybePrune();
