@@ -406,3 +406,45 @@ schema change or a direct database write from a screen.
 | `tests/integration/merchant-routes.test.ts` | Every new route at the HTTP boundary: strict schemas, unknown and privileged fields, tenant and permission boundaries, self-edit and grant-ceiling refusals, idempotent retry, location refusals, the reversal dispatch, and the points-card lookup regression |
 | `tests/e2e/merchant-ui.spec.ts` | An owner creating a points program with tiers and reading it back; invalid input that sends no request; the Arabic RTL interface; a points card served at a chosen counter; the card link staying hidden until revealed; and the rebrand |
 | `tests/unit/brand-scan.test.ts` | No old brand name in the user-facing tree, one product name in both locales, no brand hex outside the token file |
+
+---
+
+## 14. The visual remediation (Prompt 2, second pass)
+
+The first pass shipped every screen the prompt asked for and was **rejected on how it looked**: the
+pages did not read as one product, the logo arrived as disconnected fragments on authenticated
+surfaces, and the staging tenant's name — `TrueBiznes` — was being used as the platform's.
+
+What that failure was, in engineering terms, is worth keeping: **there was a component library, and
+screens were not obliged to use it.** Each screen had been recoloured into the new palette while
+keeping its own spacing, its own control heights, its own card. A palette is not a design system.
+
+The second pass changed three things structurally.
+
+**One vocabulary, and no way around it.** `src/components/ui/index.tsx` owns every surface, control,
+table and status primitive. `PageHeader` deliberately has **no prop** that could carry a business
+name, because the previous `subtitle={businessName}` was one prop repeated across twelve screens, and
+a prop that can be misused across twelve screens will be.
+
+**One brand surface.** The navy rail carries the whole white lockup; the top bar carries nothing. No
+screen may reference an asset path — everything asks `Wordmark` for a treatment.
+
+**The platform/tenant rule, in tests rather than in review.** A tenant's name in source is a defect by
+definition, because the real ones come from `Business.name`. `tests/unit/platform-identity.test.ts`
+enforces that, the one-lockup rule, the absence of a lettered placeholder, and the navigation
+vocabulary in both locales.
+
+### 14.1 What the tests could not have caught
+
+Several defects passed every assertion and were found only by opening the rendered screenshots: the
+sign-in page's `"W"` placeholder, an Arabic rail reading *geofencing (your branches)*, a landing page
+that was still the previous product advertising four unbuilt features, and an Arabic word shown as a
+price to English readers. Two lessons are now encoded rather than remembered:
+
+1. `tests/e2e/zademi-visual.spec.ts` writes 40 screenshots — every merchant and public surface, two
+   widths, two locales — so a review can look rather than infer.
+2. `brand-scan.test.ts` strips Arabic diacritics before matching, because the old product name had
+   survived in `messages/ar.json` transliterated and vocalised, invisible to a Latin-only scan.
+
+Full record: `docs/evidence/phase-1b-prompt-2-visual-remediation.md`. The design rules themselves are
+in `docs/BRAND.md` §4A–§4C.

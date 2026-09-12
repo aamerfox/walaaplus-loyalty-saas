@@ -116,6 +116,104 @@ Arabic numerals stay Western (0–9) so a balance reads identically to staff in 
 
 ---
 
+## 4A. Platform identity versus tenant identity
+
+**The product is Zademi. A business's name is data.**
+
+This is the rule the first Phase 1B release broke, and it is worth stating precisely because the
+offending string was not wrong — it was correct data in the wrong role. The staging tenant is called
+**TrueBiznes**. Its name was printed under the logo in the sidebar, repeated as the subtitle of every
+merchant page, and used as the scanner's heading. Every authenticated screen therefore read as though
+the platform were called TrueBiznes.
+
+| | Where it may appear | Where it may never appear |
+|---|---|---|
+| **Zademi** | the logo lockup, the tab title, the manifest's `name` for the merchant app, legal copy | as a tenant's business name |
+| A business's name | a labelled business-context control, a row in a list, a field in a form, the customer card's own manifest | a page heading, a subtitle, the navigation, beside or beneath the logo, anywhere it reads as identity |
+
+Concretely:
+
+- `PageHeader` has **no prop** that could carry a business name. Every merchant page's `description`
+  is a sentence about that page.
+- `BusinessContext` is the one component that renders a business as identity, and it labels what the
+  name is (`Navigation.businessLabel` — "Business" / "النشاط التجاري"). With more than one business
+  it is a `<select>` that switches; with one it is a labelled value. It is a **control**, not chrome.
+- The scanner shows the business the same way, in the same labelled form, because a cashier working
+  two shops needs to know which till they are on.
+- `staging.truebiznes.com` is a temporary staging host. It is not the product's name, and nothing in
+  the product reads its name from the host.
+
+`tests/unit/platform-identity.test.ts` holds all of this in source: no tenant name may be written into
+`src/` or `messages/`, `PageHeader` may not mention a business, and the shell components may not render
+a business name themselves.
+
+---
+
+## 4B. The accepted Zademi UI principles
+
+What "one system" means here, in the terms the screens are actually built in:
+
+1. **One vocabulary, in one file.** `src/components/ui/index.tsx` owns the card, section, page header,
+   toolbar, button, form control, badge, stat tile, table, notice, empty state and skeleton. A screen
+   that needs a new shape adds it there; a screen that invents its own spacing is the defect.
+2. **Navy is structure, turquoise and mint are punctuation.** The rail, the hero, the scanner and the
+   primary button are navy. Turquoise marks the one action or figure that carries the loyalty meaning
+   on a screen. A screen with three accents has no accent.
+3. **One scale.** Spacing steps from the 4px grid; `rounded-2xl` surfaces and `rounded-xl` controls;
+   one border colour; controls are `h-11` (`h-9` small, `h-12` large); tables are `py-3.5`; icons are
+   `size-5` in navigation and `size-4` inline.
+4. **Button hierarchy is meaning, not decoration.** `primary` navy for the main action, `accent`
+   turquoise for the loyalty action, `secondary` for the alternative, `ghost` for navigation,
+   `danger` for a reversal. One primary per screen.
+5. **A dashboard is grouped questions, not a field of numbers.** Metrics are grouped by what a
+   merchant is asking, and a group states how many columns it is so a group of two does not leave
+   half a row of nothing.
+6. **The counter stays compact and fast.** The scanner is one column on a dark ground, controls large
+   enough for a thumb, and no screen furniture between a lookup and an award.
+7. **Arabic-first, not Arabic-also.** Logical properties everywhere; Cairo for Arabic with a heavier
+   leading for headings than the Latin display face wants (a tanween on one line and a descender on
+   the next collide at 1.15); every string in `messages/*.json`, never an inline locale ternary.
+8. **Contrast is a rule, not a preference.** `turquoise-500` and `mint-500` are never small text on a
+   light ground — `turquoise-700` (4.9:1) and `mint-700` (4.8:1) are. On navy, body text is white at
+   75%, not an accent.
+9. **Nothing on a screen promises what the product cannot do.** No dead links, no disabled
+   "coming soon" controls, no security badges, no fake dashboards.
+
+---
+
+## 4C. What the visual remediation corrected
+
+Recorded because the next reviewer should know what was wrong, not only that something changed:
+
+- **The logo arrived as fragments.** The shell showed the colour lockup in the rail and a standalone
+  symbol in the top bar, so a merchant met two marks and read the small one as a piece of the large
+  one. The rail now carries the complete white lockup and the top bar carries no mark.
+- **The tenant's name was the platform's**, as above.
+- **Sign-in rendered the previous product's lettered placeholder** — a navy tile with a white "W" —
+  above a form written entirely in inline locale ternaries, with a dead "forgot password" link and an
+  "SSL connection" badge. Rebuilt from the design system; the placeholder is now forbidden by test.
+- **The Arabic registration page still named the old product**, transliterated and carrying a fatha,
+  which the Latin-only brand scan could not see. `brand-scan.test.ts` now strips Arabic diacritics and
+  checks both scripts.
+- **The Arabic rail used the old product's vocabulary** — "السياج الجغرافي (فروعك)" (*geofencing —
+  your branches*) for the screen that lists counters, "إدارة فريق العمل" for the team.
+- **The landing page was a different product**: crimson gradient headline, black pill buttons, a grey
+  skeleton pretending to be a dashboard, and claims for Apple Wallet, Google Pay, push automations and
+  white-label agencies. It now describes the three things Zademi does today.
+- **The pricing page showed an Arabic word to English readers** for the custom plan's price.
+- **The active navigation marker was a border on a rounded pill**, so it drew a crescent beside the
+  row instead of a bar on it.
+- **Stat tiles carried their padding twice**, and a two-tile group left half a row empty.
+- **Customers, locations, team, programs and the scanner** were each recoloured but still built from
+  their own primitives; they are now built from the shared ones.
+
+Every one of these except the last was found by opening the rendered screenshots, not by a failing
+assertion. `tests/e2e/zademi-visual.spec.ts` writes 40 of them — every merchant and public surface, at
+1440×900 and 390×844, in Arabic and English — into `playwright-results/visual/` for exactly that
+reason.
+
+---
+
 ## 5. What the rebrand did NOT rename, and why
 
 Renaming these would be a migration, an outage or a lie, so each keeps the old name:
