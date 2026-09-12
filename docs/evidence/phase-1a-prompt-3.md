@@ -9,9 +9,19 @@
 
 ## 1. Result
 
-**PASS.** **Five High findings** were found and fixed with regression tests; no Critical finding
-was found. **Twenty-two Medium and Low findings** are recorded in §7 with severity, rationale,
-owner and phase.
+**BLOCKED — this gate does not pass.** See **§12**, which supersedes the result this section
+originally carried.
+
+Five High findings were found and fixed with regression tests, and no Critical finding was found.
+But one of those fixes — §3.1, the enrolment token — was **incomplete, and this document claimed
+otherwise.** The audit verified the API's response shape and stopped there; the public form
+redirects to the returned token, so the browser flow still distinguishes an existing customer from
+a new one. Closing it requires proof that the submitter owns the phone number, and every channel
+that could provide one is unauthorized in Phase 1a. That is a decision for the owner, not a defect
+to engineer around.
+
+**Twenty-two Medium and Low findings** are recorded in §7 with severity, rationale, owner and
+phase.
 
 | Check | Result |
 |---|---|
@@ -22,6 +32,7 @@ owner and phase.
 | `npm audit --omit=dev --audit-level=high` | **0 vulnerabilities** |
 | `git diff --check` | clean |
 | CI on the exact commit | §8 |
+| **Enrolment-existence oracle** | **OPEN — §12** |
 
 **Precondition met.** Prompt 2's manual-gate closure is present on the branch (`c294d81`,
 "the owner's real-device results close the Phase 1a Prompt 2 manual gate") and
@@ -68,6 +79,12 @@ owns the number, and Phase 1a deliberately has no OTP.
 
 **Three existing tests asserted the old behaviour** — that a repeat returns the same token. They
 were encoding the vulnerability; they now assert the same shape and check the card in the database.
+
+> **This fix is incomplete, and calling it complete was the error in this document.** It removed
+> the *disclosure* — a repeat no longer reveals the existing card, its balances, name, serial,
+> scanner token or share token, and §12 keeps a test on that — but it did not remove the
+> *existence* signal. The token is followed by the browser, and the card route answers one of them
+> and not the other. See **§12**.
 
 ### 3.2 HIGH — a valid reversal could be refused permanently
 
@@ -325,6 +342,117 @@ skipped independently.
 
 ---
 
+## 12. Correction — the enrolment-existence oracle is still open
+
+### 12.1 What this document got wrong
+
+§3.1 reported the enrolment enumeration issue as fixed. It was not. The audit behind it checked
+the **API response** — same status, same keys, same token shape — and treated that as the boundary.
+It is not the boundary. The boundary is the **complete public browser flow**, and the flow does not
+stop at the JSON:
+
+```
+POST /api/enroll        → 200 {cardToken}        identical for a new and an existing phone
+JoinForm                → router.replace("/<locale>/card/" + cardToken)   unconditional
+GET /<locale>/card/…    → the page for a real token, notFound() for the decoy
+```
+
+A caller holding the public enrolment link and a phone number submits the form and watches their
+own screen. A number that was never enrolled lands on a card; a number that is already a customer
+lands on a 404. They need no access to the response body, no timing measurement and no tooling.
+
+**The fix moved the oracle one hop downstream and I reported it as closed.** That is the more
+important failure here than the oracle itself: the evidence asserted a property the tests never
+exercised end to end, which is precisely the failure mode §2 of this document claims to be
+hunting for.
+
+### 12.2 Reproduced, with automated data only
+
+`tests/e2e/enrollment-enumeration.spec.ts` drives the real public form in a browser, twice, and
+reads the outcome. Three tests, all passing, all using generated phone numbers:
+
+| Test | Asserts |
+|---|---|
+| "a repeat enrolment is still distinguishable from a first one — the open defect" | A new number lands on a visible card; the same number submitted again lands on no card. **This asserts the defect**, as a characterization test |
+| "the oracle does not fire for a number that was never enrolled" | Two different new numbers both land on a card, so the signal really is "already a customer" and not noise |
+| "a repeat still reveals nothing ABOUT the existing card" | The probe gets a different token, and the page contains no share token, no name, no phone and no balance |
+
+The first test **fails the day the oracle is closed**, which is the moment to invert it. A test that
+pins a known defect is worth more than a comment, because it cannot be skimmed past.
+
+### 12.3 Why this cannot be fixed inside Phase 1a
+
+Two requirements are in direct conflict:
+
+| | |
+|---|---|
+| **A** | A phone that has never enrolled must end up holding a **usable card** — public, self-service, "no merchant login anywhere in the path" (`PRODUCT-SPEC.md` §6.1) |
+| **B** | A phone that has already enrolled must reveal **nothing**, including whether it has enrolled |
+
+The caller chooses the phone number. Under **A** they receive a live card capability; under **B**
+they must not. *"Did I receive a live card?"* is observable by whoever receives it. So A and B are
+distinguishable **for any implementation**, unless the system can tell the number's owner from
+someone who merely knows the number — which is proof of phone ownership, and nothing else.
+
+This is not an implementation gap that a better redirect, a uniform status code or a reworded 404
+closes. Requirement 2 of the correction is right to forbid those: they hide the signal from a
+casual reader and leave it intact for anyone who looks.
+
+The alternatives that avoid needing proof were considered and rejected on the merits:
+
+| Alternative | Why not |
+|---|---|
+| Issue a **second card** for an existing phone, so both paths return a live card | Breaks one-card-per-customer-per-program, the unique index that enforces it, and forks the balance. A worse defect than the one it hides |
+| **Never** issue a card self-service; always "ask the counter" | Uniform and secure, and it deletes the public self-service enrolment that Phase 1a delivered and the owner verified on real devices. A product decision, not an engineering one |
+| Deliver the card link **to the number** instead of the screen | This *is* proof of ownership, and it needs an SMS provider |
+| Rate-limit the probe harder | Reduces volume, removes nothing. Explicitly excluded by requirement 2 |
+
+### 12.4 The decision that is required
+
+Proof of phone ownership needs a channel, and **every channel is unauthorized**, by this project's
+own register:
+
+| Decision | Status | Bearing |
+|---|---|---|
+| **D2** SMS provider for Syria | ⏸ deferred — *"required before automated card delivery, OTP restore or SMS campaigns. Twilio may not serve the market"* | The only realistic channel |
+| **D4** WhatsApp Business API | ⏸ deferred | Alternative channel |
+| **D3** Email provider | ⬜ open, needed for password reset | Enrolment identity is a phone number, not an email |
+
+`PHASE-1A-IMPLEMENTATION.md` §1 also lists **"OTP restore"** in the *deliberately not* column for
+this phase. So the fix is out of authorized scope by two separate, deliberate prior decisions — and
+inventing something in its place would be exactly the insecure workaround the correction forbids.
+
+**Three options, for the owner:**
+
+1. **Authorize a verification channel (D2 or D4).** Enrolment sends a link or a code to the number;
+   both paths then answer identically — *"if that number can be enrolled, we have sent it a link"* —
+   which is the same non-enumerating shape registration already uses. Cost: provider selection,
+   money, and Syrian deliverability, which D2 already flags as uncertain.
+2. **Accept the residual risk in writing, for the pilot.** The disclosure is bounded to membership
+   — *"this number is a customer of this café"* — and the card itself stays protected (§12.2, third
+   test). A probe also costs a rate-limit slot and writes a junk profile. This is a legitimate
+   choice for a single-café pilot; it must be an explicit, recorded acceptance, not a silence.
+3. **Remove self-service issuance.** The form confirms without returning a card and staff hand over
+   the link, which is the staff-assisted restore model already scheduled for Phase 1.5. Uniform and
+   needs no provider, but it removes a flow that is built, shipped and verified on real devices.
+
+Nothing was implemented in the meantime, deliberately. Option 2 is a decision to record, not code
+to write; options 1 and 3 both change the product.
+
+### 12.5 What was preserved
+
+No behaviour changed in this correction. Verified still in place, with tests:
+
+- **The card capability stays protected.** A repeat reveals no share token, no scanner token, no
+  name, no serial and no balance — §12.2's third test, plus the integration tests from §3.1.
+- **Consent capture**, with the server-stamped version and timestamp from §3.5.
+- **Rate limits** — per link, per address where trusted, and the global registration window.
+- **The honeypot**, answered identically to an ordinary failure and still counted.
+- **First-time enrolment and card creation**, unchanged: a new customer still gets a working card.
+- **The staff-assisted restore model** is unchanged and remains the Phase 1.5 path.
+
+---
+
 ## 9. Scope: what this prompt did not do
 
 - **No Phase 1b features.** No points, multi-location, template editing, named links, richer staff
@@ -369,4 +497,8 @@ once before the pilot continues.
 
 ---
 
-**PASS — PHASE 1A ENGINEERING GATE PASSED — READY FOR PHASE 1B PROMPT 1**
+**BLOCKED — PHASE 1A ENGINEERING GATE — PHONE-OWNERSHIP VERIFICATION DECISION REQUIRED**
+
+This supersedes the `PASS` line this document originally ended with. Five High findings were
+found and fixed and every automated check is green, but §3.1 was reported as closed when it was
+only narrowed, and §12 records why closing it is a decision rather than a change.

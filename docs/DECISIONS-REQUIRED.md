@@ -36,6 +36,7 @@ Service workers, installability and web push **refuse to run without TLS**, exce
 | B4 | **Production domain.** | Decided before the café pilot goes live | ⬜ |
 | B5 | **Secrets provisioning.** Who creates the `.env` values on each server, and where are they stored? | Owner provisions server environment files directly; agent supplies variable names and generation commands only | ⬜ |
 | B6 | **Production deployment authority.** | Owner only. Agent never deploys to production | ⬜ |
+| B7 | **Phone-ownership verification at enrolment.** **Blocks the Phase 1a engineering gate.** Public self-service enrolment must issue a live card to a new number and reveal nothing for an existing one. Those two are distinguishable by whoever receives the result, for any implementation, unless the submitter can be shown to own the number. Three options, costed in `docs/evidence/phase-1a-prompt-3.md` §12.4: **(1)** authorize a channel (D2 SMS or D4 WhatsApp) and verify before issuing; **(2)** accept the residual risk in writing for the pilot — the leak is bounded to "this number is a customer here", never the card; **(3)** drop self-service issuance and hand the link over at the counter | Owner's call. Option 2 is defensible for one café and must be recorded, not assumed | ⬜ |
 
 ---
 
