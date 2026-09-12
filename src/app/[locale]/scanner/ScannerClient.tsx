@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
+import { browserQrCameraDeps, selectQrEngine, startQrCamera, type QrCameraFailure } from "./qr-camera";
 
 /**
  * The counter screen.
@@ -20,8 +21,12 @@ import { useTranslations } from "next-intl";
  *     not print an English sentence from an API.
  *
  * The camera path uses the browser's own `BarcodeDetector` where it exists (Android Chrome) and
- * degrades to the paste/type field everywhere else, including iOS Safari. No camera library is
- * bundled, and no test claims a physical scan.
+ * a dynamically imported ZXing decoder where it does not (iOS Safari). It used to do only the
+ * first, and told an iPhone it had no camera — before any permission prompt, on a device holding
+ * two. All the decoding logic lives in ./qr-camera.ts with its browser capabilities injected, so
+ * "Safari has getUserMedia and no BarcodeDetector" is a test rather than a merchant's bug report.
+ *
+ * No test here claims a physical scan. Real-device verification stays a manual check.
  */
 
 interface CardSummary {
@@ -47,10 +52,6 @@ interface OperationResult {
 
 type Feedback = { tone: "ok" | "warn" | "error"; text: string } | null;
 
-interface BarcodeDetectorLike {
-  detect: (source: CanvasImageSource) => Promise<{ rawValue: string }[]>;
-}
-
 export default function ScannerClient({ businessId, businessName }: { businessId: string; businessName: string }) {
   const t = useTranslations("Scanner");
   const tc = useTranslations("Common");
@@ -67,10 +68,14 @@ export default function ScannerClient({ businessId, businessName }: { businessId
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<Feedback>(null);
   const [cameraOn, setCameraOn] = useState(false);
-  const [cameraError, setCameraError] = useState(false);
+  const [cameraFailure, setCameraFailure] = useState<QrCameraFailure | null>(null);
+  const [cameraStarting, setCameraStarting] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
+  /** The live camera's release function, or null. Set only while a camera is running. */
+  const cameraStopRef = useRef<(() => void) | null>(null);
+  /** Guards the whole decode path: one scan is one lookup, however many callbacks arrive. */
+  const decodingRef = useRef(false);
 
   /** Translate a failure into words a cashier can act on. */
   const describeFailure = useCallback(
@@ -168,53 +173,80 @@ export default function ScannerClient({ businessId, businessName }: { businessId
     [businessId, busy, card, describeFailure, t],
   );
 
-  // ── camera, best effort ────────────────────────────────────────────────────
+  // ── camera ─────────────────────────────────────────────────────────────────
+  const cameraDeps = useMemo(() => browserQrCameraDeps(), []);
+  /**
+   * Whether this browser can scan at all, asked WITHOUT touching the camera.
+   *
+   * Capability and consent are different questions. Conflating them is what put "the camera is
+   * not available on this device" in front of an iPhone that had two working cameras and had
+   * never been asked for either.
+   */
+  const engine = useMemo(() => selectQrEngine(cameraDeps), [cameraDeps]);
+
   const stopCamera = useCallback(() => {
-    streamRef.current?.getTracks().forEach((track) => track.stop());
-    streamRef.current = null;
+    cameraStopRef.current?.();
+    cameraStopRef.current = null;
     setCameraOn(false);
+    setCameraStarting(false);
   }, []);
 
+  // Unmount, a route change, a tab switch away from this screen: the camera goes with it.
   useEffect(() => stopCamera, [stopCamera]);
 
   const startCamera = useCallback(async () => {
-    const detectorCtor = (window as unknown as { BarcodeDetector?: new (o: { formats: string[] }) => BarcodeDetectorLike })
-      .BarcodeDetector;
-    if (!detectorCtor || !navigator.mediaDevices?.getUserMedia) {
-      setCameraError(true);
+    if (cameraStarting || cameraStopRef.current) return;
+
+    if (engine === "unsupported") {
+      setCameraFailure("unsupported");
       return;
     }
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
-      streamRef.current = stream;
-      setCameraOn(true);
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
-      }
-      const detector = new detectorCtor({ formats: ["qr_code"] });
-      const tick = async () => {
-        if (!streamRef.current || !videoRef.current) return;
-        try {
-          const codes = await detector.detect(videoRef.current);
-          if (codes[0]?.rawValue) {
-            const value = codes[0].rawValue;
-            stopCamera();
-            setQrValue(value);
-            await lookup({ qr: value });
-            return;
-          }
-        } catch {
-          // A frame that cannot be decoded is the normal case, not an error worth showing.
-        }
-        requestAnimationFrame(() => void tick());
-      };
-      void tick();
-    } catch {
-      setCameraError(true);
-      stopCamera();
+
+    setCameraFailure(null);
+    setCameraStarting(true);
+    decodingRef.current = false;
+
+    /*
+     * Show the preview BEFORE asking for the camera, and pass a getter rather than an element.
+     *
+     * Both halves matter, and each fixes a real phone. Setting `cameraOn` first means the
+     * `<video>` is visible — not `display:none` — by the time a granted stream is attached and
+     * played; a hidden video is not reliably played or decoded. Passing a getter means
+     * `startQrCamera` waits for the element instead of reading a ref that React has not filled
+     * in yet, which is how a Huawei granted permission and then showed nothing at all.
+     */
+    setCameraOn(true);
+
+    // Everything from here is behind the cashier's tap, which is the only moment iOS Safari will
+    // show its permission prompt.
+    const started = await startQrCamera(cameraDeps, () => videoRef.current, (value) => {
+      // `startQrCamera` has already released the stream and the decoder before calling this, and
+      // fires it at most once; this guard covers the component's own re-entry as well.
+      if (decodingRef.current) return;
+      decodingRef.current = true;
+      cameraStopRef.current = null;
+      setCameraOn(false);
+      setQrValue(value);
+      void lookup({ qr: value });
+    });
+
+    setCameraStarting(false);
+    if (!started.ok) {
+      setCameraFailure(started.failure);
+      setCameraOn(false);
+      return;
     }
-  }, [lookup, stopCamera]);
+    cameraStopRef.current = started.stop;
+  }, [cameraDeps, cameraStarting, engine, lookup]);
+
+  const cameraMessage =
+    cameraFailure === "denied"
+      ? t("cameraDenied")
+      : cameraFailure === "unsupported"
+        ? t("cameraUnsupported")
+        : cameraFailure === "failed"
+          ? t("cameraFailed")
+          : null;
 
   const toneClass = {
     ok: "bg-emerald-500/10 text-emerald-300",
@@ -272,14 +304,46 @@ export default function ScannerClient({ businessId, businessName }: { businessId
               <button
                 type="button"
                 onClick={() => (cameraOn ? stopCamera() : void startCamera())}
-                className="rounded-xl bg-zinc-800 px-4 py-3 text-sm font-medium ring-1 ring-white/10"
+                disabled={cameraStarting || engine === "unsupported"}
+                data-testid="scanner-camera-toggle"
+                className="rounded-xl bg-zinc-800 px-4 py-3 text-sm font-medium ring-1 ring-white/10 disabled:opacity-50"
               >
                 {cameraOn ? t("stopCamera") : t("startCamera")}
               </button>
             </div>
             <p className="text-xs text-zinc-500">{t("qrHelp")}</p>
-            {cameraOn && <video ref={videoRef} muted playsInline className="w-full rounded-xl" />}
-            {cameraError && <p className="text-xs text-amber-300">{t("cameraUnavailable")}</p>}
+
+            {/*
+              Always in the DOM, hidden when idle. The stream is attached to this element before
+              React re-renders, so a version that mounted it only once `cameraOn` flipped attached
+              to nothing — the previous one did exactly that, and the decode loop died on its
+              first frame.
+            */}
+            <video
+              ref={videoRef}
+              muted
+              playsInline
+              autoPlay
+              data-testid="scanner-video"
+              hidden={!cameraOn}
+              className="w-full rounded-xl"
+            />
+
+            {cameraOn && !cameraStarting && (
+              <p data-testid="scanner-camera-active" className="text-xs text-emerald-300">
+                {t("cameraScanning")}
+              </p>
+            )}
+            {cameraStarting && (
+              <p data-testid="scanner-camera-starting" className="text-xs text-zinc-400">
+                {t("cameraStarting")}
+              </p>
+            )}
+            {cameraMessage !== null && (
+              <p role="status" data-testid="scanner-camera-message" className="text-xs text-amber-300">
+                {cameraMessage}
+              </p>
+            )}
           </section>
         ) : (
           <section className="space-y-3">
