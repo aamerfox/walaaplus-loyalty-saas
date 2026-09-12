@@ -85,7 +85,8 @@ nothing was pushed.
 | 22 | `28050e1` | fix(scanner): scan on iPhone Safari, and stop losing a granted camera on Android |
 | 23 | `91e074d` | docs: the camera remediation |
 | 24 | `c759d78` | docs: fill in row 23 |
-| 25 | (this commit) | docs: record the owner's real-device results and close the manual gate |
+| 25 | `c294d81` | docs: record the owner's real-device results and close the manual gate |
+| 26 | (this commit) | docs: fill in row 25 |
 
 Files in commit 1:
 
