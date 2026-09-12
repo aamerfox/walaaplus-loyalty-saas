@@ -362,6 +362,16 @@ countRewardRedemptionAsVisit
 Earn: manual staff award, points per visit, or points per spend block.
 Redeem: a configured `RewardTier`, recorded with `rewardTierId`.
 
+**Implemented in Phase 1b Prompt 1.** The shipped contract is the subset below that this phase
+builds — `earnMode`, `pointsPerVisit`, `spendAmountPerBlockMinor` + `pointsPerBlock`,
+`maxPointsPerManualAward`, `dailyAwardLimit`, `requirePurchaseAmount`, `welcomePoints`,
+`countRewardRedemptionAsVisit`, `availableLocations`, `pointsLabel` — and the schema is **strict**,
+so expiry modes, birthday points and every other deferred mechanic are refused at the boundary
+rather than stored and half-honoured. `rewardTiers` are **rows** (`RewardTier`), not JSON, because
+the ledger references them by id. Points never convert automatically: a redemption debits
+`tier.requiredPoints` in one row and there is no intermediate reward balance. See
+[PHASE-1B-IMPLEMENTATION.md](PHASE-1B-IMPLEMENTATION.md) §2.
+
 ```
 earnMode                  pointsPerVisit        spendAmountPerPointsRule
 dailyAwardLimit           requirePurchaseAmount cardExpiryMode
