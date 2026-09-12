@@ -73,7 +73,8 @@ nothing was pushed.
 | 17 | `6bdf2a5` | docs: fill in row 16 |
 | 18 | `dbc5d80` | test(daily-limit): pin the hour in the two-timezone test, which was a coin flip |
 | 19 | `6aa6aed` | fix(auth): connect the registration page to the registration API |
-| 20 | (this commit) | docs: the registration remediation |
+| 20 | `d7e9013` | docs: the registration remediation |
+| 21 | (this commit) | docs: fill in row 20 |
 
 Files in commit 1:
 
