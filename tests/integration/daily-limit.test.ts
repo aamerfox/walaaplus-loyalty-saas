@@ -205,26 +205,44 @@ describe("daily award limit", () => {
       const eastCard = (await enrolCustomer(east)).customerCardId;
       const westCard = (await enrolCustomer(west)).customerCardId;
 
-      const now = new Date();
-      // An award 20 hours ago: inside one business's current day, outside the other's.
-      const twentyHoursAgo = new Date(now.getTime() - 20 * 3_600_000);
-      await backdatedAward(east, eastCard, twentyHoursAgo);
-      await backdatedAward(west, westCard, twentyHoursAgo);
+      /*
+       * A FIXED hour of the day, not `new Date()`.
+       *
+       * This test used to take the current instant and a row 20 hours old, on the reasoning that
+       * "the two zones are 25 hours apart, so a 20-hour-old row cannot be inside both". That is
+       * false. Each local day is 24 hours long, and these two are offset by exactly ONE hour
+       * modulo 24 — Kiritimati is UTC+14, Niue UTC-11 — so whenever both businesses are more than
+       * 20 hours into their local day, the same row sits inside both. That is true for two hours
+       * out of every 24, and the test failed in the gate at 08:00 UTC having passed all morning.
+       *
+       * Pinning the hour removes the coin flip AND makes the test stronger: the old version only
+       * exercised the interesting case some of the time. At 12:00 UTC, Kiritimati is 2 hours into
+       * its day and Niue 1 hour into its, so a row placed between the two local midnights is
+       * inside exactly one of them, every run.
+       */
+      const today = new Date();
+      const now = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(), 12, 0, 0));
 
       const eastDay = businessDayRange(now, "Pacific/Kiritimati");
       const westDay = businessDayRange(now, "Pacific/Niue");
       expect(eastDay.localDate).not.toBe(westDay.localDate);
+      // The east's day began first, so there is an hour that belongs to it alone.
+      expect(eastDay.start.getTime()).toBeLessThan(westDay.start.getTime());
+
+      const betweenMidnights = new Date((eastDay.start.getTime() + westDay.start.getTime()) / 2);
+      await backdatedAward(east, eastCard, betweenMidnights);
+      await backdatedAward(west, westCard, betweenMidnights);
 
       const eastCount = await prisma.$transaction((tx) => countAwardsInBusinessDay(tx, eastCard, "Pacific/Kiritimati", now));
       const westCount = await prisma.$transaction((tx) => countAwardsInBusinessDay(tx, westCard, "Pacific/Niue", now));
 
-      // The row is counted only by the business whose local day still contains it. The two zones
-      // are 25 hours apart, so a 20-hour-old row cannot be inside both.
-      const insideEast = twentyHoursAgo >= eastDay.start;
-      const insideWest = twentyHoursAgo >= westDay.start;
-      expect(eastCount.count).toBe(insideEast ? 1 : 0);
-      expect(westCount.count).toBe(insideWest ? 1 : 0);
-      expect(insideEast && insideWest).toBe(false);
+      // The same instant, counted by the business whose local day contains it and by no other.
+      const insideEast = betweenMidnights >= eastDay.start;
+      const insideWest = betweenMidnights >= westDay.start;
+      expect(insideEast).toBe(true);
+      expect(insideWest).toBe(false);
+      expect(eastCount.count).toBe(1);
+      expect(westCount.count).toBe(0);
       await expectReconciled(east.businessId);
       await expectReconciled(west.businessId);
     });
