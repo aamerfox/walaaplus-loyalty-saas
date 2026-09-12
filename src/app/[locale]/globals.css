@@ -169,6 +169,20 @@ h3,
 }
 
 /*
+ * Arabic headings are given room rather than inheriting a Latin display leading.
+ *
+ * Cairo sets taller than Nunito and Arabic carries marks ABOVE and BELOW the line - a tanween on
+ * one line and a descender on the next collide at the 1.15 leading a Latin hero headline wants. On
+ * the phone that showed as a third line of the landing headline overlapping the second. This is
+ * deliberately specific enough to beat a `leading-*` utility, because the utility is right for
+ * Latin and wrong here.
+ */
+:lang(ar) :is(h1, h2, h3, .font-display),
+[dir="rtl"] :is(h1, h2, h3, .font-display) {
+  line-height: 1.45;
+}
+
+/*
  * One visible focus ring for the whole product, on the keyboard path only.
  *
  * `:focus-visible` rather than `:focus` so a mouse click on a card does not draw a ring, while Tab

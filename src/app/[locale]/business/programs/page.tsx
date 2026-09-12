@@ -29,11 +29,11 @@ export default async function ProgramsPage({ params }: { params: Promise<{ local
     return <EmptyState testId="programs-no-business" title={t("noBusinessTitle")} body={t("noBusinessBody")} />;
   }
 
-  const { ctx, businessName } = resolved.context;
+  const { ctx } = resolved.context;
   if (!ctx.permissions.has(Permission.VIEW_TEMPLATES)) {
     return (
       <>
-        <PageHeader title={t("title")} subtitle={businessName} />
+        <PageHeader title={t("title")} description={t("subtitle")} />
         <Notice tone="warn" testId="programs-forbidden">
           {t("forbidden")}
         </Notice>
@@ -48,7 +48,7 @@ export default async function ProgramsPage({ params }: { params: Promise<{ local
     <>
       <PageHeader
         title={t("title")}
-        subtitle={businessName}
+        description={t("subtitle")}
         actions={
           canCreate ? (
             <Link
@@ -69,7 +69,7 @@ export default async function ProgramsPage({ params }: { params: Promise<{ local
       {programs.length === 0 ? (
         <EmptyState testId="programs-empty" title={t("emptyTitle")} body={t("emptyBody")} />
       ) : (
-        <ul className="grid gap-4 sm:grid-cols-2" data-testid="program-list">
+        <ul className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3" data-testid="program-list">
           {programs.map((program) => (
             <Card as="li" key={program.templateId} className="flex flex-col gap-3">
               <div className="flex items-start justify-between gap-3">

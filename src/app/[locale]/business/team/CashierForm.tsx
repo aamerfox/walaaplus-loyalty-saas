@@ -118,8 +118,8 @@ export default function CashierForm({ businessId }: { businessId: string }) {
           data-testid="cashier-message"
           className={`rounded-xl px-3 py-2 text-sm ${
             message.tone === "ok"
-              ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-400"
-              : "bg-rose-50 text-rose-700 dark:bg-rose-500/10 dark:text-rose-400"
+              ? "bg-success-bg text-success-ink dark:bg-mint-500/10 dark:text-success-ink"
+              : "bg-danger-bg text-danger-ink dark:bg-turquoise-500/20 dark:text-danger-ink"
           }`}
         >
           {message.text}
@@ -130,7 +130,7 @@ export default function CashierForm({ businessId }: { businessId: string }) {
         type="submit"
         disabled={pending}
         data-testid="cashier-submit"
-        className="rounded-xl bg-indigo-600 px-5 py-2.5 font-semibold text-white disabled:opacity-60"
+        className="rounded-xl bg-navy-900 px-5 py-2.5 font-semibold text-white disabled:opacity-60"
       >
         {pending ? t("creating") : t("create")}
       </button>

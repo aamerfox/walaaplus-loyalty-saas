@@ -29,11 +29,11 @@ export default async function LocationsPage({ params }: { params: Promise<{ loca
     return <EmptyState testId="locations-no-business" title={t("noBusinessTitle")} body={t("noBusinessBody")} />;
   }
 
-  const { ctx, businessName } = resolved.context;
+  const { ctx } = resolved.context;
   if (!ctx.permissions.has(Permission.VIEW_LOCATIONS)) {
     return (
       <>
-        <PageHeader title={t("title")} subtitle={businessName} />
+        <PageHeader title={t("title")} description={t("subtitle")} />
         <Notice tone="warn" testId="locations-forbidden">
           {t("forbidden")}
         </Notice>
@@ -45,7 +45,7 @@ export default async function LocationsPage({ params }: { params: Promise<{ loca
 
   return (
     <>
-      <PageHeader title={t("title")} subtitle={businessName} />
+      <PageHeader title={t("title")} description={t("subtitle")} />
 
       <ul className="grid gap-4 sm:grid-cols-2" data-testid="location-list">
         {locations.map((location) => (

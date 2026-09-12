@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
+import { Wordmark } from "@/components/brand/Wordmark";
 import { browserQrCameraDeps, selectQrEngine, startQrCamera, type QrCameraFailure } from "./qr-camera";
 
 /**
@@ -87,6 +88,7 @@ export default function ScannerClient({
 }) {
   const t = useTranslations("Scanner");
   const tc = useTranslations("Common");
+  const tn = useTranslations("Navigation");
   /*
    * The consent wording is its own namespace, not the screen's. `ENROLLMENT_CONSENT_VERSION` is
    * stamped against these exact strings, so the text a customer agrees to must not quietly become
@@ -454,21 +456,38 @@ export default function ScannerClient({
   const actionsBlocked = busy || (programLocations !== null && programLocations.length > 1 && locationId === "");
 
   const toneClass = {
-    ok: "bg-emerald-500/10 text-emerald-300",
+    ok: "bg-mint-500/15 text-mint-500",
     warn: "bg-amber-500/10 text-amber-300",
-    error: "bg-rose-500/10 text-rose-300",
+    error: "bg-danger-bg/20 text-white",
   } as const;
 
   return (
-    <main className="min-h-screen bg-zinc-950 px-4 py-6 text-zinc-100">
+    <main className="min-h-screen bg-navy-950 px-4 py-6 text-white">
       <div className="mx-auto w-full max-w-md space-y-5">
-        <header>
-          <h1 className="text-xl font-bold">{t("title")}</h1>
-          <p className="text-sm text-zinc-400">{businessName}</p>
-          <p className="mt-1 text-xs text-zinc-500">{t("location")}</p>
+        {/*
+          * The counter's own header: the product's mark, then which account this till is serving.
+          *
+          * The business name is LABELLED and small. It used to sit under the title at body size,
+          * which on the staging tenant made "TrueBiznes" read as the name of the app.
+          *
+          * The old third line promised every operation was recorded at Main. That stopped being
+          * true when programs gained locations, so it is gone: the card panel below names the
+          * program and the counter for the card actually in hand, which is the honest place for it.
+          */}
+        <header className="flex items-start justify-between gap-4">
+          <div>
+            <Wordmark tone="white" height={22} className="h-[22px] w-auto" />
+            <h1 className="mt-3 font-display text-xl font-extrabold">{t("title")}</h1>
+          </div>
+          <div className="min-w-0 text-end">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-white/55">{tn("businessLabel")}</p>
+            <p className="truncate text-sm font-semibold text-white/90" data-testid="scanner-business">
+              {businessName}
+            </p>
+          </div>
         </header>
 
-        <div className="flex rounded-xl bg-zinc-900 p-1 ring-1 ring-white/10" role="tablist">
+        <div className="flex rounded-xl bg-navy-900 p-1 ring-1 ring-white/10" role="tablist">
           {(["qr", "phone"] as const).map((key) => (
             <button
               key={key}
@@ -478,7 +497,7 @@ export default function ScannerClient({
               data-testid={`scanner-tab-${key}`}
               onClick={() => setTab(key)}
               className={`flex-1 rounded-lg py-2 text-sm font-semibold transition-colors ${
-                tab === key ? "bg-indigo-600 text-white" : "text-zinc-400"
+                tab === key ? "bg-turquoise-500 text-navy-950" : "text-white/70"
               }`}
             >
               {key === "qr" ? t("tabQr") : t("tabPhone")}
@@ -494,7 +513,7 @@ export default function ScannerClient({
               placeholder={t("qrPlaceholder")}
               dir="ltr"
               data-testid="scanner-qr-input"
-              className="w-full rounded-xl bg-zinc-900 px-4 py-3 text-sm ring-1 ring-white/10 outline-none focus:ring-indigo-500"
+              className="w-full rounded-xl bg-navy-900 px-4 py-3 text-sm ring-1 ring-white/10 outline-none focus:ring-turquoise-500"
             />
             <div className="flex gap-2">
               <button
@@ -502,7 +521,7 @@ export default function ScannerClient({
                 onClick={() => void lookup({ qr: qrValue })}
                 disabled={busy || qrValue.trim() === ""}
                 data-testid="scanner-qr-lookup"
-                className="flex-1 rounded-xl bg-indigo-600 py-3 font-bold disabled:opacity-50"
+                className="flex-1 rounded-xl bg-turquoise-500 py-3 font-bold text-navy-950 disabled:opacity-50"
               >
                 {busy ? t("searching") : t("lookup")}
               </button>
@@ -511,12 +530,12 @@ export default function ScannerClient({
                 onClick={() => (cameraOn ? stopCamera() : void startCamera())}
                 disabled={cameraStarting || engine === "unsupported"}
                 data-testid="scanner-camera-toggle"
-                className="rounded-xl bg-zinc-800 px-4 py-3 text-sm font-medium ring-1 ring-white/10 disabled:opacity-50"
+                className="rounded-xl bg-white/10 px-4 py-3 text-sm font-medium ring-1 ring-white/10 disabled:opacity-50"
               >
                 {cameraOn ? t("stopCamera") : t("startCamera")}
               </button>
             </div>
-            <p className="text-xs text-zinc-500">{t("qrHelp")}</p>
+            <p className="text-xs text-white/55">{t("qrHelp")}</p>
 
             {/*
               Always in the DOM, hidden when idle. The stream is attached to this element before
@@ -535,12 +554,12 @@ export default function ScannerClient({
             />
 
             {cameraOn && !cameraStarting && (
-              <p data-testid="scanner-camera-active" className="text-xs text-emerald-300">
+              <p data-testid="scanner-camera-active" className="text-xs text-mint-500">
                 {t("cameraScanning")}
               </p>
             )}
             {cameraStarting && (
-              <p data-testid="scanner-camera-starting" className="text-xs text-zinc-400">
+              <p data-testid="scanner-camera-starting" className="text-xs text-white/70">
                 {t("cameraStarting")}
               </p>
             )}
@@ -560,14 +579,14 @@ export default function ScannerClient({
               inputMode="tel"
               dir="ltr"
               data-testid="scanner-phone-input"
-              className="w-full rounded-xl bg-zinc-900 px-4 py-3 text-lg ring-1 ring-white/10 outline-none focus:ring-indigo-500"
+              className="w-full rounded-xl bg-navy-900 px-4 py-3 text-lg ring-1 ring-white/10 outline-none focus:ring-turquoise-500"
             />
             <button
               type="button"
               onClick={() => void lookup({ phone: phoneValue })}
               disabled={busy || phoneValue.trim() === ""}
               data-testid="scanner-phone-lookup"
-              className="w-full rounded-xl bg-indigo-600 py-3 font-bold disabled:opacity-50"
+              className="w-full rounded-xl bg-turquoise-500 py-3 font-bold text-navy-950 disabled:opacity-50"
             >
               {busy ? t("searching") : t("lookup")}
             </button>
@@ -581,9 +600,9 @@ export default function ScannerClient({
         )}
 
         {enrollPhone !== null && (
-          <section data-testid="scanner-enroll" className="space-y-3 rounded-2xl bg-zinc-900 p-5 ring-1 ring-white/10">
+          <section data-testid="scanner-enroll" className="space-y-3 rounded-2xl bg-navy-900 p-5 ring-1 ring-white/10">
             <div>
-              <p className="text-xs uppercase tracking-wide text-zinc-500">{t("enrollTitle")}</p>
+              <p className="text-xs uppercase tracking-wide text-white/55">{t("enrollTitle")}</p>
               <p dir="ltr" data-testid="scanner-enroll-phone" className="text-lg font-bold">
                 {enrollPhone}
               </p>
@@ -595,7 +614,7 @@ export default function ScannerClient({
               placeholder={t("enrollFirstName")}
               maxLength={80}
               data-testid="scanner-enroll-first-name"
-              className="w-full rounded-xl bg-zinc-950 px-4 py-3 text-sm ring-1 ring-white/10 outline-none focus:ring-indigo-500"
+              className="w-full rounded-xl bg-navy-950/60 px-4 py-3 text-sm ring-1 ring-white/10 outline-none focus:ring-turquoise-500"
             />
             <input
               value={enrollLastName}
@@ -603,11 +622,11 @@ export default function ScannerClient({
               placeholder={t("enrollLastName")}
               maxLength={80}
               data-testid="scanner-enroll-last-name"
-              className="w-full rounded-xl bg-zinc-950 px-4 py-3 text-sm ring-1 ring-white/10 outline-none focus:ring-indigo-500"
+              className="w-full rounded-xl bg-navy-950/60 px-4 py-3 text-sm ring-1 ring-white/10 outline-none focus:ring-turquoise-500"
             />
 
             {/* Read aloud, ticked in front of the customer. The server stamps which wording and when. */}
-            <label className="flex items-start gap-3 text-sm text-zinc-300">
+            <label className="flex items-start gap-3 text-sm text-white/80">
               <input
                 type="checkbox"
                 checked={enrollConsent}
@@ -617,15 +636,15 @@ export default function ScannerClient({
               />
               <span>{tConsent("consentLabel")}</span>
             </label>
-            <p className="text-xs text-zinc-500">{tConsent("privacyNote")}</p>
-            <p className="text-xs text-zinc-500">{t("enrollReadAloud")}</p>
+            <p className="text-xs text-white/55">{tConsent("privacyNote")}</p>
+            <p className="text-xs text-white/55">{t("enrollReadAloud")}</p>
 
             <button
               type="button"
               onClick={() => void enrollAtCounter()}
               disabled={busy}
               data-testid="scanner-enroll-submit"
-              className="w-full rounded-xl bg-indigo-600 py-3 font-bold disabled:opacity-50"
+              className="w-full rounded-xl bg-turquoise-500 py-3 font-bold text-navy-950 disabled:opacity-50"
             >
               {busy ? t("searching") : t("enrollSubmit")}
             </button>
@@ -633,8 +652,8 @@ export default function ScannerClient({
         )}
 
         {cardLink !== null && (
-          <section data-testid="scanner-card-link" className="space-y-3 rounded-2xl bg-zinc-900 p-5 ring-1 ring-white/10">
-            <p className="text-xs uppercase tracking-wide text-zinc-500">{t("cardLinkTitle")}</p>
+          <section data-testid="scanner-card-link" className="space-y-3 rounded-2xl bg-navy-900 p-5 ring-1 ring-white/10">
+            <p className="text-xs uppercase tracking-wide text-white/55">{t("cardLinkTitle")}</p>
             <div
               data-testid="scanner-card-qr"
               className="mx-auto w-fit rounded-xl bg-white p-3"
@@ -647,36 +666,36 @@ export default function ScannerClient({
               dir="ltr"
               value={cardLink.url}
               onFocus={(e) => e.currentTarget.select()}
-              className="w-full rounded-xl bg-zinc-950 px-4 py-3 font-mono text-xs ring-1 ring-white/10"
+              className="w-full rounded-xl bg-navy-950/60 px-4 py-3 font-mono text-xs ring-1 ring-white/10"
             />
             <button
               type="button"
               onClick={() => void copyCardLink()}
               data-testid="scanner-card-link-copy"
-              className="w-full rounded-xl bg-zinc-800 py-3 text-sm font-medium ring-1 ring-white/10"
+              className="w-full rounded-xl bg-white/10 py-3 text-sm font-medium ring-1 ring-white/10"
             >
               {linkCopied ? t("cardLinkCopied") : t("cardLinkCopy")}
             </button>
-            <p className="text-xs text-zinc-500">{t("cardLinkHelp")}</p>
+            <p className="text-xs text-white/55">{t("cardLinkHelp")}</p>
           </section>
         )}
 
         {card !== null && (
-          <section data-testid="scanner-card" className="space-y-4 rounded-2xl bg-zinc-900 p-5 ring-1 ring-white/10">
+          <section data-testid="scanner-card" className="space-y-4 rounded-2xl bg-navy-900 p-5 ring-1 ring-white/10">
             <div>
-              <p className="text-xs uppercase tracking-wide text-zinc-500">{t("customer")}</p>
+              <p className="text-xs uppercase tracking-wide text-white/55">{t("customer")}</p>
               <p className="text-lg font-bold">{[card.firstName, card.lastName].filter(Boolean).join(" ") || "—"}</p>
-              <p dir="ltr" className="text-sm text-zinc-400">
+              <p dir="ltr" className="text-sm text-white/70">
                 {card.phone}
               </p>
             </div>
 
             {/* Which program this card belongs to. A merchant running two of them needs to see it
                 before awarding anything, and the balance below means nothing without it. */}
-            <p data-testid="scanner-program" className="rounded-xl bg-zinc-950 px-4 py-2 text-sm">
-              <span className="text-zinc-500">{t("programLabel")} </span>
+            <p data-testid="scanner-program" className="rounded-xl bg-navy-950/60 px-4 py-2 text-sm">
+              <span className="text-white/55">{t("programLabel")} </span>
               <span className="font-semibold">{card.programName}</span>
-              <span className="ms-2 rounded-full bg-zinc-800 px-2 py-0.5 text-xs text-zinc-300">
+              <span className="ms-2 rounded-full bg-white/10 px-2 py-0.5 text-xs text-white/80">
                 {t(`cardType.${card.cardType}`)}
               </span>
             </p>
@@ -684,7 +703,7 @@ export default function ScannerClient({
             {/* The counter. Present only when there is a real choice; required when there is. */}
             {programLocations !== null && programLocations.length > 0 && (
               <div data-testid="scanner-location">
-                <label htmlFor="scanner-location-select" className="text-xs uppercase tracking-wide text-zinc-500">
+                <label htmlFor="scanner-location-select" className="text-xs uppercase tracking-wide text-white/55">
                   {t("locationLabel")}
                 </label>
                 <select
@@ -692,7 +711,7 @@ export default function ScannerClient({
                   value={locationId}
                   onChange={(e) => setLocationId(e.target.value)}
                   data-testid="scanner-location-select"
-                  className="mt-1 w-full rounded-xl bg-zinc-950 px-4 py-3 ring-1 ring-white/10"
+                  className="mt-1 w-full rounded-xl bg-navy-950/60 px-4 py-3 ring-1 ring-white/10"
                 >
                   <option value="">{t("locationChoose")}</option>
                   {programLocations.map((location) => (
@@ -714,30 +733,30 @@ export default function ScannerClient({
               onClick={() => void revealCardLink()}
               disabled={busy}
               data-testid="scanner-reveal-link"
-              className="w-full rounded-xl bg-zinc-800 py-2 text-sm font-medium ring-1 ring-white/10 disabled:opacity-50"
+              className="w-full rounded-xl bg-white/10 py-2 text-sm font-medium ring-1 ring-white/10 disabled:opacity-50"
             >
               {t("revealCardLink")}
             </button>
 
             {card.cardType === "STAMP" ? (
               <>
-                <div className="flex gap-4 rounded-xl bg-zinc-950 px-4 py-3">
+                <div className="flex gap-4 rounded-xl bg-navy-950/60 px-4 py-3">
                   <div>
-                    <p className="text-xs text-zinc-500">{t("balance")}</p>
+                    <p className="text-xs text-white/55">{t("balance")}</p>
                     <p data-testid="scanner-stamps" className="text-lg font-bold">
                       {t("stamps", { count: card.stampBalance })}
                     </p>
                   </div>
                   <div>
-                    <p className="text-xs text-zinc-500">&nbsp;</p>
-                    <p data-testid="scanner-rewards" className="text-lg font-bold text-emerald-300">
+                    <p className="text-xs text-white/55">&nbsp;</p>
+                    <p data-testid="scanner-rewards" className="text-lg font-bold text-mint-500">
                       {t("rewards", { count: card.rewardBalance })}
                     </p>
                   </div>
                 </div>
 
                 <div className="space-y-2">
-                  <p className="text-xs uppercase tracking-wide text-zinc-500">{t("awardTitle")}</p>
+                  <p className="text-xs uppercase tracking-wide text-white/55">{t("awardTitle")}</p>
                   <div className="flex items-center gap-2">
                     <input
                       type="number"
@@ -746,7 +765,7 @@ export default function ScannerClient({
                       onChange={(e) => setQuantity(Math.max(1, Number(e.target.value) || 1))}
                       aria-label={t("awardQuantity")}
                       data-testid="scanner-quantity"
-                      className="w-20 rounded-xl bg-zinc-950 px-3 py-3 text-center ring-1 ring-white/10"
+                      className="w-20 rounded-xl bg-navy-950/60 px-3 py-3 text-center ring-1 ring-white/10"
                     />
                     <button
                       type="button"
@@ -761,7 +780,7 @@ export default function ScannerClient({
                               : t("awarded", { count: r.stampsAwarded ?? 0 }),
                         }))
                       }
-                      className="flex-1 rounded-xl bg-indigo-600 py-3 font-bold disabled:opacity-50"
+                      className="flex-1 rounded-xl bg-turquoise-500 py-3 font-bold text-navy-950 disabled:opacity-50"
                     >
                       {t("awardManual")}
                     </button>
@@ -776,7 +795,7 @@ export default function ScannerClient({
                       placeholder={t("purchaseAmount")}
                       aria-label={t("purchaseAmount")}
                       data-testid="scanner-purchase-amount"
-                      className="w-32 rounded-xl bg-zinc-950 px-3 py-3 ring-1 ring-white/10"
+                      className="w-32 rounded-xl bg-navy-950/60 px-3 py-3 ring-1 ring-white/10"
                     />
                     <button
                       type="button"
@@ -795,7 +814,7 @@ export default function ScannerClient({
                           }),
                         )
                       }
-                      className="flex-1 rounded-xl bg-zinc-800 py-3 text-sm font-semibold ring-1 ring-white/10 disabled:opacity-50"
+                      className="flex-1 rounded-xl bg-white/10 py-3 text-sm font-semibold ring-1 ring-white/10 disabled:opacity-50"
                     >
                       {t("awardPurchase")}
                     </button>
@@ -807,22 +826,22 @@ export default function ScannerClient({
                   disabled={actionsBlocked || card.rewardBalance < 1}
                   data-testid="scanner-redeem"
                   onClick={() => void act("/api/scanner/redeem", {}, () => ({ tone: "ok", text: t("redeemed") }))}
-                  className="w-full rounded-xl bg-emerald-600 py-3 font-bold disabled:opacity-40"
+                  className="w-full rounded-xl bg-mint-500 py-3 font-bold text-navy-950 disabled:opacity-40"
                 >
                   {t("redeem")}
                 </button>
               </>
             ) : (
               <>
-                <div className="rounded-xl bg-zinc-950 px-4 py-3">
-                  <p className="text-xs text-zinc-500">{card.pointsLabel ?? t("pointsBalance")}</p>
+                <div className="rounded-xl bg-navy-950/60 px-4 py-3">
+                  <p className="text-xs text-white/55">{card.pointsLabel ?? t("pointsBalance")}</p>
                   <p data-testid="scanner-points" className="text-lg font-bold tabular-nums">
                     {t("points", { count: card.pointBalance })}
                   </p>
                 </div>
 
                 <div className="space-y-2">
-                  <p className="text-xs uppercase tracking-wide text-zinc-500">{t("awardTitle")}</p>
+                  <p className="text-xs uppercase tracking-wide text-white/55">{t("awardTitle")}</p>
 
                   {/* The earn mode decides which buttons exist. Offering "per visit" on a
                       spend-block program would be offering a request the engine refuses. */}
@@ -836,7 +855,7 @@ export default function ScannerClient({
                         placeholder={t("purchaseAmount")}
                         aria-label={t("purchaseAmount")}
                         data-testid="scanner-points-purchase-amount"
-                        className="w-32 rounded-xl bg-zinc-950 px-3 py-3 ring-1 ring-white/10"
+                        className="w-32 rounded-xl bg-navy-950/60 px-3 py-3 ring-1 ring-white/10"
                       />
                       <button
                         type="button"
@@ -849,7 +868,7 @@ export default function ScannerClient({
                             (r) => ({ tone: "ok", text: t("pointsAwarded", { count: r.pointsDelta ?? 0 }) }),
                           )
                         }
-                        className="flex-1 rounded-xl bg-indigo-600 py-3 font-bold disabled:opacity-50"
+                        className="flex-1 rounded-xl bg-turquoise-500 py-3 font-bold text-navy-950 disabled:opacity-50"
                       >
                         {t("awardPurchase")}
                       </button>
@@ -867,7 +886,7 @@ export default function ScannerClient({
                           text: t("pointsAwarded", { count: r.pointsDelta ?? 0 }),
                         }))
                       }
-                      className="w-full rounded-xl bg-indigo-600 py-3 font-bold disabled:opacity-50"
+                      className="w-full rounded-xl bg-turquoise-500 py-3 font-bold text-navy-950 disabled:opacity-50"
                     >
                       {t("awardVisit")}
                     </button>
@@ -881,7 +900,7 @@ export default function ScannerClient({
                       onChange={(e) => setQuantity(Math.max(1, Number(e.target.value) || 1))}
                       aria-label={t("awardQuantity")}
                       data-testid="scanner-points-quantity"
-                      className="w-20 rounded-xl bg-zinc-950 px-3 py-3 text-center ring-1 ring-white/10"
+                      className="w-20 rounded-xl bg-navy-950/60 px-3 py-3 text-center ring-1 ring-white/10"
                     />
                     <button
                       type="button"
@@ -893,7 +912,7 @@ export default function ScannerClient({
                           text: t("pointsAwarded", { count: r.pointsDelta ?? 0 }),
                         }))
                       }
-                      className="flex-1 rounded-xl bg-zinc-800 py-3 text-sm font-semibold ring-1 ring-white/10 disabled:opacity-50"
+                      className="flex-1 rounded-xl bg-white/10 py-3 text-sm font-semibold ring-1 ring-white/10 disabled:opacity-50"
                     >
                       {t("awardManual")}
                     </button>
@@ -901,9 +920,9 @@ export default function ScannerClient({
                 </div>
 
                 <div className="space-y-2">
-                  <p className="text-xs uppercase tracking-wide text-zinc-500">{t("redeemTitle")}</p>
+                  <p className="text-xs uppercase tracking-wide text-white/55">{t("redeemTitle")}</p>
                   {card.tiers.length === 0 ? (
-                    <p className="text-sm text-zinc-500">{t("noTiers")}</p>
+                    <p className="text-sm text-white/55">{t("noTiers")}</p>
                   ) : (
                     <ul className="space-y-2" data-testid="scanner-tiers">
                       {card.tiers.map((tier) => (
@@ -918,7 +937,7 @@ export default function ScannerClient({
                                 text: t("redeemed"),
                               }))
                             }
-                            className="flex w-full items-center justify-between gap-3 rounded-xl bg-emerald-600 px-4 py-3 text-start font-bold disabled:bg-zinc-800 disabled:text-zinc-500 disabled:opacity-100"
+                            className="flex w-full items-center justify-between gap-3 rounded-xl bg-mint-500 px-4 py-3 text-start font-bold text-navy-950 disabled:bg-white/10 disabled:text-white/40 disabled:opacity-100"
                           >
                             <span>{tier.name}</span>
                             <span className="tabular-nums text-sm font-semibold">
@@ -940,7 +959,7 @@ export default function ScannerClient({
                   onChange={(e) => setReverseReason(e.target.value)}
                   placeholder={t("reverseReason")}
                   data-testid="scanner-reverse-reason"
-                  className="w-full rounded-xl bg-zinc-950 px-3 py-2 text-sm ring-1 ring-white/10"
+                  className="w-full rounded-xl bg-navy-950/60 px-3 py-2 text-sm ring-1 ring-white/10"
                 />
                 <button
                   type="button"
@@ -952,11 +971,11 @@ export default function ScannerClient({
                       text: t("reversed"),
                     }))
                   }
-                  className="w-full rounded-xl bg-zinc-800 py-2 text-sm font-semibold text-rose-300 ring-1 ring-white/10 disabled:opacity-40"
+                  className="w-full rounded-xl bg-white/10 py-2 text-sm font-semibold text-danger-ink ring-1 ring-white/10 disabled:opacity-40"
                 >
                   {t("reverse")}
                 </button>
-                <p className="text-xs text-zinc-500">{t("reverseHint")}</p>
+                <p className="text-xs text-white/55">{t("reverseHint")}</p>
               </div>
             )}
           </section>

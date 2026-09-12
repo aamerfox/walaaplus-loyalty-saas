@@ -170,7 +170,7 @@ export default function ProgramForm({ locale, businessId }: { locale: string; bu
       </Field>
 
       {error !== null && (
-        <p role="alert" data-testid="program-error" className="rounded-xl bg-rose-50 px-3 py-2 text-sm text-rose-700 dark:bg-rose-500/10 dark:text-rose-400">
+        <p role="alert" data-testid="program-error" className="rounded-xl bg-danger-bg px-3 py-2 text-sm text-danger-ink dark:bg-turquoise-500/20 dark:text-danger-ink">
           {error}
         </p>
       )}
@@ -179,7 +179,7 @@ export default function ProgramForm({ locale, businessId }: { locale: string; bu
         type="submit"
         disabled={pending}
         data-testid="program-submit"
-        className="w-full rounded-xl bg-indigo-600 py-4 text-lg font-bold text-white shadow-lg transition-colors hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
+        className="w-full rounded-xl bg-navy-900 py-4 text-lg font-bold text-white shadow-lg transition-colors hover:bg-navy-800 disabled:cursor-not-allowed disabled:opacity-60"
       >
         {pending ? t("creating") : t("create")}
       </button>
@@ -188,7 +188,7 @@ export default function ProgramForm({ locale, businessId }: { locale: string; bu
 }
 
 const INPUT =
-  "w-full rounded-xl border border-zinc-300 px-4 py-3 text-zinc-900 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100";
+  "w-full rounded-xl border border-zinc-300 px-4 py-3 text-zinc-900 outline-none focus:border-navy-200 focus:ring-2 focus:ring-turquoise-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100";
 
 function Field({ id, label, help, children }: { id: string; label: string; help: string; children: React.ReactNode }) {
   return (

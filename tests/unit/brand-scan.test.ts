@@ -21,7 +21,17 @@ import { describe, expect, it } from "vitest";
  */
 
 const ROOT = path.resolve(import.meta.dirname, "../..");
+/**
+ * The old name, in both scripts.
+ *
+ * The Latin half of this rule passed for months while the Arabic registration page still carried
+ * the old product name transliterated — and carrying a fatha on the waw, so that even a search in
+ * Arabic for the plain spelling missed it. Diacritics are stripped before the test, because a brand
+ * leak must not be able to hide behind a vowel mark.
+ */
 const OLD_BRAND = /walaaplus/i;
+const OLD_BRAND_ARABIC = /ولاء\s*بلس/;
+const ARABIC_DIACRITICS = /[ً-ْٰ]/g;
 
 /** Trees whose contents reach a user's eyes. */
 const USER_FACING = ["src/app", "src/components", "messages"];
@@ -62,7 +72,10 @@ describe("the Zademi rebrand", () => {
     for (const tree of USER_FACING) {
       for (const file of walk(path.join(ROOT, tree))) {
         const contents = readFileSync(file, "utf8");
-        if (OLD_BRAND.test(contents)) offenders.push(path.relative(ROOT, file).replace(/\\/g, "/"));
+        const unvocalised = contents.replace(ARABIC_DIACRITICS, "");
+        if (OLD_BRAND.test(contents) || OLD_BRAND_ARABIC.test(unvocalised)) {
+          offenders.push(path.relative(ROOT, file).replace(/\\/g, "/"));
+        }
       }
     }
     expect(offenders, `the old brand name still appears in: ${offenders.join(", ")}`).toEqual([]);

@@ -7,6 +7,7 @@ import { signIn } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import { Link } from "@/i18n/routing";
 import { ArrowLeft, Store } from "lucide-react";
+import { Button, Field, Notice, TextInput } from "@/components/ui";
 
 /**
  * Registration. Real this time.
@@ -139,11 +140,14 @@ export default function RegisterPage() {
   }
 
   return (
-    <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950 font-sans flex text-zinc-900 dark:text-zinc-50" dir={dir}>
+    <div className="flex min-h-screen bg-app text-ink" dir={dir}>
       {/* Visual panel, hidden on the phone this product is used on. */}
-      <div className="hidden lg:flex w-[45%] bg-indigo-600 relative overflow-hidden flex-col justify-between p-12">
-        <div className="absolute top-0 right-0 w-96 h-96 bg-white/10 rounded-full blur-3xl -translate-y-1/2 translate-x-1/2" />
-        <div className="absolute bottom-0 left-0 w-96 h-96 bg-rose-500/20 rounded-full blur-3xl translate-y-1/2 -translate-x-1/2" />
+      <div className="relative hidden w-[45%] flex-col justify-between overflow-hidden bg-navy-900 p-12 lg:flex">
+        {/* One turquoise wash, the same one the landing hero uses. Not two competing blooms. */}
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute -bottom-40 start-[-10%] size-[32rem] rounded-full bg-turquoise-500/20 blur-3xl"
+        />
 
         <div className="relative z-10">
           <Link href="/" aria-label="Zademi" className="inline-flex">
@@ -153,24 +157,26 @@ export default function RegisterPage() {
         </div>
 
         <div className="relative z-10 text-white max-w-md">
-          <h2 className="text-4xl font-black mb-6 leading-[1.2]">{t("splashTitle")}</h2>
-          <p className="text-indigo-200 text-lg font-medium leading-relaxed">{t("splashBody")}</p>
+          <h2 className="mb-6 font-display text-4xl font-extrabold leading-[1.2]">{t("splashTitle")}</h2>
+          {/* White at 75%, not `accent-ink`: turquoise body text on navy was the one contrast
+              failure left on a public page. */}
+          <p className="text-lg leading-relaxed text-white/75">{t("splashBody")}</p>
         </div>
       </div>
 
-      <div className="flex-1 flex flex-col justify-center p-6 sm:p-12 relative">
+      <div className="relative flex flex-1 flex-col justify-center p-4 py-12 sm:p-12">
         <Link
           href="/"
-          className="absolute top-8 start-8 flex items-center gap-2 text-zinc-500 hover:text-zinc-900 dark:hover:text-white font-bold text-sm bg-white dark:bg-zinc-900 px-4 py-2 rounded-full border border-zinc-200 dark:border-zinc-800 shadow-sm transition-all hover:scale-105"
+          className="absolute top-6 start-4 inline-flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-semibold text-ink-muted transition-colors hover:bg-surface-muted hover:text-ink sm:start-8 sm:top-8"
         >
-          <ArrowLeft size={16} className={locale === "ar" ? "rotate-180" : ""} />
+          <ArrowLeft size={16} aria-hidden="true" className="rtl:rotate-180" />
           {t("back")}
         </Link>
 
         <div className="max-w-md mx-auto w-full">
-          <div className="mb-8 mt-12">
-            <h1 className="text-3xl font-black mb-2">{t("title")}</h1>
-            <p className="text-zinc-500 font-medium">{t("subtitle")}</p>
+          <div className="mb-6 mt-10">
+            <h1 className="font-display text-3xl font-extrabold text-ink">{t("title")}</h1>
+            <p className="mt-2 leading-relaxed text-ink-muted">{t("subtitle")}</p>
           </div>
 
           {/*
@@ -179,10 +185,10 @@ export default function RegisterPage() {
           */}
           <div
             data-testid="register-scope"
-            className="mb-6 flex items-start gap-3 rounded-2xl border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900"
+            className="mb-6 flex items-start gap-3 rounded-2xl border border-border bg-surface p-4"
           >
-            <Store size={20} className="mt-0.5 flex-shrink-0 text-indigo-600" />
-            <p className="text-sm font-medium text-zinc-600 dark:text-zinc-400">{t("localBusinessOnly")}</p>
+            <Store size={20} aria-hidden="true" className="mt-0.5 shrink-0 text-accent-ink" />
+            <p className="text-sm leading-relaxed text-ink-muted">{t("localBusinessOnly")}</p>
           </div>
 
           <form onSubmit={onSubmit} noValidate data-testid="register-form" className="space-y-6">
@@ -244,45 +250,37 @@ export default function RegisterPage() {
             />
 
             {formError !== null && (
-              <p
-                role="alert"
-                data-testid="register-error"
-                className="rounded-xl bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700 dark:bg-rose-500/10 dark:text-rose-400"
-              >
+              <Notice tone="danger" testId="register-error">
                 {formError}
-              </p>
+              </Notice>
             )}
 
             {notice !== null && (
-              <div
-                role="status"
-                data-testid="register-notice"
-                className="rounded-xl bg-amber-50 px-4 py-3 text-sm font-medium text-amber-800 dark:bg-amber-500/10 dark:text-amber-300"
-              >
-                <p>{notice}</p>
-                <Link href="/auth/login" className="mt-2 inline-block font-bold text-indigo-600 hover:underline">
+              <div className="space-y-2">
+                <Notice tone="warn" testId="register-notice">
+                  {notice}
+                </Notice>
+                <Link
+                  href="/auth/login"
+                  className="inline-block font-semibold text-accent-ink underline-offset-4 hover:underline"
+                >
                   {t("signIn")}
                 </Link>
               </div>
             )}
 
             <div className="pt-2">
-              <button
-                type="submit"
-                disabled={pending}
-                data-testid="register-submit"
-                className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-4 rounded-xl flex justify-center items-center shadow-lg shadow-indigo-600/20 transition-transform active:scale-95 text-lg disabled:cursor-not-allowed disabled:opacity-60"
-              >
+              <Button type="submit" size="lg" className="w-full" disabled={pending} testId="register-submit">
                 {pending ? t("submitting") : t("submit")}
-              </button>
-              <p className="text-xs font-bold text-zinc-400 text-center mt-4">{t("terms")}</p>
+              </Button>
+              <p className="mt-4 text-center text-xs leading-relaxed text-ink-faint">{t("terms")}</p>
             </div>
           </form>
 
-          <div className="mt-8 text-center pt-8 border-t border-zinc-200 dark:border-zinc-800">
-            <p className="text-sm font-medium text-zinc-500">
+          <div className="mt-8 border-t border-border pt-8 text-center">
+            <p className="text-sm text-ink-muted">
               {t("haveAccount")}{" "}
-              <Link href="/auth/login" className="text-indigo-600 font-bold hover:underline">
+              <Link href="/auth/login" className="font-semibold text-accent-ink underline-offset-4 hover:underline">
                 {t("signIn")}
               </Link>
             </p>
@@ -293,6 +291,10 @@ export default function RegisterPage() {
   );
 }
 
+/**
+ * The one local wrapper left: registration's fields carry an optional-hint and an error in the same
+ * slot, which `Field` already models. This is the adaptor between the two, not a second input.
+ */
 function TextField({
   id,
   label,
@@ -318,14 +320,9 @@ function TextField({
   hint?: string;
   dir?: "ltr" | "rtl";
 }) {
-  const describedBy = error ? `${id}-error` : hint ? `${id}-hint` : undefined;
   return (
-    <div className="space-y-2">
-      <label htmlFor={id} className="block text-xs font-bold uppercase tracking-wider text-zinc-500">
-        {label}
-        {hint && !error ? <span className="ms-2 normal-case font-medium text-zinc-400">{hint}</span> : null}
-      </label>
-      <input
+    <Field id={id} label={label} hint={hint} error={error}>
+      <TextInput
         id={id}
         name={id}
         type={type}
@@ -336,18 +333,8 @@ function TextField({
         autoComplete={autoComplete}
         required={required}
         aria-invalid={error ? true : undefined}
-        aria-describedby={describedBy}
-        className="w-full bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-indigo-500 outline-none transition-all dark:text-white aria-[invalid=true]:border-rose-500"
+        aria-describedby={error ? `${id}-error` : hint ? `${id}-hint` : undefined}
       />
-      {error ? (
-        <p id={`${id}-error`} data-testid={`${id}-error`} className="text-xs font-medium text-rose-600 dark:text-rose-400">
-          {error}
-        </p>
-      ) : hint ? (
-        <p id={`${id}-hint`} className="sr-only">
-          {hint}
-        </p>
-      ) : null}
-    </div>
+    </Field>
   );
 }

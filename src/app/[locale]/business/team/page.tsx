@@ -47,11 +47,11 @@ export default async function TeamPage({
     return <Notice tone="warn">{t("none")}</Notice>;
   }
 
-  const { ctx, businessName } = resolved.context;
+  const { ctx } = resolved.context;
   if (!ctx.permissions.has(Permission.VIEW_STAFF)) {
     return (
       <>
-        <PageHeader title={t("title")} subtitle={businessName} />
+        <PageHeader title={t("title")} description={t("subtitle")} />
         <Notice tone="warn" testId="staff-forbidden">
           {t("forbidden")}
         </Notice>
@@ -69,7 +69,7 @@ export default async function TeamPage({
 
   return (
     <>
-      <PageHeader title={t("title")} subtitle={businessName} />
+      <PageHeader title={t("title")} description={t("subtitle")} />
 
       {isOwner ? (
         <CashierForm businessId={ctx.businessId} />

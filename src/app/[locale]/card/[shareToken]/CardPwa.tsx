@@ -63,7 +63,7 @@ export default function CardPwa({ locale, shareToken }: { locale: string; shareT
             void installEvent.prompt();
             setInstallEvent(null);
           }}
-          className="mt-3 w-full rounded-xl bg-indigo-600 py-3 font-bold text-white transition-colors hover:bg-indigo-700"
+          className="mt-3 w-full rounded-xl bg-navy-900 py-3 font-bold text-white transition-colors hover:bg-navy-800"
         >
           {t("installButton")}
         </button>

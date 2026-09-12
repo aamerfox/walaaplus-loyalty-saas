@@ -1,4 +1,6 @@
+import Link from "next/link";
 import { getTranslations } from "next-intl/server";
+import { Badge, EmptyState, PageHeader, Section, StatTile, Table, Td, Th } from "@/components/ui";
 import { notFound, redirect } from "next/navigation";
 import { getCurrentUserId } from "@/server/auth/session";
 import { listCardOperations } from "@/server/customers/lookup";
@@ -63,65 +65,79 @@ export default async function CustomerDetailPage({
   }
 
   return (
-    <div className="space-y-6">
-      <header className="flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight text-zinc-900 dark:text-zinc-100">{t("historyTitle")}</h1>
-          <p className="mt-1 text-sm text-zinc-500">
-            {t("stamps")}: <span data-testid="detail-stamps">{balances.stampBalance}</span> · {t("rewards")}:{" "}
-            <span data-testid="detail-rewards">{balances.rewardBalance}</span>
-          </p>
-        </div>
-      </header>
+    <>
+      <PageHeader
+        title={t("historyTitle")}
+        description={t("historySubtitle")}
+        back={
+          <Link
+            href={`/${locale}/business/customers`}
+            className="inline-flex items-center gap-1 text-sm font-semibold text-ink-muted underline-offset-4 hover:text-ink hover:underline"
+          >
+            {/* A logical-direction chevron: it points back, which in Arabic is the other way. */}
+            <span aria-hidden="true" className="rtl:rotate-180">
+              ←
+            </span>
+            {t("title")}
+          </Link>
+        }
+      />
 
-      {operations.items.length === 0 ? (
-        <p className="rounded-2xl border border-zinc-200 bg-white p-6 text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900">
-          {t("historyEmpty")}
-        </p>
-      ) : (
-        <div className="overflow-x-auto rounded-2xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
-          <table className="w-full text-start text-sm">
-            <thead className="border-b border-zinc-200 text-xs uppercase tracking-wide text-zinc-500 dark:border-zinc-800">
+      {/* The balances are the headline of this page, so they are tiles rather than a line of text
+          under the title — a cashier checking a disputed balance reads them from across a counter. */}
+      <div className="grid gap-3 sm:grid-cols-3">
+        <StatTile label={t("stamps")} value={balances.stampBalance} testId="detail-stamps" />
+        <StatTile label={t("rewards")} value={balances.rewardBalance} testId="detail-rewards" tone="accent" />
+        <StatTile label={t("stampsToNext")} value={balances.stampsToNextReward} hint={t("stampsToNextHint")} />
+      </div>
+
+      <Section title={t("historySection")}>
+        {operations.items.length === 0 ? (
+          <EmptyState testId="history-empty" title={t("historyEmptyTitle")} body={t("historyEmpty")} />
+        ) : (
+          <Table testId="operations-table">
+            <thead>
               <tr>
-                <th className="px-4 py-3 text-start">{t("when")}</th>
-                <th className="px-4 py-3 text-start">{t("kind")}</th>
-                <th className="px-4 py-3 text-start">{t("quantity")}</th>
-                <th className="px-4 py-3 text-start">{t("balanceAfter")}</th>
-                <th className="px-4 py-3 text-start">{t("reason")}</th>
+                <Th>{t("when")}</Th>
+                <Th>{t("kind")}</Th>
+                <Th>{t("quantity")}</Th>
+                <Th className="hidden sm:table-cell">{t("balanceAfter")}</Th>
+                <Th className="hidden md:table-cell">{t("reason")}</Th>
               </tr>
             </thead>
             <tbody data-testid="operations-rows">
               {operations.items.map((op) => (
-                <tr key={op.id} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800/60">
-                  <td className="whitespace-nowrap px-4 py-3 text-zinc-500" dir="ltr">
-                    {op.createdAt.toISOString().slice(0, 16).replace("T", " ")}
-                  </td>
-                  <td className="px-4 py-3 font-medium text-zinc-900 dark:text-zinc-100">
+                <tr key={op.id} className="transition-colors hover:bg-surface-muted">
+                  <Td className="whitespace-nowrap text-ink-muted">
+                    <span dir="ltr">{op.createdAt.toISOString().slice(0, 16).replace("T", " ")}</span>
+                  </Td>
+                  <Td className="font-semibold">
                     {/* Only the kinds this phase can produce have labels; anything else — an
                         imported or future kind — shows its raw name rather than an empty cell. */}
                     {isLabelledKind(op.kind) ? kinds(op.kind) : op.kind}
                     {op.countsAsVisit && (
-                      <span className="ms-2 rounded-full bg-indigo-50 px-2 py-0.5 text-xs text-indigo-700 dark:bg-indigo-500/10 dark:text-indigo-400">
+                      <Badge tone="accent" className="ms-2">
                         {t("countsAsVisit")}
-                      </span>
+                      </Badge>
                     )}
-                  </td>
-                  <td
-                    className={`px-4 py-3 font-mono ${op.quantity < 0 ? "text-rose-600 dark:text-rose-400" : "text-emerald-600 dark:text-emerald-400"}`}
-                    dir="ltr"
-                  >
-                    {op.quantity > 0 ? `+${op.quantity}` : op.quantity} {op.unitType}
-                  </td>
-                  <td className="px-4 py-3 font-mono text-zinc-700 dark:text-zinc-300" dir="ltr">
-                    {op.balanceAfter}
-                  </td>
-                  <td className="px-4 py-3 text-zinc-500">{op.reason ?? op.comment ?? "—"}</td>
+                  </Td>
+                  <Td className={op.quantity < 0 ? "font-semibold text-danger-ink" : "font-semibold text-success-ink"}>
+                    <span dir="ltr" className="tabular-nums">
+                      {op.quantity > 0 ? `+${op.quantity}` : op.quantity} {op.unitType}
+                    </span>
+                  </Td>
+                  <Td className="hidden text-ink-muted sm:table-cell">
+                    <span dir="ltr" className="tabular-nums">
+                      {op.balanceAfter}
+                    </span>
+                  </Td>
+                  <Td className="hidden text-ink-muted md:table-cell">{op.reason ?? op.comment ?? "—"}</Td>
                 </tr>
               ))}
             </tbody>
-          </table>
-        </div>
-      )}
-    </div>
+          </Table>
+        )}
+      </Section>
+    </>
   );
 }

@@ -22,11 +22,11 @@ export default async function NewProgramPage({ params }: { params: Promise<{ loc
   const resolved = await resolveScannerContext(userId, null);
   if (resolved.kind !== "ready") redirect(`/${locale}/business/programs`);
 
-  const { ctx, businessName } = resolved.context;
+  const { ctx } = resolved.context;
   if (!ctx.permissions.has(Permission.EDIT_TEMPLATES)) {
     return (
       <>
-        <PageHeader title={t("newProgram")} subtitle={businessName} />
+        <PageHeader title={t("newProgram")} description={t("newSubtitle")} />
         <Notice tone="warn" testId="new-program-forbidden">
           {t("forbidden")}
         </Notice>
@@ -36,7 +36,7 @@ export default async function NewProgramPage({ params }: { params: Promise<{ loc
 
   return (
     <>
-      <PageHeader title={t("newProgram")} subtitle={businessName} />
+      <PageHeader title={t("newProgram")} description={t("newSubtitle")} />
       <NewProgramForm locale={locale} />
     </>
   );

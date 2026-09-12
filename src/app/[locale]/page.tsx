@@ -1,168 +1,135 @@
-"use client";
-
-import { Wordmark } from "@/components/brand/Wordmark";
-import { useTranslations, useLocale } from "next-intl";
+import { getTranslations } from "next-intl/server";
+import { CreditCard, MapPin, ScanLine } from "lucide-react";
 import { Link } from "@/i18n/routing";
-import { ArrowRight, Smartphone, Globe, Zap } from "lucide-react";
+import { Wordmark } from "@/components/brand/Wordmark";
+import { buttonClass, Card } from "@/components/ui";
 
-export default function LandingPage() {
-  const t = useTranslations("Landing");
-  const locale = useLocale();
-  const dir = locale === 'ar' ? 'rtl' : 'ltr';
+/**
+ * The public landing page.
+ *
+ * ## What was wrong with it
+ *
+ * It was the clearest evidence for the owner's verdict. A navy-to-crimson gradient headline, black
+ * pill buttons, three feature tiles in blue, fuchsia and green, and a grey skeleton pretending to be
+ * a dashboard: a page from a different product with a Zademi logo on it.
+ *
+ * Two things beyond the colours were wrong, and both are fixed here:
+ *
+ *  - **Every string was an inline `locale === 'ar' ? … : …` ternary**, which is the one thing this
+ *    project's i18n rule forbids — Arabic written inside a component is Arabic nobody can review,
+ *    and it is why the page read as an English page with Arabic pasted in.
+ *  - **It advertised Apple Wallet, Google Pay, white-label agencies and push automations.** None of
+ *    them exists. They are scheduled — 1.5, 3b, 4 — and a landing page is not the place to promise
+ *    a merchant something the counter cannot do. The three cards now describe what Zademi does
+ *    today, which is also a stronger page: stamp and points cards, a counter that works on a phone,
+ *    and several branches.
+ *
+ * Rendered on the server: it has no state, and a marketing page that ships a client bundle to say
+ * three sentences is paying for nothing.
+ */
+export default async function LandingPage({ params }: { params: Promise<{ locale: string }> }) {
+  const { locale } = await params;
+  const t = await getTranslations("Landing");
+
+  const features = [
+    { icon: CreditCard, title: t("featureCardsTitle"), body: t("featureCardsBody") },
+    { icon: ScanLine, title: t("featureCounterTitle"), body: t("featureCounterBody") },
+    { icon: MapPin, title: t("featureLocationsTitle"), body: t("featureLocationsBody") },
+  ];
 
   return (
-    <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950 font-sans text-zinc-900 dark:text-zinc-50 overflow-hidden" dir={dir}>
-      
-      {/* Navigation */}
-      <nav className="fixed top-0 inset-x-0 z-50 bg-white/80 dark:bg-zinc-950/80 backdrop-blur-xl border-b border-zinc-200 dark:border-zinc-800">
-        <div className="max-w-7xl mx-auto px-6 h-20 flex items-center justify-between">
-          <Wordmark />
+    <div className="min-h-screen bg-app">
+      <nav className="sticky top-0 z-50 border-b border-border bg-surface/90 backdrop-blur-md">
+        <div className="mx-auto flex h-16 max-w-6xl items-center gap-4 px-4 sm:h-20 sm:px-6">
+          <Link href="/" aria-label="Zademi" className="inline-flex">
+            <Wordmark height={28} className="h-7 w-auto" />
+          </Link>
 
-          <div className="hidden md:flex items-center gap-8 font-bold text-sm text-zinc-600 dark:text-zinc-400">
-             <Link href="/" className="hover:text-indigo-600 transition-colors">{t('navHome')}</Link>
-             <Link href="#features" className="hover:text-indigo-600 transition-colors">{t('navFeatures')}</Link>
-             <Link href="/pricing" className="hover:text-indigo-600 transition-colors">{t('navPricing')}</Link>
+          <div className="hidden flex-1 items-center justify-center gap-8 text-sm font-semibold text-ink-muted md:flex">
+            <Link href="/pricing" className="transition-colors hover:text-ink">
+              {t("navPricing")}
+            </Link>
           </div>
 
-          <div className="flex items-center gap-4">
-             <Link href="/auth/login" className="hidden sm:block font-bold text-sm tracking-wide text-zinc-600 dark:text-zinc-300 hover:text-indigo-600">
-                {t('navLogin')}
-             </Link>
-             <Link href="/auth/register" className="bg-zinc-900 dark:bg-white text-white dark:text-zinc-900 px-6 py-2.5 rounded-full font-bold text-sm tracking-wide shadow-lg hover:scale-105 transition-transform">
-                {t('ctaStart')}
-             </Link>
-             {/* Language Switcher */}
-             <Link href={locale === 'ar' ? '/en' : '/ar'} className="w-10 h-10 rounded-full border border-zinc-200 dark:border-zinc-800 flex items-center justify-center font-bold text-sm hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors">
-                {locale === 'ar' ? 'EN' : 'ع'}
-             </Link>
+          <div className="ms-auto flex items-center gap-2 md:ms-0">
+            {/* Below `sm` the bar holds the mark, one action and the language. Three controls and a
+                logo do not fit a 390px phone without the primary action wrapping onto two lines. */}
+            <div className="hidden sm:block">
+              <Link href="/auth/login" className={buttonClass("ghost", "sm")}>
+                {t("navLogin")}
+              </Link>
+            </div>
+            <Link href="/auth/register" className={buttonClass("primary", "sm")}>
+              {t("ctaStart")}
+            </Link>
+            {/* A language switch, not a flag: the label is the destination language. */}
+            <Link
+              href="/"
+              locale={locale === "ar" ? "en" : "ar"}
+              aria-label={locale === "ar" ? t("switchToEnglish") : t("switchToArabic")}
+              className="flex size-9 items-center justify-center rounded-xl border border-border text-sm font-bold text-ink-muted transition-colors hover:bg-surface-muted hover:text-ink"
+            >
+              <span aria-hidden="true">{locale === "ar" ? "EN" : "ع"}</span>
+            </Link>
           </div>
         </div>
       </nav>
 
-      {/* Hero Section */}
-      <main className="relative pt-32 pb-20 sm:pt-40 sm:pb-24">
-         
-         {/* Background Effects */}
-         <div className="absolute top-0 inset-x-0 h-screen overflow-hidden -z-10 pointer-events-none">
-            <div className={`absolute top-0 ${locale === 'ar' ? '-right-1/4' : '-left-1/4'} w-[1000px] h-[1000px] bg-indigo-500/20 rounded-full blur-[120px] mix-blend-multiply opacity-70`}></div>
-            <div className={`absolute bottom-0 ${locale === 'ar' ? '-left-1/4' : '-right-1/4'} w-[800px] h-[800px] bg-rose-500/10 rounded-full blur-[120px] mix-blend-multiply opacity-50`}></div>
-         </div>
+      {/*
+       * The hero is navy, because navy is the brand's structural colour and this is the first
+       * surface anyone sees. The accent is one turquoise wash, not a gradient across two hues.
+       */}
+      <header className="relative overflow-hidden bg-navy-900 text-white">
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute -top-40 end-[-10%] size-[34rem] rounded-full bg-turquoise-500/20 blur-3xl"
+        />
+        <div className="relative mx-auto max-w-4xl px-4 py-20 text-center sm:px-6 sm:py-28">
+          <p className="mb-6 inline-flex items-center gap-2 rounded-full border border-white/20 px-4 py-1.5 text-xs font-bold uppercase tracking-widest text-turquoise-200">
+            <span aria-hidden="true" className="size-1.5 rounded-full bg-mint-500" />
+            {t("badge")}
+          </p>
 
-         <div className="max-w-7xl mx-auto px-6 text-center">
-            
-            <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-indigo-50 dark:bg-indigo-500/10 text-indigo-700 dark:text-indigo-400 font-bold text-xs uppercase tracking-widest mb-8 border border-indigo-200 dark:border-indigo-500/20">
-               <span className="relative flex h-2 w-2">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-indigo-500"></span>
-               </span>
-               {locale === 'ar' ? 'متوفر الآن في سوريا والشرق الأوسط' : 'Available now in MENA'}
-            </div>
+          <h1 className="font-display text-4xl font-extrabold leading-[1.15] tracking-tight sm:text-6xl">
+            {t("heroTitle")}
+          </h1>
+          <p className="mx-auto mt-6 max-w-2xl text-lg leading-relaxed text-white/75">{t("heroSubtitle")}</p>
 
-            <h1 className="text-5xl sm:text-7xl font-black tracking-tight mb-8 leading-[1.1] max-w-4xl mx-auto">
-               {locale === 'ar' ? (
-                  <>
-                     بطاقات الولاء <span className="text-transparent bg-clip-text bg-gradient-to-r from-indigo-600 to-rose-500">في محفظة عملائك</span> مباشرةً.
-                  </>
-               ) : (
-                  <>
-                     Loyalty Cards natively in your <span className="text-transparent bg-clip-text bg-gradient-to-r from-indigo-600 to-rose-500">Customers&apos; Wallets.</span>
-                  </>
-               )}
-            </h1>
+          <div className="mt-10 flex flex-col items-center justify-center gap-3 sm:flex-row">
+            <Link href="/auth/register" className={buttonClass("accent", "lg")}>
+              {t("ctaStart")}
+            </Link>
+            <Link
+              href="/pricing"
+              className="inline-flex h-12 items-center justify-center rounded-xl border border-white/25 px-6 font-bold text-white transition-colors hover:bg-white/10"
+            >
+              {t("ctaPricing")}
+            </Link>
+          </div>
 
-            <p className="text-xl text-zinc-500 dark:text-zinc-400 font-medium max-w-2xl mx-auto mb-10 leading-relaxed">
-               {t('heroSubtitle')}
-            </p>
+        </div>
+      </header>
 
-            <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
-               <Link href="/auth/register" className="w-full sm:w-auto bg-indigo-600 hover:bg-indigo-700 text-white px-8 py-4 rounded-full font-black text-lg flex items-center justify-center gap-2 shadow-xl shadow-indigo-600/30 transition-transform active:scale-95">
-                  {t('ctaStart')} 
-                  <ArrowRight size={20} className={locale === 'ar' ? 'rotate-180' : ''} />
-               </Link>
-               <button className="w-full sm:w-auto bg-white dark:bg-zinc-900 border-2 border-zinc-200 dark:border-zinc-800 text-zinc-900 dark:text-white px-8 py-4 rounded-full font-black text-lg transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-800">
-                  {t('ctaDemo')}
-               </button>
-            </div>
-
-            {/* Dashboard Mockup Display */}
-            <div className="mt-20 relative mx-auto max-w-5xl">
-               <div className="absolute inset-0 bg-gradient-to-b from-transparent to-zinc-50 dark:to-zinc-950 z-10"></div>
-               <div className="rounded-t-[2.5rem] border border-zinc-200 dark:border-zinc-800 bg-white/50 dark:bg-zinc-900/50 backdrop-blur-xl p-4 sm:p-8 shadow-2xl relative overflow-hidden">
-                  
-                  {/* Fake UI Header */}
-                  <div className="flex items-center gap-2 mb-6">
-                     <div className="w-3 h-3 rounded-full bg-rose-500"></div>
-                     <div className="w-3 h-3 rounded-full bg-amber-500"></div>
-                     <div className="w-3 h-3 rounded-full bg-emerald-500"></div>
-                  </div>
-
-                  {/* Fake Dashboard Layout */}
-                  <div className="flex gap-8">
-                     <div className="hidden sm:block w-48 space-y-4 opacity-50">
-                        <div className="h-8 bg-zinc-200 dark:bg-zinc-800 rounded-lg"></div>
-                        <div className="h-8 bg-zinc-200 dark:bg-zinc-800 rounded-lg w-3/4"></div>
-                        <div className="h-8 bg-zinc-200 dark:bg-zinc-800 rounded-lg"></div>
-                     </div>
-                     <div className="flex-1 space-y-6">
-                        <div className="h-32 bg-indigo-50 dark:bg-indigo-500/10 rounded-2xl border border-indigo-100 dark:border-indigo-500/20 flex items-center p-6">
-                           <div className="space-y-3 w-full">
-                              <div className="h-4 bg-indigo-200 dark:bg-indigo-500/30 rounded w-1/4"></div>
-                              <div className="h-8 bg-indigo-600 dark:bg-indigo-500 rounded w-1/2"></div>
-                           </div>
-                        </div>
-                        <div className="grid grid-cols-2 gap-6">
-                           <div className="h-48 bg-zinc-100 dark:bg-zinc-800/50 rounded-2xl"></div>
-                           <div className="h-48 bg-zinc-100 dark:bg-zinc-800/50 rounded-2xl"></div>
-                        </div>
-                     </div>
-                  </div>
-
-               </div>
-            </div>
-
-         </div>
-
-      </main>
-
-      {/* Feature Grid */}
-      <section id="features" className="py-24 bg-white dark:bg-black relative z-20 border-t border-zinc-200 dark:border-zinc-800">
-         <div className="max-w-7xl mx-auto px-6">
-            <div className="grid md:grid-cols-3 gap-10">
-               
-               <div className="space-y-4">
-                  <div className="w-14 h-14 bg-blue-100 dark:bg-blue-900/40 text-blue-600 dark:text-blue-400 rounded-2xl flex items-center justify-center">
-                     <Smartphone size={28} />
-                  </div>
-                  <h3 className="text-xl font-black">{locale === 'ar' ? 'البطاقات الرقمية للمحفظة' : 'Native Digital Cards'}</h3>
-                  <p className="text-zinc-500 font-medium">
-                     {locale === 'ar' ? 'يتكامل بالكامل مع Apple Wallet و Google Pay بدون الحاجة لتحميل تطبيقات إضافية.' : 'Fully integrates with Apple Wallet and Google Pay with zero apps required.'}
-                  </p>
-               </div>
-
-               <div className="space-y-4">
-                  <div className="w-14 h-14 bg-fuchsia-100 dark:bg-fuchsia-900/40 text-fuchsia-600 dark:text-fuchsia-400 rounded-2xl flex items-center justify-center">
-                     <Globe size={28} />
-                  </div>
-                  <h3 className="text-xl font-black">{locale === 'ar' ? 'حلول الوكالات البيضاء' : 'White-Label Agency'}</h3>
-                  <p className="text-zinc-500 font-medium">
-                     {locale === 'ar' ? 'أطلق حلك البرمجي الخاص تحت علامتك التجارية عبر ربط النطاقات والواجهات المخصصة.' : 'Launch your own SaaS under your brand through domain mapping and CNAMEs.'}
-                  </p>
-               </div>
-
-               <div className="space-y-4">
-                  <div className="w-14 h-14 bg-emerald-100 dark:bg-emerald-900/40 text-emerald-600 dark:text-emerald-400 rounded-2xl flex items-center justify-center">
-                     <Zap size={28} />
-                  </div>
-                  <h3 className="text-xl font-black">{locale === 'ar' ? 'أتمتة الرسائل والإشعارات' : 'Push Automations'}</h3>
-                  <p className="text-zinc-500 font-medium">
-                     {locale === 'ar' ? 'إخطارات شاشة القفل عند الاقتراب من المتجر أو رسائل عيد ميلاد تلقائية مجاناً.' : 'Lock-screen push notifications when near the store or automated birthday alerts for free.'}
-                  </p>
-               </div>
-
-            </div>
-         </div>
+      <section id="features" className="mx-auto max-w-6xl px-4 py-16 sm:px-6 sm:py-24">
+        <div className="grid gap-5 md:grid-cols-3">
+          {features.map(({ icon: Icon, title, body }) => (
+            <Card key={title} className="space-y-3">
+              <span className="inline-flex size-12 items-center justify-center rounded-2xl bg-turquoise-50 text-turquoise-700 dark:bg-navy-800 dark:text-turquoise-200">
+                <Icon className="size-6" aria-hidden="true" />
+              </span>
+              <h2 className="font-display text-lg font-bold text-ink">{title}</h2>
+              <p className="leading-relaxed text-ink-muted">{body}</p>
+            </Card>
+          ))}
+        </div>
       </section>
 
+      <footer className="border-t border-border">
+        <div className="mx-auto flex max-w-6xl flex-col items-center gap-3 px-4 py-10 text-sm text-ink-muted sm:flex-row sm:justify-between sm:px-6">
+          <Wordmark height={22} className="h-[22px] w-auto" />
+          <p>{t("footer")}</p>
+        </div>
+      </footer>
     </div>
   );
 }

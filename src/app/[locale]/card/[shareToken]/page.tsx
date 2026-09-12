@@ -42,7 +42,7 @@ export async function generateMetadata({ params }: { params: Promise<{ shareToke
 /**
  * The installed card's theme colour: the tint an installed PWA paints its status bar and task
  * switcher entry with. It belongs in `viewport`, not `metadata` - Next reads it from here, warns
- * about it there, and a value it warns about is a value it does not apply. Same indigo as the
+ * about it there, and a value it warns about is a value it does not apply. Same navy as the
  * manifest's `theme_color`; the two disagreeing is visible on an installed card.
  *
  * Zademi navy since the official brand assets landed. An installed card keeps the colour it was
@@ -81,7 +81,7 @@ export default async function CardPage({ params }: { params: Promise<{ locale: s
           <p
             role="status"
             data-testid="card-inactive"
-            className="rounded-2xl bg-amber-500/10 px-4 py-3 text-center text-sm font-medium text-amber-300"
+            className="rounded-2xl bg-amber-500/10 px-4 py-3 text-center text-sm font-medium text-warn-ink"
           >
             {view.expired ? t("statusExpired") : t("statusPaused")}
           </p>
@@ -103,7 +103,7 @@ export default async function CardPage({ params }: { params: Promise<{ locale: s
                 data-filled={isFilled}
                 className={
                   isFilled
-                    ? "flex aspect-square items-center justify-center rounded-full bg-indigo-500 text-white shadow-inner"
+                    ? "flex aspect-square items-center justify-center rounded-full bg-navy-800 text-white shadow-inner"
                     : "flex aspect-square items-center justify-center rounded-full border-2 border-dashed border-zinc-700 text-zinc-700"
                 }
               >
@@ -125,7 +125,7 @@ export default async function CardPage({ params }: { params: Promise<{ locale: s
           {view.rewardBalance > 0 && (
             <p
               data-testid="card-reward-ready"
-              className="mt-3 rounded-xl bg-emerald-500/10 px-3 py-2 text-center text-sm font-bold text-emerald-300"
+              className="mt-3 rounded-xl bg-mint-500/10 px-3 py-2 text-center text-sm font-bold text-success-ink"
             >
               {view.rewardName}
             </p>

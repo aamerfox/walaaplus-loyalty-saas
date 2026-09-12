@@ -54,7 +54,7 @@ export default async function ProgramPage({
         <Header title={t("title")} subtitle={businessName} />
         <p
           data-testid="program-forbidden"
-          className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-300"
+          className="rounded-2xl border border-warn-ink bg-warn-bg p-4 text-sm text-warn-ink dark:border-warn-ink/20 dark:bg-amber-500/10 dark:text-warn-ink"
         >
           {t("forbidden")}
         </p>
@@ -89,7 +89,7 @@ export default async function ProgramPage({
       ) : (
         <p
           data-testid="program-forbidden"
-          className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-300"
+          className="rounded-2xl border border-warn-ink bg-warn-bg p-4 text-sm text-warn-ink dark:border-warn-ink/20 dark:bg-amber-500/10 dark:text-warn-ink"
         >
           {t("forbidden")}
         </p>

@@ -38,7 +38,7 @@ export default function ProgramSummary({
       {justCreated && (
         <p
           data-testid="program-created"
-          className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm font-medium text-emerald-800 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-300"
+          className="rounded-2xl border border-mint-500 bg-success-bg p-4 text-sm font-medium text-success-ink dark:border-mint-500/20 dark:bg-mint-500/10 dark:text-success-ink"
         >
           {t("created")}
         </p>
@@ -54,7 +54,7 @@ export default function ProgramSummary({
 
       <section
         data-testid="enrollment-guidance"
-        className="rounded-2xl border border-indigo-200 bg-indigo-50 p-6 dark:border-indigo-500/20 dark:bg-indigo-500/10"
+        className="rounded-2xl border border-navy-200 bg-navy-50 p-6 dark:border-navy-200/20 dark:bg-navy-800/10"
       >
         <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">{t("howToEnrollTitle")}</h2>
         <p className="mt-2 text-sm text-zinc-700 dark:text-zinc-300">{t("howToEnrollBody")}</p>
@@ -64,7 +64,7 @@ export default function ProgramSummary({
             href="/scanner"
             locale={locale}
             data-testid="next-scanner"
-            className="rounded-xl bg-indigo-600 px-5 py-3 font-bold text-white shadow-sm transition-colors hover:bg-indigo-700"
+            className="rounded-xl bg-navy-900 px-5 py-3 font-bold text-white shadow-sm transition-colors hover:bg-navy-800"
           >
             {t("nextScanner")}
           </Link>

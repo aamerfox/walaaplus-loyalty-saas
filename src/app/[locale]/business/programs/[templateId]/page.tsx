@@ -80,7 +80,7 @@ export default async function ProgramDetailPage({
     <>
       <PageHeader
         title={program.name}
-        subtitle={t(`cardType.${program.cardType}`)}
+        description={t(`cardType.${program.cardType}`)}
         actions={
           <Link href="/business/programs" className="rounded-xl border border-border px-4 py-2 font-semibold text-ink-muted hover:bg-surface-muted">
             {t("backToList")}

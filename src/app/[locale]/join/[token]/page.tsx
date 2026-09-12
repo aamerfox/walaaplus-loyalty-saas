@@ -1,4 +1,5 @@
 import { getTranslations } from "next-intl/server";
+import { Wordmark } from "@/components/brand/Wordmark";
 
 /**
  * The old public enrolment link — **withdrawn**, and answered identically for every visitor.
@@ -22,15 +23,20 @@ export default async function JoinWithdrawnPage() {
   const t = await getTranslations("Join");
 
   return (
-    <main className="min-h-screen bg-gradient-to-b from-indigo-50 to-white px-4 py-10 dark:from-zinc-950 dark:to-zinc-900">
-      <div className="mx-auto w-full max-w-md">
+    <main className="flex min-h-screen items-center justify-center bg-app px-4 py-10">
+      <div className="mx-auto w-full max-w-md space-y-6">
+        {/* A customer reaches this page from a QR printed before enrolment moved to the counter.
+            The mark tells them whose product is talking to them before they read the sentence. */}
+        <div className="flex justify-center">
+          <Wordmark height={28} className="h-7 w-auto" />
+        </div>
         <div
           data-testid="join-withdrawn"
-          className="rounded-2xl border border-zinc-200 bg-white p-6 text-center shadow-sm dark:border-zinc-800 dark:bg-zinc-900"
+          className="w-full rounded-2xl border border-border bg-surface p-8 text-center shadow-sm"
         >
-          <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-50">{t("movedTitle")}</h1>
-          <p className="mt-3 text-zinc-600 dark:text-zinc-400">{t("movedBody")}</p>
-          <p className="mt-6 text-xs text-zinc-400">{t("movedHaveCard")}</p>
+          <h1 className="font-display text-2xl font-extrabold text-ink">{t("movedTitle")}</h1>
+          <p className="mt-3 leading-relaxed text-ink-muted">{t("movedBody")}</p>
+          <p className="mt-6 text-xs text-ink-faint">{t("movedHaveCard")}</p>
         </div>
       </div>
     </main>
