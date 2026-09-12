@@ -26,19 +26,15 @@ vi.mock("@/server/auth/session", async (importOriginal) => {
   };
 });
 
-import { POST as enrollRoute } from "@/app/api/enroll/route";
 import { POST as programRoute } from "@/app/api/staff/program/route";
 import { prisma } from "@/server/db";
-import { publicEnrollmentUrl } from "@/server/program/enrollment-url";
 import { getStampProgramOverview } from "@/server/program/stamp-program";
-import { qrSvg } from "@/server/qr";
 import { requireBusinessMembership } from "@/server/tenant/context";
 import {
   createCafeCashier,
   createStampCafe,
   registerTestOwner,
   resetDatabase,
-  uniqueSyrianPhone,
 } from "../setup/fixtures";
 
 interface Answer {
@@ -79,7 +75,7 @@ describe("POST /api/staff/program — the owner bootstrap", () => {
     session.userId = null;
   });
 
-  it("creates exactly one program and returns its enrolment link", async () => {
+  it("creates exactly one program, and publishes no public link for it", async () => {
     const owner = await freshOwner();
 
     const answer = await createProgram({ businessId: owner.businessId, ...VALID });
@@ -102,13 +98,11 @@ describe("POST /api/staff/program — the owner bootstrap", () => {
     const sources = await prisma.utmSourceLink.findMany({ where: { templateId: templates[0].id } });
     expect(sources).toHaveLength(1);
 
-    // The link carries that source's opaque token and nothing else identifying.
-    const url = String(answer.body.enrollmentUrl);
-    expect(url).toContain(`/join/${sources[0].publicToken}`);
-    expect(url).not.toContain(owner.businessId);
-    expect(url).not.toContain(templates[0].id);
-    // No locale prefix: the visitor's own language is negotiated (see enrollment-url.ts).
-    expect(url).not.toContain("/ar/join/");
+    // The source's token stays on the server. Owner decision B7 option 3 withdrew public
+    // self-service enrolment, so the response publishes no link to point at it with.
+    expect(answer.body.enrollmentUrl).toBeUndefined();
+    expect(answer.body.enrollmentQrSvg).toBeUndefined();
+    expect(JSON.stringify(answer.body)).not.toContain(sources[0].publicToken);
   });
 
   it("returns the same program on a repeated submission instead of creating a second", async () => {
@@ -122,8 +116,8 @@ describe("POST /api/staff/program — the owner bootstrap", () => {
     expect(second.status).toBe(200);
     expect(second.body.created).toBe(false);
     // The ORIGINAL program, not the name the second attempt tried to use.
-    expect(second.body.enrollmentUrl).toBe(first.body.enrollmentUrl);
     expect(second.body.programName).toBe(VALID.name);
+    expect(second.body.stampsRequiredPerReward).toBe(first.body.stampsRequiredPerReward);
 
     expect(await prisma.programTemplate.count({ where: { businessId: owner.businessId } })).toBe(1);
   });
@@ -140,7 +134,7 @@ describe("POST /api/staff/program — the owner bootstrap", () => {
 
     expect(await prisma.programTemplate.count({ where: { businessId: owner.businessId } })).toBe(1);
     expect([a.status, b.status].sort()).toEqual([200, 201]);
-    expect(a.body.enrollmentUrl).toBe(b.body.enrollmentUrl);
+    expect(a.body.programName).toBe(b.body.programName);
   });
 
   it("shows an existing owner the original link, through the same service the page uses", async () => {
@@ -155,7 +149,12 @@ describe("POST /api/staff/program — the owner bootstrap", () => {
     const answer = await createProgram({ businessId: cafe.businessId, ...VALID });
     expect(answer.status).toBe(200);
     expect(answer.body.created).toBe(false);
-    expect(answer.body.enrollmentUrl).toBe(publicEnrollmentUrl(cafe.program.directSourceToken));
+    expect(answer.body.programName).toBe("مقهى قائم");
+
+    // No enrolment link or QR is published any more. Owner decision B7 option 3 withdrew public
+    // self-service enrolment, so there is no public route for such a link to point at.
+    expect(answer.body.enrollmentUrl).toBeUndefined();
+    expect(answer.body.enrollmentQrSvg).toBeUndefined();
   });
 
   it("refuses a cashier, who may serve customers but not create the card", async () => {
@@ -236,12 +235,16 @@ describe("POST /api/staff/program — the owner bootstrap", () => {
     expect(overview?.mechanics.welcomeStamps).toBeUndefined();
   });
 
-  it("never writes the enrolment token to the audit log", async () => {
+  it("never writes the enrolment source token to the audit log", async () => {
     // The token is a capability. An audit row is read by more people, and kept longer, than the
     // screen that legitimately shows it.
     const owner = await freshOwner();
     const answer = await createProgram({ businessId: owner.businessId, ...VALID });
-    const token = String(answer.body.enrollmentUrl).split("/join/")[1];
+    expect(answer.status).toBe(201);
+    const { publicToken: token } = await prisma.utmSourceLink.findFirstOrThrow({
+      where: { template: { businessId: owner.businessId } },
+      select: { publicToken: true },
+    });
 
     const entries = await prisma.auditLog.findMany({ where: { businessId: owner.businessId } });
     expect(entries.length).toBeGreaterThan(0);
@@ -249,47 +252,49 @@ describe("POST /api/staff/program — the owner bootstrap", () => {
   });
 });
 
-describe("the link the owner is shown actually works", () => {
+describe("the program screen publishes no public enrolment link", () => {
   beforeAll(async () => {
     await resetDatabase();
   });
 
-  it("enrols a customer from the displayed link, and the QR encodes that same link", async () => {
+  it("returns no link and no QR, and never the source token", async () => {
+    /*
+     * This describe block used to walk the owner's published link through a public enrolment and
+     * assert a customer got a card. That journey no longer exists: owner decision B7 option 3
+     * withdrew public self-service enrolment because a form that issues a card to a new number and
+     * nothing to an existing one tells whoever submits it which case they hit.
+     *
+     * What must hold now is the opposite — that the token stays inside the server.
+     */
     const owner = await freshOwner();
     const created = await createProgram({ businessId: owner.businessId, ...VALID, welcomeStamps: 2 });
     expect(created.status).toBe(201);
 
-    const enrollmentUrl = String(created.body.enrollmentUrl);
-    const token = enrollmentUrl.split("/join/")[1];
+    expect(created.body.enrollmentUrl).toBeUndefined();
+    expect(created.body.enrollmentQrSvg).toBeUndefined();
 
-    // 1. The QR the owner prints encodes exactly the URL the owner is shown. Same input, same
-    //    SVG: a QR built from a different string is a different matrix.
-    expect(created.body.enrollmentQrSvg).toBe(qrSvg(enrollmentUrl, { cellSize: 5, margin: 4 }));
-    expect(created.body.enrollmentQrSvg).not.toBe(qrSvg(`${enrollmentUrl}x`, { cellSize: 5, margin: 4 }));
-    // Nothing is fetched to render it: the only URL in the markup is the SVG namespace.
-    const urls = String(created.body.enrollmentQrSvg).match(/https?:\/\/[^"' ]+/g) ?? [];
-    expect(urls).toEqual(["http://www.w3.org/2000/svg"]);
-
-    // 2. A customer with that token enrols, exactly as the public page does.
-    session.userId = null;
-    const phone = uniqueSyrianPhone();
-    const res = await enrollRoute(
-      new Request("http://localhost:3000/api/enroll", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ sourceToken: token, phone, firstName: "ليلى" }),
-      }),
-    );
-    expect(res.status).toBe(200);
-    const { cardToken } = (await res.json()) as { cardToken: string };
-    expect(cardToken).toBeTruthy();
-
-    // 3. The card belongs to this business and carries the welcome bonus the owner chose.
-    const card = await prisma.customerCard.findFirstOrThrow({
-      where: { shareToken: cardToken },
-      select: { businessId: true, stampBalance: true },
+    // The source exists and carries a token; the response does not mention it.
+    const source = await prisma.utmSourceLink.findFirstOrThrow({
+      where: { template: { businessId: owner.businessId } },
+      select: { publicToken: true },
     });
-    expect(card.businessId).toBe(owner.businessId);
-    expect(card.stampBalance).toBe(2);
+    const serialized = JSON.stringify(created.body);
+    expect(serialized).not.toContain(source.publicToken);
+    expect(serialized.toLowerCase()).not.toContain("/join/");
+  });
+
+  it("still records the program, the tier and the source, so the counter can enrol", async () => {
+    // Withdrawing the public route must not change what creating a program builds.
+    const owner = await freshOwner();
+    await createProgram({ businessId: owner.businessId, ...VALID, welcomeStamps: 2 });
+
+    const template = await prisma.programTemplate.findFirstOrThrow({
+      where: { businessId: owner.businessId },
+      select: { id: true, versions: { select: { rewardTiers: { select: { id: true } } } } },
+    });
+    expect(template.versions[0].rewardTiers).toHaveLength(1);
+    expect(
+      await prisma.utmSourceLink.count({ where: { templateId: template.id, utmSource: "direct", active: true } }),
+    ).toBe(1);
   });
 });

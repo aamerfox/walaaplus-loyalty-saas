@@ -20,12 +20,22 @@ describe("effectivePermissions", () => {
     expect(granted.has(Permission.EDIT_BILLING)).toBe(false);
   });
 
-  it("CASHIER is limited to scanner actions and read access", () => {
+  it("CASHIER is limited to counter actions and read access", () => {
     const p = effectivePermissions(MembershipRole.CASHIER, []);
+    // EDIT_CUSTOMERS is the counter enrolment grant from owner decision B7 option 3: with public
+    // self-service enrolment withdrawn, the person at the till is the only one who can issue a
+    // card. Nothing about the card itself, the business or the staff moves with it.
     expect([...p].sort()).toEqual(
-      [Permission.MAKE_ACCRUALS, Permission.MAKE_REDEMPTIONS, Permission.VIEW_CUSTOMERS, Permission.VIEW_OPERATIONS].sort(),
+      [
+        Permission.EDIT_CUSTOMERS,
+        Permission.MAKE_ACCRUALS,
+        Permission.MAKE_REDEMPTIONS,
+        Permission.VIEW_CUSTOMERS,
+        Permission.VIEW_OPERATIONS,
+      ].sort(),
     );
     expect(p.has(Permission.EDIT_TEMPLATES)).toBe(false);
+    expect(p.has(Permission.EDIT_STAFF)).toBe(false);
     expect(p.has(Permission.VIEW_DASHBOARD)).toBe(false);
   });
 

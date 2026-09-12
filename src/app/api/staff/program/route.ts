@@ -3,9 +3,7 @@ import { z } from "zod";
 import { ValidationError, isAppError } from "@/server/errors";
 import { errorResponse, readJsonObject } from "@/server/http";
 import { StampEarnMode, STAMP_MECHANICS_CONTRACT_VERSION } from "@/server/program/mechanics";
-import { publicEnrollmentUrl } from "@/server/program/enrollment-url";
 import { createStampProgram, getStampProgramOverview } from "@/server/program/stamp-program";
-import { qrSvg } from "@/server/qr";
 import { requireScannerContext } from "@/server/tenant/scanner-context";
 
 /**
@@ -43,17 +41,15 @@ const createSchema = z.strictObject({
 });
 
 interface ProgramResponse {
-  /** What the owner prints or shares. */
-  enrollmentUrl: string;
-  /**
-   * The same URL as an inline SVG QR, rendered HERE rather than in the browser.
+  /*
+   * There is no enrolment URL or QR here any more.
    *
-   * The alternative was to let the page re-render from the server after creation and pick the QR
-   * up then, which works but leaves the owner looking at a link with no QR for as long as the
-   * refresh takes. Rendering it in the response makes the screen deterministic, and keeps the
-   * rule that this token never reaches a third-party image service.
+   * Owner decision B7 option 3 withdrew public self-service enrolment: a public form that issues
+   * a card to a new number and nothing to an existing one tells whoever submits it which case
+   * they hit. The source record and its token still exist and still attribute cards correctly -
+   * nothing was deleted - but there is no public route to point at, so publishing the link would
+   * be handing out an address that answers "ask at the counter".
    */
-  enrollmentQrSvg: string;
   programName: string;
   stampsRequiredPerReward: number;
   rewardName: string;
@@ -91,8 +87,6 @@ export async function POST(req: Request) {
 
     return NextResponse.json(
       {
-        enrollmentUrl: publicEnrollmentUrl(summary.directSourceToken),
-        enrollmentQrSvg: qrSvg(publicEnrollmentUrl(summary.directSourceToken), { cellSize: 5, margin: 4 }),
         programName: input.name.trim(),
         stampsRequiredPerReward: summary.mechanics.stampsRequiredPerReward,
         rewardName: summary.mechanics.rewardName,
@@ -112,8 +106,6 @@ export async function POST(req: Request) {
         if (existing?.directSourceToken) {
           return NextResponse.json(
             {
-              enrollmentUrl: publicEnrollmentUrl(existing.directSourceToken),
-              enrollmentQrSvg: qrSvg(publicEnrollmentUrl(existing.directSourceToken), { cellSize: 5, margin: 4 }),
               programName: existing.templateName,
               stampsRequiredPerReward: existing.mechanics.stampsRequiredPerReward,
               rewardName: existing.mechanics.rewardName,

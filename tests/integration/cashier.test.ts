@@ -60,8 +60,18 @@ describe("cashier accounts", () => {
 
       const ctx = await requireBusinessMembership(prisma, created.userId, cafe.businessId);
       expect(ctx.role).toBe(MembershipRole.CASHIER);
+      // EDIT_CUSTOMERS is here so a cashier can sign a customer up at the till: owner decision B7
+      // option 3 withdrew public self-service enrolment, and the person at the counter is the only
+      // one who can hand a card over now. It does not widen anything else - see the note on
+      // ROLE_DEFAULT_PERMISSIONS.
       expect([...ctx.permissions].sort()).toEqual(
-        [Permission.MAKE_ACCRUALS, Permission.MAKE_REDEMPTIONS, Permission.VIEW_CUSTOMERS, Permission.VIEW_OPERATIONS].sort(),
+        [
+          Permission.EDIT_CUSTOMERS,
+          Permission.MAKE_ACCRUALS,
+          Permission.MAKE_REDEMPTIONS,
+          Permission.VIEW_CUSTOMERS,
+          Permission.VIEW_OPERATIONS,
+        ].sort(),
       );
       // Scoped to exactly one counter: never null, which would mean unrestricted.
       expect(ctx.locationIds).toEqual([cafe.locationId]);

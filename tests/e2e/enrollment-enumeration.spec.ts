@@ -1,127 +1,96 @@
 import { expect, test } from "@playwright/test";
-import { createStampCafe, uniqueSyrianPhone } from "../setup/fixtures";
+import { prisma } from "@/server/db";
+import { createStampCafe, enrolCustomer, uniqueSyrianPhone } from "../setup/fixtures";
 
 /**
- * The enrolment-existence oracle, reproduced through the browser.
+ * The public enrolment path is withdrawn, and answers everyone identically.
  *
- * **These tests assert a defect that is NOT fixed.** They are characterization tests: they pin the
- * current, known-bad behaviour so it cannot change silently, and they will FAIL the day someone
- * closes the oracle — which is the moment to invert them. They exist because the fix requires a
- * product decision that Phase 1a has not authorized; see `docs/evidence/phase-1a-prompt-3.md` §12.
+ * This file used to reproduce an oracle: the public form issued a live card to a number that had
+ * never enrolled and nothing to a number that had, so whoever submitted a number learned which
+ * case they hit by watching their own screen. Matching the API's status and shape did not close
+ * it, because the signal was the card itself.
  *
- * WHY THE API-SHAPE FIX WAS NOT ENOUGH. `POST /api/enroll` answers a first and a repeat enrolment
- * with the same status, the same keys and a token of the same shape. That was verified, and it is
- * true. But the token is not the end of the flow: `JoinForm` redirects to `/card/<token>`
- * unconditionally, and the card route resolves a real token and calls `notFound()` for the decoy.
- * So the caller does not need to inspect the response at all — they follow their own browser and
- * read the outcome. **The full browser flow is the security boundary, not the JSON.**
- *
- * That is the correction to this gate: the audit checked the API and stopped there.
+ * Owner decision **B7, option 3** removed the flow rather than hardening it. These tests are the
+ * inverted version of the ones that pinned the defect: they prove the page and the endpoint now
+ * behave the same way for every visitor, and that withdrawing them stranded nobody.
  */
 
-test.describe("enrolment existence, through the public form", () => {
-  test("a repeat enrolment is still distinguishable from a first one — the open defect", async ({ page }) => {
-    const cafe = await createStampCafe({ name: "مقهى الاختبار" });
-    const joinUrl = `/ar/join/${cafe.program.directSourceToken}`;
-    const phone = uniqueSyrianPhone();
-    const localPhone = `0${phone.slice(4)}`;
-
-    // ── a genuinely new customer joins, exactly as a customer does ────────────
-    await page.goto(joinUrl);
-    await page.locator("#phone").fill(localPhone);
-    await page.locator("#firstName").fill("ليلى");
-    await page.getByTestId("join-submit").click();
-
-    await page.waitForURL(/\/ar\/card\/[A-Za-z0-9_-]{20,}/);
-    await expect(page.getByTestId("card-qr")).toBeVisible();
-    const firstOutcome = { url: page.url(), cardVisible: true };
-
-    // ── now someone who merely KNOWS that number submits it on the same link ──
-    const prober = await page.context().browser()!.newContext();
-    const proberPage = await prober.newPage();
-    await proberPage.goto(joinUrl);
-    await proberPage.locator("#phone").fill(localPhone);
-    await proberPage.locator("#firstName").fill("Probe");
-    await proberPage.getByTestId("join-submit").click();
-
-    // The API answered identically, so the browser redirects identically...
-    await proberPage.waitForURL(/\/ar\/card\/[A-Za-z0-9_-]{20,}/);
-    const proberUrl = proberPage.url();
-    expect(proberUrl).not.toBe(firstOutcome.url);
-
-    // ...and then the page tells them what the API would not.
-    const cardVisible = await proberPage
-      .getByTestId("card-qr")
-      .isVisible()
-      .catch(() => false);
-
-    /*
-     * THE ORACLE. A new number lands on a card; a known number lands on nothing. The caller needs
-     * no access to the response body, no timing measurement and no special tooling — they watch
-     * their own screen.
-     *
-     * Asserting the defect rather than the fix, deliberately: this test is the reproduction the
-     * correction was asked for, and it must be inverted — `expect(cardVisible).toBe(true)` for
-     * both — when phone-ownership verification is authorized and the flow is made uniform.
-     */
-    expect(cardVisible, "KNOWN OPEN DEFECT: a repeat enrolment must not be distinguishable").toBe(false);
-
-    await prober.close();
-  });
-
-  test("the oracle does not fire for a number that was never enrolled", async ({ page }) => {
-    // The other half of the comparison: two DIFFERENT new numbers both land on a card, so the
-    // signal above really is "this number is already a customer" and not noise.
+test.describe("the withdrawn public enrolment path", () => {
+  test("answers an enrolled number, a stranger's number and an invented link identically", async ({ page }) => {
     const cafe = await createStampCafe();
-    const joinUrl = `/ar/join/${cafe.program.directSourceToken}`;
+    const enrolled = uniqueSyrianPhone();
+    await enrolCustomer(cafe, { phone: enrolled });
 
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const phone = uniqueSyrianPhone();
-      await page.goto(joinUrl);
-      await page.locator("#phone").fill(`0${phone.slice(4)}`);
-      await page.getByTestId("join-submit").click();
-      await page.waitForURL(/\/ar\/card\/[A-Za-z0-9_-]{20,}/);
-      await expect(page.getByTestId("card-qr")).toBeVisible();
+    // A real printed link, and one that never existed.
+    const realLink = `/ar/join/${cafe.program.directSourceToken}`;
+    const inventedLink = "/ar/join/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+    const rendered: string[] = [];
+    for (const link of [realLink, inventedLink]) {
+      const response = await page.goto(link);
+      expect(response?.status(), `${link} must render, not 404`).toBe(200);
+      await expect(page.getByTestId("join-withdrawn")).toBeVisible();
+      rendered.push((await page.getByTestId("join-withdrawn").textContent()) ?? "");
     }
+
+    /*
+     * Byte-identical. A dead link and a live one must not be distinguishable either: replacing
+     * "is this number enrolled" with "does this business exist" would be a smaller oracle, not
+     * an absent one.
+     */
+    expect(rendered[0]).toBe(rendered[1]);
+
+    // No form to submit, so no phone number can be tested against anything.
+    await expect(page.getByTestId("join-form")).toHaveCount(0);
+    await expect(page.locator("#phone")).toHaveCount(0);
   });
 
-  test("a repeat still reveals nothing ABOUT the existing card", async ({ page }) => {
-    /*
-     * The part of the earlier fix that does hold, and must keep holding whatever the decision on
-     * verification turns out to be: the probe learns THAT the number is enrolled, and nothing
-     * else. No name, no balance, no serial, no scanner token, no share token.
-     */
-    const cafe = await createStampCafe({ mechanics: { welcomeStamps: 3 } });
-    const joinUrl = `/ar/join/${cafe.program.directSourceToken}`;
+  test("the endpoint itself refuses every caller the same way", async ({ request }) => {
+    const cafe = await createStampCafe();
+    const enrolled = uniqueSyrianPhone();
+    await enrolCustomer(cafe, { phone: enrolled });
+
+    const bodies = [
+      { sourceToken: cafe.program.directSourceToken, phone: enrolled },
+      { sourceToken: cafe.program.directSourceToken, phone: uniqueSyrianPhone() },
+      { sourceToken: "not-a-real-token", phone: enrolled },
+      {},
+    ];
+
+    const answers = [] as { status: number; text: string }[];
+    for (const body of bodies) {
+      const response = await request.post("/api/enroll", { data: body });
+      answers.push({ status: response.status(), text: await response.text() });
+    }
+
+    // Same status and same bytes for an enrolled number, a new number, a dead token and no body.
+    for (const answer of answers) {
+      expect(answer.status).toBe(410);
+      expect(answer.text).toBe(answers[0].text);
+      expect(answer.text.toLowerCase()).not.toContain("cardtoken");
+    }
+
+    // And nothing was created by any of it.
+    expect(
+      await prisma.customerCard.count({
+        where: { businessId: cafe.businessId, profile: { customer: { normalizedPhone: bodies[1].phone as string } } },
+      }),
+    ).toBe(0);
+  });
+
+  test("a customer who already has their link keeps using it", async ({ page }) => {
+    // Withdrawing a route must not strand the people who acted on it while it existed.
+    const cafe = await createStampCafe({ mechanics: { welcomeStamps: 1 } });
     const phone = uniqueSyrianPhone();
-    const localPhone = `0${phone.slice(4)}`;
+    await enrolCustomer(cafe, { phone, firstName: "ليلى" });
 
-    await page.goto(joinUrl);
-    await page.locator("#phone").fill(localPhone);
-    await page.locator("#firstName").fill("ليلى");
-    await page.getByTestId("join-submit").click();
-    await page.waitForURL(/\/ar\/card\/[A-Za-z0-9_-]{20,}/);
-    const realToken = page.url().split("/card/")[1];
+    const card = await prisma.customerCard.findFirstOrThrow({
+      where: { businessId: cafe.businessId, profile: { customer: { normalizedPhone: phone } } },
+      select: { shareToken: true },
+    });
 
-    const prober = await page.context().browser()!.newContext();
-    const proberPage = await prober.newPage();
-    await proberPage.goto(joinUrl);
-    await proberPage.locator("#phone").fill(localPhone);
-    await proberPage.locator("#firstName").fill("Probe");
-    await proberPage.getByTestId("join-submit").click();
-    await proberPage.waitForURL(/\/ar\/card\/[A-Za-z0-9_-]{20,}/);
-
-    const decoyToken = proberPage.url().split("/card/")[1];
-    const body = (await proberPage.content()).toLowerCase();
-
-    // Not the real token, and nothing of the real customer anywhere on the page.
-    expect(decoyToken).not.toBe(realToken);
-    expect(body).not.toContain(realToken.toLowerCase());
-    expect(body).not.toContain("ليلى");
-    expect(body).not.toContain(localPhone);
-    // No balance leaked either: the welcome bonus was 3.
-    expect(proberPage.getByTestId("card-progress")).toHaveCount(0);
-
-    await prober.close();
+    await page.goto(`/ar/card/${card.shareToken}`);
+    await expect(page.getByTestId("card-qr")).toBeVisible();
+    await expect(page.getByTestId("card-progress")).toContainText("1");
   });
 });

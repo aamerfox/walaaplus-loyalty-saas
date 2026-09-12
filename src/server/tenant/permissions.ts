@@ -33,6 +33,15 @@ export const ROLE_DEFAULT_PERMISSIONS: Readonly<Record<MembershipRole, readonly 
     Permission.MAKE_ACCRUALS,
     Permission.MAKE_REDEMPTIONS,
     Permission.VIEW_CUSTOMERS,
+    /*
+     * Added when enrolment moved to the counter (owner decision B7, option 3). A cashier is the
+     * person who now signs a customer up, so creating a customer record is part of the job.
+     *
+     * Nothing else in Phase 1a guards EDIT_CUSTOMERS, so this grant opens exactly one capability
+     * today: `enrollAtCounter`. Anything guarded on it later must check that a cashier should
+     * have it too, rather than assume the bit means what it meant before this line.
+     */
+    Permission.EDIT_CUSTOMERS,
     Permission.VIEW_OPERATIONS,
   ],
 };

@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { prisma } from "@/server/db";
-import { createStampCafe, TEST_PASSWORD, uniqueSyrianPhone } from "../setup/fixtures";
+import { createStampCafe, enrolCustomer, TEST_PASSWORD, uniqueSyrianPhone } from "../setup/fixtures";
 import { reconcileCardBalances } from "@/server/ledger/reconciliation";
 
 /**
@@ -30,19 +30,27 @@ test.describe("café loyalty loop", () => {
     const phone = uniqueSyrianPhone();
     const localPhone = `0${phone.slice(4)}`;
 
-    // ── 1. the customer opens the café's public link and joins ────────────────
-    await page.goto(`/ar/join/${cafe.program.directSourceToken}`);
-    await expect(page.getByTestId("join-form")).toBeVisible();
+    /*
+     * ── 1. the customer is signed up at the counter ──────────────────────────
+     *
+     * This used to open a public join link. Owner decision B7 option 3 withdrew public
+     * self-service enrolment - a form that issues a card to a new number and nothing to an
+     * existing one tells whoever submits it which case they hit - so a member of staff enrols
+     * them instead. The staff-side browser flow has its own spec, `owner-bootstrap`; here the
+     * customer is seeded through the same service the counter calls, so this journey stays about
+     * what happens AFTER they hold a card.
+     */
+    await enrolCustomer(cafe, { phone, firstName: "ليلى" });
+    const seeded = await prisma.customerCard.findFirstOrThrow({
+      where: { businessId: cafe.businessId, profile: { customer: { normalizedPhone: phone } } },
+      select: { shareToken: true },
+    });
+    const shareToken = seeded.shareToken;
+
+    // ── 2. they open their own card ───────────────────────────────────────────
+    await page.goto(`/ar/card/${shareToken}`);
     await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
-
-    await page.locator("#phone").fill(localPhone);
-    await page.locator("#firstName").fill("ليلى");
-    await page.getByTestId("join-submit").click();
-
-    // ── 2. they land on their own card ────────────────────────────────────────
-    await page.waitForURL(/\/ar\/card\/[A-Za-z0-9_-]{20,}/);
     const cardUrl = page.url();
-    const shareToken = cardUrl.split("/card/")[1];
 
     await expect(page.getByTestId("card-qr")).toBeVisible();
     await expect(page.getByTestId("card-qr").locator("svg")).toHaveCount(1);
@@ -125,21 +133,20 @@ test.describe("café loyalty loop", () => {
     const rival = await createStampCafe({ mechanics: { stampsRequiredPerReward: STAMPS_PER_REWARD } });
     const owner = await prisma.user.findUniqueOrThrow({ where: { id: cafe.userId }, select: { email: true } });
 
-    // Two customers: one of this café, one of a different business.
-    await page.goto(`/ar/join/${cafe.program.directSourceToken}`);
-    await page.locator("#phone").fill(`0${uniqueSyrianPhone().slice(4)}`);
-    await page.getByTestId("join-submit").click();
-    await page.waitForURL(/\/ar\/card\//);
-    const mineToken = page.url().split("/card/")[1];
+    // Two customers, each signed up at their own counter: one here, one at a different business.
+    const minePhone = uniqueSyrianPhone();
+    const rivalPhone = uniqueSyrianPhone();
+    await enrolCustomer(cafe, { phone: minePhone });
+    await enrolCustomer(rival, { phone: rivalPhone });
 
-    await page.goto(`/ar/join/${rival.program.directSourceToken}`);
-    await page.locator("#phone").fill(`0${uniqueSyrianPhone().slice(4)}`);
-    await page.getByTestId("join-submit").click();
-    await page.waitForURL(/\/ar\/card\//);
-    const rivalToken = page.url().split("/card/")[1];
-
-    const mine = await prisma.customerCard.findFirstOrThrow({ where: { shareToken: mineToken }, select: { qrToken: true } });
-    const theirs = await prisma.customerCard.findFirstOrThrow({ where: { shareToken: rivalToken }, select: { qrToken: true } });
+    const mine = await prisma.customerCard.findFirstOrThrow({
+      where: { businessId: cafe.businessId, profile: { customer: { normalizedPhone: minePhone } } },
+      select: { qrToken: true },
+    });
+    const theirs = await prisma.customerCard.findFirstOrThrow({
+      where: { businessId: rival.businessId, profile: { customer: { normalizedPhone: rivalPhone } } },
+      select: { qrToken: true },
+    });
 
     await page.goto("/ar/scanner/login");
     await page.waitForURL(/\/auth\/login/);
@@ -162,13 +169,13 @@ test.describe("café loyalty loop", () => {
 
   test("a card page cannot be reached by guessing, and refuses the scanner token", async ({ page }) => {
     const cafe = await createStampCafe();
-    await page.goto(`/ar/join/${cafe.program.directSourceToken}`);
-    await page.locator("#phone").fill(`0${uniqueSyrianPhone().slice(4)}`);
-    await page.getByTestId("join-submit").click();
-    await page.waitForURL(/\/ar\/card\//);
-    const token = page.url().split("/card/")[1];
-
-    const card = await prisma.customerCard.findFirstOrThrow({ where: { shareToken: token }, select: { id: true, qrToken: true } });
+    const phone = uniqueSyrianPhone();
+    await enrolCustomer(cafe, { phone });
+    const card = await prisma.customerCard.findFirstOrThrow({
+      where: { businessId: cafe.businessId, profile: { customer: { normalizedPhone: phone } } },
+      select: { id: true, qrToken: true, shareToken: true },
+    });
+    const token = card.shareToken;
 
     // The scanner token, the internal id, and an altered token all lead nowhere.
     for (const attempt of [card.qrToken, card.id, `${token}x`, token.slice(0, -1)]) {

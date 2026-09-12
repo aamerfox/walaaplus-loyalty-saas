@@ -21,8 +21,8 @@ import { createHash } from "node:crypto";
 /**
  * The current revision of the enrolment consent texts.
  *
- * **Bump this in the same commit that changes `Join.consentLabel` or `Join.privacyNote` in either
- * locale.** `tests/unit/enrollment-consent.test.ts` hashes those four strings and fails if they
+ * **Bump this in the same commit that changes `Consent.consentLabel` or `Consent.privacyNote` in
+ * either locale.** `tests/unit/enrollment-consent.test.ts` hashes those four strings and fails if they
  * move without this moving too, so the rule is enforced rather than remembered.
  */
 export const ENROLLMENT_CONSENT_VERSION = "2026-09-12.1";

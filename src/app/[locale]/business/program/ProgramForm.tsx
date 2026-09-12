@@ -2,11 +2,9 @@
 
 import { useState, type FormEvent } from "react";
 import { useTranslations } from "next-intl";
-import EnrollmentLink from "./EnrollmentLink";
+import ProgramSummary from "./ProgramSummary";
 
 interface CreatedProgram {
-  enrollmentUrl: string;
-  enrollmentQrSvg: string;
   programName: string;
   stampsRequiredPerReward: number;
   rewardName: string;
@@ -88,10 +86,8 @@ export default function ProgramForm({ locale, businessId }: { locale: string; bu
 
   if (result) {
     return (
-      <EnrollmentLink
+      <ProgramSummary
         locale={locale}
-        enrollmentUrl={result.enrollmentUrl}
-        qrSvgMarkup={result.enrollmentQrSvg}
         programName={result.programName}
         stampsRequiredPerReward={result.stampsRequiredPerReward}
         rewardName={result.rewardName}

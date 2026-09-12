@@ -2,15 +2,13 @@ import { Permission } from "@prisma/client";
 import { getTranslations } from "next-intl/server";
 import { redirect } from "next/navigation";
 import { getCurrentUserId } from "@/server/auth/session";
-import { publicEnrollmentUrl } from "@/server/program/enrollment-url";
 import { getStampProgramOverview } from "@/server/program/stamp-program";
-import { qrSvg } from "@/server/qr";
 import { resolveScannerContext } from "@/server/tenant/scanner-context";
-import EnrollmentLink from "./EnrollmentLink";
+import ProgramSummary from "./ProgramSummary";
 import ProgramForm from "./ProgramForm";
 
 /**
- * The owner's loyalty card: create it once, then live here to get the link customers scan.
+ * The owner's loyalty card: create it once, then see what it offers and where to enrol people.
  *
  * This page exists because the product had a hole in the middle of it. Registration created a
  * business, a Main location and an OWNER. The stamp engine could award, redeem and reverse. But
@@ -18,13 +16,14 @@ import ProgramForm from "./ProgramForm";
  * join, and a real pilot could not begin — the services were all there and unreachable.
  *
  * Two states, and the second is not optional politeness: if a program already exists this page
- * shows ITS link rather than offering to create another. Phase 1a is one active program per
+ * shows what it offers rather than offering to create another. Phase 1a is one active program per
  * business, the service enforces it with a row lock and a 409, and a screen that keeps offering a
  * button the server will refuse is a screen that teaches its user to distrust it.
  *
- * The enrolment token is a CAPABILITY: it is enough to enrol customers into this business. So the
- * read is tenant-scoped and needs VIEW_TEMPLATES, which a CASHIER does not hold. A cashier who
- * reaches this URL is told they cannot see it, not shown an empty form.
+ * It no longer publishes a public enrolment link or QR. Owner decision B7 option 3 withdrew public
+ * self-service enrolment, so the panel points staff at the Scanner instead, which is where
+ * customers are now signed up. The read is still tenant-scoped and still needs VIEW_TEMPLATES,
+ * which a CASHIER does not hold.
  */
 export default async function ProgramPage({
   params,
@@ -66,15 +65,12 @@ export default async function ProgramPage({
   const program = await getStampProgramOverview(ctx);
   const canCreate = ctx.permissions.has(Permission.EDIT_TEMPLATES);
 
-  if (program && program.directSourceToken) {
-    const enrollmentUrl = publicEnrollmentUrl(program.directSourceToken);
+  if (program) {
     return (
       <div className="space-y-6">
         <Header title={t("title")} subtitle={businessName} />
-        <EnrollmentLink
+        <ProgramSummary
           locale={locale}
-          enrollmentUrl={enrollmentUrl}
-          qrSvgMarkup={qrSvg(enrollmentUrl, { cellSize: 5, margin: 4 })}
           programName={program.templateName}
           stampsRequiredPerReward={program.mechanics.stampsRequiredPerReward}
           rewardName={program.mechanics.rewardName}

@@ -31,7 +31,7 @@ const PUBLIC_ROUTES: readonly RegExp[] = [
   /^\/$/, // landing
   /^\/pricing\/?$/,
   /^\/auth\/(login|register|forgot-password|reset-password)(\/.*)?$/,
-  /^\/join(\/.*)?$/, // Phase 1a: public enrollment via UTM source token
+  /^\/join(\/.*)?$/, // withdrawn enrolment links: a static notice, public so old printed links still explain themselves
   /^\/card(\/.*)?$/, // Phase 1a: public customer PWA card, manifest, service worker
   /^\/scanner\/login\/?$/, // scanner login is public; the scanner itself is protected
 ];

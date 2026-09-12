@@ -55,6 +55,12 @@ type Feedback = { tone: "ok" | "warn" | "error"; text: string } | null;
 export default function ScannerClient({ businessId, businessName }: { businessId: string; businessName: string }) {
   const t = useTranslations("Scanner");
   const tc = useTranslations("Common");
+  /*
+   * The consent wording is its own namespace, not the screen's. `ENROLLMENT_CONSENT_VERSION` is
+   * stamped against these exact strings, so the text a customer agrees to must not quietly become
+   * a different sentence because the screen that shows it moved.
+   */
+  const tConsent = useTranslations("Consent");
 
   const [tab, setTab] = useState<"qr" | "phone">("qr");
   const [qrValue, setQrValue] = useState("");
@@ -64,6 +70,14 @@ export default function ScannerClient({ businessId, businessName }: { businessId
   const [reverseReason, setReverseReason] = useState("");
 
   const [card, setCard] = useState<CardSummary | null>(null);
+  /** Set when a phone search found nobody, so the counter can offer to sign them up. */
+  const [enrollPhone, setEnrollPhone] = useState<string | null>(null);
+  const [enrollFirstName, setEnrollFirstName] = useState("");
+  const [enrollLastName, setEnrollLastName] = useState("");
+  const [enrollConsent, setEnrollConsent] = useState(false);
+  /** The customer's own card link, shown after enrolling or after a staff restore. */
+  const [cardLink, setCardLink] = useState<{ url: string; qr: string } | null>(null);
+  const [linkCopied, setLinkCopied] = useState(false);
   const [lastGroupId, setLastGroupId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<Feedback>(null);
@@ -105,6 +119,8 @@ export default function ScannerClient({ businessId, businessName }: { businessId
     async (query: { qr?: string; phone?: string }) => {
       setBusy(true);
       setFeedback(null);
+      setEnrollPhone(null);
+      setCardLink(null);
       try {
         const params = new URLSearchParams({ businessId });
         if (query.qr) params.set("qr", query.qr.trim());
@@ -119,7 +135,18 @@ export default function ScannerClient({ businessId, businessName }: { businessId
         const { cards } = (await response.json()) as { cards: CardSummary[] };
         if (cards.length === 0) {
           setCard(null);
-          setFeedback({ tone: "warn", text: t("notFound") });
+          /*
+           * Nobody found. On a PHONE search that is the start of an enrolment, not a dead end:
+           * this is where a customer without a card gets one, now that the public join page is
+           * gone. A QR that matches nothing is different - it is a card from somewhere else, or a
+           * mistyped code - so it stays a plain "not found".
+           */
+          if (query.phone !== undefined && query.phone.trim() !== "") {
+            setEnrollPhone(query.phone.trim());
+            setFeedback({ tone: "warn", text: t("notFoundOfferEnroll") });
+          } else {
+            setFeedback({ tone: "warn", text: t("notFound") });
+          }
           return;
         }
         setCard(cards[0]);
@@ -248,6 +275,97 @@ export default function ScannerClient({ businessId, businessName }: { businessId
           ? t("cameraFailed")
           : null;
 
+  /**
+   * Sign the customer up at the counter.
+   *
+   * The phone number comes from the search that just failed, not from a second field: retyping it
+   * is how a card ends up on the wrong number. Business, program, enrolment source and location
+   * are all resolved on the server from the session - this body carries none of them.
+   */
+  const enrollAtCounter = useCallback(async () => {
+    if (!enrollPhone || busy) return;
+    setBusy(true);
+    setFeedback(null);
+    try {
+      const response = await fetch("/api/scanner/enroll", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          businessId,
+          phone: enrollPhone,
+          firstName: enrollFirstName.trim() || undefined,
+          lastName: enrollLastName.trim() || undefined,
+          marketingConsent: enrollConsent,
+        }),
+      });
+      if (!response.ok) {
+        setFeedback({ tone: "error", text: await describeFailure(response) });
+        return;
+      }
+      const result = (await response.json()) as {
+        created: boolean;
+        cardUrl: string;
+        cardQrSvg: string;
+      };
+      setEnrollFirstName("");
+      setEnrollLastName("");
+      setEnrollConsent(false);
+
+      /*
+       * Load the card itself, so the cashier can award a stamp without searching again. This runs
+       * BEFORE the link is shown, not after: `lookup` clears the enrolment offer and any link on
+       * screen, which is right when a search starts and would wipe the link we are about to hand
+       * over if it ran second.
+       */
+      await lookup({ phone: enrollPhone });
+      setCardLink({ url: result.cardUrl, qr: result.cardQrSvg });
+      setFeedback({ tone: "ok", text: result.created ? t("enrolled") : t("enrolledAlready") });
+    } catch {
+      setFeedback({ tone: "error", text: tc("genericError") });
+    } finally {
+      setBusy(false);
+    }
+  }, [businessId, busy, describeFailure, enrollConsent, enrollFirstName, enrollLastName, enrollPhone, lookup, t, tc]);
+
+  /**
+   * Show a customer their own card link again — the only restore path Phase 1a has, and the reason
+   * the public "type your number" page could be removed without stranding anyone.
+   */
+  const revealCardLink = useCallback(async () => {
+    if (!card || busy) return;
+    setBusy(true);
+    try {
+      const response = await fetch("/api/scanner/card-link", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ businessId, customerCardId: card.customerCardId }),
+      });
+      if (!response.ok) {
+        setFeedback({ tone: "error", text: await describeFailure(response) });
+        return;
+      }
+      const result = (await response.json()) as { cardUrl: string; cardQrSvg: string };
+      setCardLink({ url: result.cardUrl, qr: result.cardQrSvg });
+    } catch {
+      setFeedback({ tone: "error", text: tc("genericError") });
+    } finally {
+      setBusy(false);
+    }
+  }, [businessId, busy, card, describeFailure, tc]);
+
+  const copyCardLink = useCallback(async () => {
+    if (!cardLink) return;
+    try {
+      await navigator.clipboard.writeText(cardLink.url);
+      setLinkCopied(true);
+      window.setTimeout(() => setLinkCopied(false), 2500);
+    } catch {
+      // Clipboard access is refused often enough - insecure origin, a stale gesture, a locked-down
+      // device - and the link is on screen in a selectable field, so let them copy it themselves.
+      (document.getElementById("customer-card-link") as HTMLInputElement | null)?.select();
+    }
+  }, [cardLink]);
+
   const toneClass = {
     ok: "bg-emerald-500/10 text-emerald-300",
     warn: "bg-amber-500/10 text-amber-300",
@@ -375,6 +493,87 @@ export default function ScannerClient({ businessId, businessName }: { businessId
           </p>
         )}
 
+        {enrollPhone !== null && (
+          <section data-testid="scanner-enroll" className="space-y-3 rounded-2xl bg-zinc-900 p-5 ring-1 ring-white/10">
+            <div>
+              <p className="text-xs uppercase tracking-wide text-zinc-500">{t("enrollTitle")}</p>
+              <p dir="ltr" data-testid="scanner-enroll-phone" className="text-lg font-bold">
+                {enrollPhone}
+              </p>
+            </div>
+
+            <input
+              value={enrollFirstName}
+              onChange={(e) => setEnrollFirstName(e.target.value)}
+              placeholder={t("enrollFirstName")}
+              maxLength={80}
+              data-testid="scanner-enroll-first-name"
+              className="w-full rounded-xl bg-zinc-950 px-4 py-3 text-sm ring-1 ring-white/10 outline-none focus:ring-indigo-500"
+            />
+            <input
+              value={enrollLastName}
+              onChange={(e) => setEnrollLastName(e.target.value)}
+              placeholder={t("enrollLastName")}
+              maxLength={80}
+              data-testid="scanner-enroll-last-name"
+              className="w-full rounded-xl bg-zinc-950 px-4 py-3 text-sm ring-1 ring-white/10 outline-none focus:ring-indigo-500"
+            />
+
+            {/* Read aloud, ticked in front of the customer. The server stamps which wording and when. */}
+            <label className="flex items-start gap-3 text-sm text-zinc-300">
+              <input
+                type="checkbox"
+                checked={enrollConsent}
+                onChange={(e) => setEnrollConsent(e.target.checked)}
+                data-testid="scanner-enroll-consent"
+                className="mt-0.5 h-5 w-5 rounded"
+              />
+              <span>{tConsent("consentLabel")}</span>
+            </label>
+            <p className="text-xs text-zinc-500">{tConsent("privacyNote")}</p>
+            <p className="text-xs text-zinc-500">{t("enrollReadAloud")}</p>
+
+            <button
+              type="button"
+              onClick={() => void enrollAtCounter()}
+              disabled={busy}
+              data-testid="scanner-enroll-submit"
+              className="w-full rounded-xl bg-indigo-600 py-3 font-bold disabled:opacity-50"
+            >
+              {busy ? t("searching") : t("enrollSubmit")}
+            </button>
+          </section>
+        )}
+
+        {cardLink !== null && (
+          <section data-testid="scanner-card-link" className="space-y-3 rounded-2xl bg-zinc-900 p-5 ring-1 ring-white/10">
+            <p className="text-xs uppercase tracking-wide text-zinc-500">{t("cardLinkTitle")}</p>
+            <div
+              data-testid="scanner-card-qr"
+              className="mx-auto w-fit rounded-xl bg-white p-3"
+              dangerouslySetInnerHTML={{ __html: cardLink.qr }}
+            />
+            <input
+              id="customer-card-link"
+              data-testid="scanner-card-link-url"
+              readOnly
+              dir="ltr"
+              value={cardLink.url}
+              onFocus={(e) => e.currentTarget.select()}
+              className="w-full rounded-xl bg-zinc-950 px-4 py-3 font-mono text-xs ring-1 ring-white/10"
+            />
+            <button
+              type="button"
+              onClick={() => void copyCardLink()}
+              data-testid="scanner-card-link-copy"
+              className="w-full rounded-xl bg-zinc-800 py-3 text-sm font-medium ring-1 ring-white/10"
+            >
+              {linkCopied ? t("cardLinkCopied") : t("cardLinkCopy")}
+            </button>
+            <p className="text-xs text-zinc-500">{t("cardLinkHelp")}</p>
+          </section>
+        )}
+
         {card !== null && (
           <section data-testid="scanner-card" className="space-y-4 rounded-2xl bg-zinc-900 p-5 ring-1 ring-white/10">
             <div>
@@ -384,6 +583,16 @@ export default function ScannerClient({ businessId, businessName }: { businessId
                 {card.phone}
               </p>
             </div>
+
+            <button
+              type="button"
+              onClick={() => void revealCardLink()}
+              disabled={busy}
+              data-testid="scanner-reveal-link"
+              className="w-full rounded-xl bg-zinc-800 py-2 text-sm font-medium ring-1 ring-white/10 disabled:opacity-50"
+            >
+              {t("revealCardLink")}
+            </button>
 
             <div className="flex gap-4 rounded-xl bg-zinc-950 px-4 py-3">
               <div>

@@ -15,25 +15,30 @@ import {
  * one, so every real enrolment stored NULL for both the version and the timestamp — while the
  * integration tests passed, because they supplied a version by hand.
  *
- * So there are two failure modes to hold shut, not one. The route must stamp a version (covered
- * in `tests/integration/public-enrollment-route.test.ts`), and the version must still describe the
- * words a customer actually read. This file is the second: edit the consent wording without
- * bumping the version and the digest below stops matching, which is a failing test naming the
- * constant to change.
+ * So there are two failure modes to hold shut, not one. The route must stamp a version (covered in
+ * `tests/integration/counter-enrollment.test.ts`), and the version must still describe the words a
+ * customer actually read. This file is the second: edit the consent wording without bumping the
+ * version and the digest below stops matching, which is a failing test naming the constant to
+ * change.
+ *
+ * The strings live in their own `Consent` namespace rather than in the screen that shows them. The
+ * screen moved once already — from the public join page to the counter, when owner decision B7
+ * option 3 withdrew public enrolment — and a digest tied to a screen's namespace would have gone
+ * stale silently at exactly that moment.
  */
 
 const ROOT = path.resolve(import.meta.dirname, "../..");
 
-function joinMessages(locale: string): { consentLabel: string; privacyNote: string } {
+function consentMessages(locale: string): { consentLabel: string; privacyNote: string } {
   const file = JSON.parse(readFileSync(path.join(ROOT, `messages/${locale}.json`), "utf8")) as {
-    Join: { consentLabel: string; privacyNote: string };
+    Consent: { consentLabel: string; privacyNote: string };
   };
-  return file.Join;
+  return file.Consent;
 }
 
 describe("the enrolment consent version", () => {
-  const en = joinMessages("en");
-  const ar = joinMessages("ar");
+  const en = consentMessages("en");
+  const ar = consentMessages("ar");
   /** The order is fixed and documented on the constant; changing it would change every digest. */
   const texts = [en.consentLabel, en.privacyNote, ar.consentLabel, ar.privacyNote];
 

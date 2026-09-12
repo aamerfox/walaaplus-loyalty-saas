@@ -1,22 +1,26 @@
 import { expect, test } from "@playwright/test";
+import { AuditAction } from "@/server/audit/audit";
 import { prisma } from "@/server/db";
 import { registerTestOwner, TEST_PASSWORD, uniqueSyrianPhone } from "../setup/fixtures";
 
 /**
- * The journey that did not exist: a merchant with an empty account ends up with a customer
- * holding a card, without anyone touching the database.
+ * A merchant with an empty account ends up with a customer holding a card, without anyone
+ * touching the database.
  *
  * Staging was healthy and a real owner still could not run the café loop, because nothing
- * invoked `createStampProgram`. Every service was in place and unreachable from a browser. This
- * spec walks the whole rung that was missing — sign in, create the card, read the link off the
- * screen, open that link as a customer, join — so the gap cannot reopen quietly.
+ * invoked `createStampProgram`. Every service was in place and unreachable from a browser.
+ *
+ * Sign in, create the loyalty card, then enrol a customer AT THE COUNTER and watch them open the
+ * link they were handed. Enrolment moved here from a public join page by owner decision B7
+ * option 3: a public form that issued a card to a new number and nothing to an existing one told
+ * whoever submitted it which case they hit.
  *
  * The owner is seeded through the registration service rather than the sign-up form: what is
  * under test here is the bootstrap step after registration, and registration has its own tests.
  * Everything from the sign-in onward is a real browser against the real application.
  */
 test.describe("owner bootstrap", () => {
-  test("an owner with no card creates one and a customer joins from the link on screen", async ({ page }) => {
+  test("an owner with no card creates one, then enrols a customer at the counter", async ({ page }) => {
     // ── an account exactly as registration leaves it: business, Main location, OWNER, no card ──
     const reg = await registerTestOwner();
     const owner = await prisma.user.findUniqueOrThrow({ where: { id: reg.userId }, select: { email: true } });
@@ -50,41 +54,79 @@ test.describe("owner bootstrap", () => {
 
     await page.getByTestId("program-submit").click();
 
-    // ── 4. the link and the QR appear ─────────────────────────────────────────
+    // ── 4. the card is created, and the screen says where to enrol people ────
     await expect(page.getByTestId("program-created")).toBeVisible();
-    await expect(page.getByTestId("enrollment-qr").locator("svg")).toHaveCount(1);
     await expect(page.getByTestId("program-summary")).toContainText("قهوة مجانية");
-    await expect(page.getByTestId("next-cashier")).toBeVisible();
+    await expect(page.getByTestId("enrollment-guidance")).toBeVisible();
     await expect(page.getByTestId("next-scanner")).toBeVisible();
 
-    const enrollmentUrl = await page.getByTestId("enrollment-url").inputValue();
-    expect(enrollmentUrl).toContain("/join/");
+    /*
+     * No public enrolment link or QR anywhere on this screen. Owner decision B7 option 3 withdrew
+     * public self-service enrolment, and a screen that still published the link would be handing
+     * out an address that now answers "ask at the counter".
+     */
+    await expect(page.getByTestId("enrollment-url")).toHaveCount(0);
+    await expect(page.getByTestId("enrollment-qr")).toHaveCount(0);
+    const html = await page.content();
+    expect(html).not.toContain("/join/");
 
     // Exactly one program, created through the UI.
     expect(await prisma.programTemplate.count({ where: { businessId: reg.businessId } })).toBe(1);
 
-    // ── 5. reloading shows the SAME link, not an offer to create another ──────
-    await page.reload();
-    await expect(page.getByTestId("program-form")).toHaveCount(0);
-    await expect(page.getByTestId("enrollment-url")).toHaveValue(enrollmentUrl);
+    // ── 5. the owner enrols a customer at the counter ────────────────────────
+    await page.getByTestId("next-scanner").click();
+    await page.waitForURL(/\/ar\/scanner(\?|$)/, { timeout: 30_000 });
 
-    // ── 6. a customer opens that exact link and joins ─────────────────────────
+    const phone = uniqueSyrianPhone();
+    const localPhone = `0${phone.slice(4)}`;
+
+    await page.getByTestId("scanner-tab-phone").click();
+    await page.getByTestId("scanner-phone-input").fill(localPhone);
+    await page.getByTestId("scanner-phone-lookup").click();
+
+    // Nobody found, so the counter offers to sign them up rather than stopping.
+    await expect(page.getByTestId("scanner-enroll")).toBeVisible();
+    await expect(page.getByTestId("scanner-enroll-phone")).toContainText(localPhone);
+
+    await page.getByTestId("scanner-enroll-first-name").fill("ليلى");
+    await page.getByTestId("scanner-enroll-consent").check();
+    await page.getByTestId("scanner-enroll-submit").click();
+
+    // ── 6. the customer's own link and QR appear, for staff to hand over ─────
+    await expect(page.getByTestId("scanner-card-link")).toBeVisible();
+    await expect(page.getByTestId("scanner-card-qr").locator("svg")).toHaveCount(1);
+    const cardUrl = await page.getByTestId("scanner-card-link-url").inputValue();
+    expect(cardUrl).toContain("/card/");
+
+    // And the card is loaded, so a stamp can be awarded without searching again.
+    await expect(page.getByTestId("scanner-card")).toBeVisible();
+    await expect(page.getByTestId("scanner-stamps")).toContainText("1");
+
+    // ── 7. the customer loses the link, and staff restore it at the counter ──
+    // The reason the public "type your number and get your card back" page could be withdrawn:
+    // there is still a way back to a card, it just runs through a member of staff.
+    await page.getByTestId("scanner-phone-input").fill(localPhone);
+    await page.getByTestId("scanner-phone-lookup").click();
+    await expect(page.getByTestId("scanner-card")).toBeVisible();
+    await expect(page.getByTestId("scanner-card-link")).toHaveCount(0);
+
+    await page.getByTestId("scanner-reveal-link").click();
+    await expect(page.getByTestId("scanner-card-link")).toBeVisible();
+    expect(await page.getByTestId("scanner-card-link-url").inputValue()).toBe(cardUrl);
+
+    // Revealing a link is audited, and the audit row must not carry the link itself.
+    const reveals = await prisma.auditLog.findMany({
+      where: { businessId: reg.businessId, action: AuditAction.CARD_LINK_REVEALED },
+      select: { metadata: true },
+    });
+    expect(reveals).toHaveLength(1);
+    expect(JSON.stringify(reveals)).not.toContain(cardUrl.split("/card/")[1]);
+
+    // ── 8. the customer opens the link they were given ───────────────────────
     const customer = await page.context().browser()!.newContext();
     const customerPage = await customer.newPage();
-    const phone = uniqueSyrianPhone();
-
-    // The URL as printed, absolute and without a locale prefix: the redirect to a negotiated
-    // locale is part of what is being proved.
-    await customerPage.goto(enrollmentUrl);
-    await customerPage.waitForURL(/\/(ar|en)\/join\//);
-    await expect(customerPage.getByTestId("join-form")).toBeVisible();
-
-    await customerPage.locator("#phone").fill(`0${phone.slice(4)}`);
-    await customerPage.locator("#firstName").fill("ليلى");
-    await customerPage.getByTestId("join-submit").click();
-
-    // ── 7. they hold a card, with the welcome stamp the owner chose ───────────
-    await customerPage.waitForURL(/\/card\/[A-Za-z0-9_-]{20,}/);
+    await customerPage.goto(cardUrl);
+    await customerPage.waitForURL(/\/(ar|en)\/card\//);
     await expect(customerPage.getByTestId("card-qr")).toBeVisible();
     await expect(customerPage.getByTestId("card-progress")).toContainText("1");
 

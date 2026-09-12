@@ -30,6 +30,19 @@ export const AuditAction = {
   CARD_ISSUED: "card.issued",
   /** An owner created a cashier account. */
   CASHIER_CREATED: "staff.cashier_created",
+
+  // ── Phase 1a, after owner decision B7: enrolment happens at the counter ────
+  /**
+   * A member of staff enrolled a customer at the till, or confirmed one already enrolled.
+   * Carries no phone, no name and no card token — who, which card, and whether it was new.
+   */
+  CARD_ISSUED_AT_COUNTER: "card.issued_at_counter",
+  /**
+   * Staff showed a customer their own card link again — the only restore path Phase 1a has.
+   * The `shareToken` OPENS the card, so it is never written here: an audit row is read by more
+   * people and kept far longer than the screen that legitimately shows a capability.
+   */
+  CARD_LINK_REVEALED: "card.link_revealed",
 } as const;
 export type AuditActionName = (typeof AuditAction)[keyof typeof AuditAction];
 
