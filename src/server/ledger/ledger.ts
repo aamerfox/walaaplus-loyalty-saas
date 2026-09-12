@@ -277,10 +277,28 @@ export interface ReverseGroupInput {
   actor: LedgerActor;
   transactionGroupId: string;
   reason: string;
-  /** Defaults to the original group's location. Members must have access to it. */
-  locationId?: string;
 }
 
+/**
+ * **Where a reversal is attributed, and why the caller has no say in it.**
+ *
+ * The compensating rows are written at the ORIGINAL group's location. Always. There is deliberately
+ * no parameter to change that, because the only thing such a parameter can do is move value between
+ * branches: award ten stamps at the airport counter, reverse them "at" the mall counter, and the
+ * ledger now says the airport gave away ten stamps and the mall took ten back. Every per-location
+ * figure a merchant uses to pay staff, judge a site or reconcile a till would be wrong, and nothing
+ * in the data would look irregular — the totals still balance.
+ *
+ * So the rule is: **a reversal corrects the place where the mistake was made.** Who fixed it is
+ * recorded separately, on `performedByUserId` of the compensating rows, which is where that
+ * question belongs.
+ *
+ * The consequence worth stating plainly: a member who cannot act at the original location cannot
+ * reverse the group either — `appendOperationGroup` runs `requireLocationAccess` against that
+ * location, inside this transaction. A cashier assigned to one branch cannot reach into another's
+ * ledger to undo something, and the manager or owner who can act anywhere is the person who fixes
+ * a cross-branch mistake. That is a narrower rule than Phase 1a had, and it is the point.
+ */
 /**
  * Reverse a whole transaction group with compensating rows. Rejected when:
  *  - the group does not exist in the actor's business;
@@ -379,7 +397,8 @@ export async function reverseOperationGroup(input: ReverseGroupInput, db: DbClie
         {
           actor: input.actor,
           customerCardId: originals[0].customerCardId,
-          locationId: input.locationId ?? originals[0].locationId,
+          // The original's location, never the reverser's. See the note above this function.
+          locationId: originals[0].locationId,
           operations: compensating,
         },
         tx,

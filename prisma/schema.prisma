@@ -301,6 +301,10 @@ model CustomerBusinessProfile {
 
   @@unique([businessId, customerId])
   @@index([businessId, lastSeenAt])
+  // The scanner's phone lookup arrives here through Customer (Phase 1a finding M-4).
+  @@index([customerId])
+  // The customer list pages WHERE businessId ORDER BY id (Phase 1a finding M-5).
+  @@index([businessId, id])
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -366,6 +370,9 @@ model RewardTier {
   programVersion ProgramVersion     @relation(fields: [programVersionId], references: [id])
   operations     LoyaltyOperation[]
 
+  // A customer picks a reward by name, and a redemption is read back by it. Two tiers with one
+  // name in a version make both of those a guess.
+  @@unique([programVersionId, name])
   @@index([programVersionId])
 }
 
@@ -440,6 +447,8 @@ model CustomerCard {
   @@unique([customerBusinessProfileId, templateId])
   @@index([businessId, status])
   @@index([templateId])
+  // Cards issued in a date range: the dashboard's acquisition figure (Phase 1b).
+  @@index([businessId, issuedAt])
 }
 
 /// APPEND-ONLY. UPDATE and DELETE are rejected by trigger `loyalty_operation_append_only`.
@@ -491,6 +500,8 @@ model LoyaltyOperation {
   @@index([locationId, createdAt])
   @@index([customerBusinessProfileId, createdAt])
   @@index([transactionGroupId])
+  // Per-program metrics over a date range (Phase 1b dashboard read models).
+  @@index([businessId, templateId, createdAt])
 }
 
 /// Owns idempotency for every write that may be retried. Lives OUTSIDE the ledger because one

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { LedgerInvariantError, ValidationError } from "../errors";
+import { availableLocationsSchema } from "./available-locations";
 
 /**
  * The stamp-program mechanics contract.
@@ -69,6 +70,19 @@ export const stampMechanicsSchema = z
 
     /** Stamps granted once on enrollment through the direct source. Absent = none. */
     welcomeStamps: positiveInt(MAX_WELCOME_STAMPS).optional(),
+
+    /**
+     * Counters this version may be operated at (Phase 1b). **Absent means the business's Main
+     * location only**, which is what every Phase 1a version says and what every card pinned to one
+     * keeps saying forever.
+     *
+     * Added as an OPTIONAL field rather than behind a contract-version bump, deliberately.
+     * `contractVersion` is a `z.literal`, so raising it would make `readStampMechanics` refuse
+     * every version already pinned to a live card — every existing café would stop being able to
+     * award a stamp the moment this shipped. An absent optional field means exactly what its
+     * absence meant before, which is the definition of a compatible change.
+     */
+    availableLocations: availableLocationsSchema.optional(),
   })
   .superRefine((m, ctx) => {
     const spendFields = ["spendAmountPerBlockMinor", "stampsPerBlock"] as const;

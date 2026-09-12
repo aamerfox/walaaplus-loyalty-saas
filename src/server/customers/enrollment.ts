@@ -3,8 +3,11 @@ import { CardType, ProgramVersionStatus, TemplateStatus } from "@prisma/client";
 import { AuditAction, recordAudit } from "../audit/audit";
 import { CONTENDED_TX, prisma, type Tx } from "../db";
 import { ConflictError, NotFoundError, ValidationError } from "../errors";
-import { readStampMechanics, type StampMechanics } from "../program/mechanics";
+import { resolveEnrollmentLocationId } from "../program/available-locations";
+import { readStampMechanics } from "../program/mechanics";
+import { readPointsMechanics } from "../program/points-mechanics";
 import { getDefaultLocationId } from "../program/stamp-program";
+import { grantWelcomePoints } from "../points/engine";
 import { newCardTokens } from "../security/tokens";
 import { grantWelcomeStamps } from "../stamp/engine";
 import { normalizeSyrianPhone } from "./phone";
@@ -74,10 +77,16 @@ export type EnrollmentResult = {
   /** For the card page URL. A different secret from the QR, by design. */
   shareToken: string;
   serialNumber: string;
+  /** Which program this card belongs to. Decides which engine may transact on it. */
+  cardType: CardType;
   stampBalance: number;
+  pointBalance: number;
   rewardBalance: number;
-  /** Stamps granted by the welcome bonus on this call; 0 on a repeat enrollment. */
-  welcomeStampsGranted: number;
+  /**
+   * Units granted by the welcome bonus on this call - stamps on a stamp card, points on a points
+   * card - and 0 on a repeat enrollment.
+   */
+  welcomeUnitsGranted: number;
 };
 
 interface ResolvedSource {
@@ -85,12 +94,18 @@ interface ResolvedSource {
   businessId: string;
   templateId: string;
   programVersionId: string;
-  mechanics: StampMechanics;
+  /** STAMP or POINTS. Read from the template, never from the caller. */
+  cardType: CardType;
   utmSource: string;
   utmMedium: string | null;
   utmCampaign: string | null;
-  /** Per-source override of the program's welcome bonus (PRODUCT-SPEC §6.1). */
-  welcomeStamps: number;
+  /**
+   * Per-source override of the program's welcome bonus (PRODUCT-SPEC §6.1), already resolved to a
+   * number of whichever unit this program uses.
+   */
+  welcomeUnits: number;
+  /** The version's own location rule, so the welcome bonus is not written where it cannot run. */
+  availableLocations: readonly string[] | null;
 }
 
 /**
@@ -107,7 +122,10 @@ async function resolveSource(db: Tx, sourceToken: string): Promise<ResolvedSourc
     where: {
       publicToken: sourceToken,
       active: true,
-      template: { status: TemplateStatus.ACTIVE, cardType: CardType.STAMP },
+      // Any live program, not only a stamp one: Phase 1b issues points cards through the same
+      // path. Which engine owns the card is decided by the template's `cardType` below, and by the
+      // discriminator inside the version's pinned mechanics - never by the caller.
+      template: { status: TemplateStatus.ACTIVE },
     },
     select: {
       id: true,
@@ -119,6 +137,7 @@ async function resolveSource(db: Tx, sourceToken: string): Promise<ResolvedSourc
         select: {
           id: true,
           businessId: true,
+          cardType: true,
           business: { select: { active: true } },
           versions: {
             where: { status: ProgramVersionStatus.ACTIVE },
@@ -133,17 +152,29 @@ async function resolveSource(db: Tx, sourceToken: string): Promise<ResolvedSourc
   const version = link?.template.versions[0];
   if (!link || !version || !link.template.business.active) throw new NotFoundError("Enrollment link not found");
 
-  const mechanics = readStampMechanics(version.mechanics, { programVersionId: version.id });
+  /*
+   * The program's own welcome bonus, read through the contract that owns it, with the named
+   * source's override taking precedence (PRODUCT-SPEC §6.1). Reading through the contract rather
+   * than the raw JSON is what stops a points version's `welcomePoints` being handed to the stamp
+   * engine as stamps.
+   */
+  const mechanics =
+    link.template.cardType === CardType.POINTS
+      ? readPointsMechanics(version.mechanics, { programVersionId: version.id })
+      : readStampMechanics(version.mechanics, { programVersionId: version.id });
+  const programWelcome = (mechanics.kind === "POINTS" ? mechanics.welcomePoints : mechanics.welcomeStamps) ?? 0;
+
   return {
     sourceId: link.id,
     businessId: link.template.businessId,
     templateId: link.template.id,
     programVersionId: version.id,
-    mechanics,
+    cardType: link.template.cardType,
     utmSource: link.utmSource,
     utmMedium: link.utmMedium,
     utmCampaign: link.utmCampaign,
-    welcomeStamps: link.welcomeUnitQuantity ?? mechanics.welcomeStamps ?? 0,
+    welcomeUnits: link.welcomeUnitQuantity ?? programWelcome,
+    availableLocations: mechanics.availableLocations ?? null,
   };
 }
 
@@ -207,6 +238,7 @@ interface CardRow {
   shareToken: string;
   serialNumber: string;
   stampBalance: number;
+  pointBalance: number;
   rewardBalance: number;
 }
 
@@ -226,7 +258,11 @@ export async function enrollCustomer(input: EnrollCustomerInput): Promise<Enroll
   return prisma.$transaction(async (tx) => {
     const now = new Date();
     const source = await resolveSource(tx, input.sourceToken);
-    const locationId = await getDefaultLocationId(tx, source.businessId);
+    // Main, unless the program runs at exactly one other counter - see `resolveEnrollmentLocationId`.
+    const locationId = resolveEnrollmentLocationId(
+      { availableLocations: source.availableLocations ?? undefined },
+      await getDefaultLocationId(tx, source.businessId),
+    );
 
     const customerId = await getOrCreateCustomer(tx, normalizedPhone, now);
     const profileId = await getOrCreateProfile(tx, source, customerId, input, now);
@@ -245,7 +281,7 @@ export async function enrollCustomer(input: EnrollCustomerInput): Promise<Enroll
       ON CONFLICT ("customerBusinessProfileId", "templateId") DO NOTHING
       RETURNING "id"`;
 
-    let welcomeStampsGranted = 0;
+    let welcomeUnitsGranted = 0;
     if (created[0]) {
       const customerCardId = created[0].id;
 
@@ -265,24 +301,38 @@ export async function enrollCustomer(input: EnrollCustomerInput): Promise<Enroll
           utmSource: source.utmSource,
           utmMedium: source.utmMedium,
           utmCampaign: source.utmCampaign,
-          welcomeStamps: source.welcomeStamps,
+          cardType: source.cardType,
+          welcomeUnits: source.welcomeUnits,
         },
       });
 
-      if (source.welcomeStamps > 0) {
-        await grantWelcomeStamps(tx, {
-          businessId: source.businessId,
-          customerCardId,
-          locationId,
-          stamps: source.welcomeStamps,
-          reason: `welcome bonus on enrollment via ${source.utmSource}`,
-        });
-        welcomeStampsGranted = source.welcomeStamps;
+      if (source.welcomeUnits > 0) {
+        const reason = `welcome bonus on enrollment via ${source.utmSource}`;
+        // One branch, in one place. Each engine refuses a card pinned to the other kind, so a
+        // mis-branch here fails loudly rather than writing points onto a stamp card.
+        if (source.cardType === CardType.POINTS) {
+          await grantWelcomePoints(tx, {
+            businessId: source.businessId,
+            customerCardId,
+            locationId,
+            points: source.welcomeUnits,
+            reason,
+          });
+        } else {
+          await grantWelcomeStamps(tx, {
+            businessId: source.businessId,
+            customerCardId,
+            locationId,
+            stamps: source.welcomeUnits,
+            reason,
+          });
+        }
+        welcomeUnitsGranted = source.welcomeUnits;
       }
     }
 
     const card = await tx.$queryRaw<CardRow[]>`
-      SELECT "id", "qrToken", "shareToken", "serialNumber", "stampBalance", "rewardBalance"
+      SELECT "id", "qrToken", "shareToken", "serialNumber", "stampBalance", "pointBalance", "rewardBalance"
         FROM "CustomerCard"
        WHERE "customerBusinessProfileId" = ${profileId} AND "templateId" = ${source.templateId}`;
     const row = card[0];
@@ -299,9 +349,11 @@ export async function enrollCustomer(input: EnrollCustomerInput): Promise<Enroll
       qrToken: row.qrToken,
       shareToken: row.shareToken,
       serialNumber: row.serialNumber,
+      cardType: source.cardType,
       stampBalance: row.stampBalance,
+      pointBalance: row.pointBalance,
       rewardBalance: row.rewardBalance,
-      welcomeStampsGranted,
+      welcomeUnitsGranted,
     };
   }, CONTENDED_TX);
 }
@@ -329,13 +381,21 @@ export async function getEnrollmentSourceView(sourceToken: string): Promise<Enro
       where: { id: source.templateId },
       select: { name: true, business: { select: { name: true } } },
     });
+    // Deliberately stamp-only. This described the offer on the public join page, which owner
+    // decision B7 withdrew, and a points program's offer is a list of tiers rather than one
+    // threshold - a different view, for a screen that does not exist yet.
+    const version = await tx.programVersion.findUniqueOrThrow({
+      where: { id: source.programVersionId },
+      select: { id: true, mechanics: true },
+    });
+    const mechanics = readStampMechanics(version.mechanics, { programVersionId: version.id });
     return {
       businessName: template.business.name,
       templateName: template.name,
-      stampsRequiredPerReward: source.mechanics.stampsRequiredPerReward,
-      rewardName: source.mechanics.rewardName,
-      rewardDescription: source.mechanics.rewardDescription ?? null,
-      welcomeStamps: source.welcomeStamps,
+      stampsRequiredPerReward: mechanics.stampsRequiredPerReward,
+      rewardName: mechanics.rewardName,
+      rewardDescription: mechanics.rewardDescription ?? null,
+      welcomeStamps: source.welcomeUnits,
     };
   }, CONTENDED_TX);
 }

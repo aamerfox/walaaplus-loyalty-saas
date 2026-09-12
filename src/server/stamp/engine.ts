@@ -5,10 +5,17 @@ import { runIdempotent } from "../ledger/idempotency";
 import { appendOperationGroup, reverseOperationGroup } from "../ledger/ledger";
 import type { MemberActor, MemberSource } from "../ledger/actor";
 import type { OperationInput } from "../ledger/types";
-import { AWARD_KINDS } from "../ledger/visits";
+import { resolveOperationLocationId } from "../program/available-locations";
+import {
+  assertDailyAwardLimit,
+  assertIdempotencyKey,
+  assertMinorUnits,
+  assertNoReversalLocation,
+  assertTransactable,
+  countAwardsInBusinessDay,
+} from "../program/card-actions";
 import { getDefaultLocationId } from "../program/stamp-program";
 import { planStampConversion, readStampMechanics, stampsForPurchase, StampEarnMode, type StampMechanics } from "../program/mechanics";
-import { businessDayRange } from "../time/business-day";
 import { requirePermission, type TenantContext } from "../tenant/context";
 
 /**
@@ -47,26 +54,18 @@ export type StampOperationResult = {
 };
 
 /**
- * Phase 1a runs ONE café at ONE counter.
+ * Where a stamp operation is attributed.
  *
- * The location is therefore not an input. Every award, redemption and reversal attributes to the
- * business's default `Main` location, resolved inside the transaction from the business itself.
- * A caller — a screen, a route handler, a script — cannot choose it, and supplying it anyway is
- * REFUSED before anything is validated or written, rather than quietly honoured.
+ * Phase 1a ran one café at one counter and refused a caller-supplied location outright. Phase 1b
+ * gives that decision to the card's PINNED program version: a version that lists
+ * `availableLocations` accepts one of them, and a version that does not — which is every version
+ * written before this phase, and every one that did not ask — still attributes to Main and still
+ * refuses a supplied location with the same error.
  *
- * This is a scope boundary, not a security boundary. `requireLocationAccess` already stops a
- * cashier acting outside their assignment, but an OWNER is unrestricted across their own
- * locations, so nothing else would stop a second counter appearing in the ledger and Phase 1b's
- * multi-location work starting by accident. Phase 1b adds the parameter back deliberately, with
- * the program's `availableLocations` and a location picker behind it.
+ * So nothing changes for an existing card, and multi-location begins only where a merchant
+ * deliberately published a program that runs at several counters. The access check
+ * (`requireLocationAccess`) runs inside the write transaction either way.
  */
-function assertNoCallerLocation(input: object): void {
-  if ("locationId" in input) {
-    throw new ValidationError(
-      "Phase 1a operates only at the business's Main location; locationId is resolved by the server and cannot be supplied",
-    );
-  }
-}
 
 /** Fields every counter action shares. */
 export interface StampActionInput {
@@ -78,6 +77,13 @@ export interface StampActionInput {
   idempotencyKey: string;
   /** SCANNER for a counter scan, DASHBOARD for a merchant acting from the back office. */
   source: MemberSource;
+  /**
+   * Which counter this happened at.
+   *
+   * Only meaningful when the card's pinned version lists `availableLocations`. A version that does
+   * not — every Phase 1a version — refuses a supplied location and attributes to Main.
+   */
+  locationId?: string;
   /** Internal note. Stored on the operation and never shown to the customer. */
   comment?: string;
 }
@@ -126,9 +132,6 @@ interface LoadedCard {
   timezone: string;
 }
 
-/** Card states that may still transact. ISSUED means enrolled but not yet opened. */
-const TRANSACTABLE: ReadonlySet<CardStatus> = new Set<CardStatus>([CardStatus.ISSUED, CardStatus.ACTIVE]);
-
 /**
  * Lock the card and load the rules pinned to it.
  *
@@ -148,13 +151,7 @@ async function loadLockedStampCard(tx: Tx, businessId: string, customerCardId: s
   // does not exist. Never "forbidden", which would confirm it exists.
   if (!card) throw new NotFoundError("Card not found");
 
-  if (!TRANSACTABLE.has(card.status)) {
-    throw new ConflictError(`Card is ${card.status.toLowerCase()} and cannot transact`, ConflictCode.CARD_NOT_TRANSACTABLE);
-  }
-  if (card.expiresAt !== null && card.expiresAt.getTime() <= now.getTime()) {
-    // The scheduled expiry job is Phase 1.5; until it runs, the date on the card is what counts.
-    throw new ConflictError("Card has expired and cannot transact", ConflictCode.CARD_NOT_TRANSACTABLE);
-  }
+  assertTransactable(card, now);
 
   const version = await tx.programVersion.findFirst({
     where: { id: card.programVersionId, template: { businessId } },
@@ -175,37 +172,11 @@ async function loadLockedStampCard(tx: Tx, businessId: string, customerCardId: s
 }
 
 /**
- * Award operations already written for this card during the business's local day.
- *
- * Counts OPERATIONS, not stamps: `dailyAwardLimit` exists to stop a cashier tapping the same
- * customer repeatedly, so a single award of five stamps is one award (PRODUCT-SPEC §5.6). The
- * window is the business's own day, not the server's — a Damascus café closing at 01:00 is still
- * trading yesterday. Exported for the timezone tests.
+ * Re-exported: the day-window count moved to `program/card-actions.ts` when the points engine
+ * arrived and needed exactly the same rule. Kept here so callers and tests that know it as part of
+ * the stamp engine keep working, and so the two engines cannot drift apart on what a day is.
  */
-export async function countAwardsInBusinessDay(
-  tx: Tx,
-  customerCardId: string,
-  timezone: string,
-  now: Date,
-): Promise<{ count: number; localDate: string }> {
-  const { start, end, localDate } = businessDayRange(now, timezone);
-  const count = await tx.loyaltyOperation.count({
-    where: {
-      customerCardId,
-      kind: { in: [...AWARD_KINDS] },
-      createdAt: { gte: start, lt: end },
-    },
-  });
-  return { count, localDate };
-}
-
-/** Money is integer minor units, always. A float here is a rounding bug waiting to be shipped. */
-function assertMinorUnits(value: number | undefined, field: string): void {
-  if (value === undefined) return;
-  if (!Number.isInteger(value) || value < 0) {
-    throw new ValidationError(`${field} must be a non-negative integer of minor units`);
-  }
-}
+export { countAwardsInBusinessDay };
 
 /** Programs may demand the purchase amount on every award, not only on purchase awards. */
 function assertPurchaseAmount(mechanics: StampMechanics, purchaseAmountMinor: number | undefined): void {
@@ -282,23 +253,26 @@ async function runCardAction(
   payload: Record<string, unknown>,
   action: (tx: Tx, loaded: LoadedCard, actor: MemberActor, locationId: string, now: Date) => Promise<StampOperationResult>,
 ): Promise<StampOperationResult> {
-  assertNoCallerLocation(input);
-  if (typeof input.idempotencyKey !== "string" || input.idempotencyKey.trim().length < 8) {
-    throw new ValidationError("An idempotency key of at least 8 characters is required");
-  }
+  assertIdempotencyKey(input.idempotencyKey);
   const actor: MemberActor = { kind: "member", ctx, source: input.source };
 
   const outcome = await runIdempotent<StampOperationResult>({
     businessId: ctx.businessId,
     key: input.idempotencyKey,
     // The payload is what makes a retry safe: the same key with different intent is a client bug
-    // and is refused, rather than silently replaying the wrong answer.
-    payload: { ...payload, customerCardId: input.customerCardId, source: input.source },
+    // and is refused, rather than silently replaying the wrong answer. The location is part of the
+    // intent — the same tap at a different branch is a different operation.
+    payload: { ...payload, customerCardId: input.customerCardId, source: input.source, locationId: input.locationId ?? null },
     execute: async (tx) => {
       const now = new Date();
-      // Always Main. Not a default the caller can override — the only location Phase 1a has.
-      const locationId = await getDefaultLocationId(tx, ctx.businessId);
       const loaded = await loadLockedStampCard(tx, ctx.businessId, input.customerCardId, now);
+      // Main for a Phase 1a version; one of the version's own locations for a Phase 1b one.
+      const locationId = await resolveOperationLocationId(tx, {
+        ctx,
+        mechanics: loaded.mechanics,
+        requestedLocationId: input.locationId,
+        defaultLocationId: await getDefaultLocationId(tx, ctx.businessId),
+      });
       const result = await action(tx, loaded, actor, locationId, now);
       return { result, transactionGroupId: result.transactionGroupId };
     },
@@ -308,15 +282,12 @@ async function runCardAction(
 
 /** Enforce the program's daily award limit, under the card lock. */
 async function assertDailyLimit(tx: Tx, loaded: LoadedCard, now: Date): Promise<void> {
-  const limit = loaded.mechanics.dailyAwardLimit;
-  if (limit === undefined) return;
-  const { count, localDate } = await countAwardsInBusinessDay(tx, loaded.card.id, loaded.timezone, now);
-  if (count >= limit) {
-    throw new ConflictError(
-      `This card has reached its daily limit of ${limit} award(s) for ${localDate}`,
-      ConflictCode.DAILY_LIMIT_REACHED,
-    );
-  }
+  await assertDailyAwardLimit(tx, {
+    customerCardId: loaded.card.id,
+    timezone: loaded.timezone,
+    limit: loaded.mechanics.dailyAwardLimit,
+    now,
+  });
 }
 
 /**
@@ -463,10 +434,8 @@ export async function redeemReward(ctx: TenantContext, input: RedeemRewardInput)
  * and then redeemed cannot be un-earned, and the error says to correct it manually instead.
  */
 export async function reverseStampOperation(ctx: TenantContext, input: ReverseGroupActionInput): Promise<StampOperationResult> {
-  assertNoCallerLocation(input);
-  if (typeof input.idempotencyKey !== "string" || input.idempotencyKey.trim().length < 8) {
-    throw new ValidationError("An idempotency key of at least 8 characters is required");
-  }
+  assertNoReversalLocation(input);
+  assertIdempotencyKey(input.idempotencyKey);
   const actor: MemberActor = { kind: "member", ctx, source: input.source };
 
   const outcome = await runIdempotent<StampOperationResult>({
@@ -474,10 +443,10 @@ export async function reverseStampOperation(ctx: TenantContext, input: ReverseGr
     key: input.idempotencyKey,
     payload: { op: "reverse", transactionGroupId: input.transactionGroupId, reason: input.reason },
     execute: async (tx) => {
-      // The compensating rows land at Main, like everything else this phase writes.
-      const locationId = await getDefaultLocationId(tx, ctx.businessId);
+      // The compensating rows land where the ORIGINAL group was written — not where the person
+      // undoing it happens to be standing. See `reverseOperationGroup`.
       const appended = await reverseOperationGroup(
-        { actor, transactionGroupId: input.transactionGroupId, reason: input.reason, locationId },
+        { actor, transactionGroupId: input.transactionGroupId, reason: input.reason },
         tx,
       );
       const loaded = await tx.customerCard.findFirstOrThrow({

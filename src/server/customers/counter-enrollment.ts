@@ -1,8 +1,8 @@
-import { Permission } from "@prisma/client";
+import { CardType, Permission } from "@prisma/client";
 import { AuditAction, recordAudit } from "../audit/audit";
 import { prisma } from "../db";
 import { NotFoundError } from "../errors";
-import { DIRECT_UTM_SOURCE } from "../program/stamp-program";
+import { resolveEnrollmentTarget } from "../program/programs";
 import { publicCardUrl } from "../program/public-urls";
 import { qrSvg } from "../qr";
 import { requirePermission, type TenantContext } from "../tenant/context";
@@ -33,6 +33,16 @@ export interface CounterEnrollmentInput {
   lastName?: string;
   /** Ticked at the counter, by the customer, on the staff member's device. */
   marketingConsent?: boolean;
+  /**
+   * Which of the business's programs to enrol into.
+   *
+   * Optional, and resolved server-side against THIS business: with one live program it is the
+   * program, exactly as Phase 1a behaved, and with several the caller must name one rather than
+   * have the server guess and hand over the wrong card. It is a program selector, not a tenant or
+   * a source: it can only ever name a template this membership already owns, and the enrolment
+   * token behind it is still resolved here and never accepted from a caller (B7).
+   */
+  templateId?: string;
 }
 
 export interface CounterEnrollmentResult {
@@ -40,7 +50,11 @@ export interface CounterEnrollmentResult {
   created: boolean;
   customerCardId: string;
   serialNumber: string;
+  /** Which program the card belongs to, so the counter screen knows which balance to show. */
+  cardType: CardType;
+  templateId: string;
   stampBalance: number;
+  pointBalance: number;
   rewardBalance: number;
   /** The customer's own card link, for staff to show, send or print. */
   cardUrl: string;
@@ -49,27 +63,15 @@ export interface CounterEnrollmentResult {
 }
 
 /**
- * The business's `direct` enrolment source, resolved from the membership.
+ * Which program this enrolment targets, and the `direct` token to enrol through.
  *
- * The source rows still exist and still carry their public tokens — B7 removed the public *route*,
- * not the data — so a card enrolled at the counter is attributed exactly as before and every
- * existing card keeps working.
+ * The source rows still exist and still carry their public tokens - B7 removed the public *route*,
+ * not the data - so a card enrolled at the counter is attributed exactly as before and every
+ * existing card keeps working. What Phase 1b adds is that a business may run several programs, so
+ * "the" source is no longer a single row: the template is resolved first (from the caller's choice
+ * when they made one, from the only live program when there is one), and its own direct source is
+ * read from it.
  */
-async function resolveDirectSourceToken(ctx: TenantContext): Promise<string> {
-  const source = await prisma.utmSourceLink.findFirst({
-    where: {
-      utmSource: DIRECT_UTM_SOURCE,
-      active: true,
-      template: { businessId: ctx.businessId, status: "ACTIVE" },
-    },
-    select: { publicToken: true },
-  });
-  if (!source) {
-    throw new NotFoundError("This business has no active loyalty card yet; create one first");
-  }
-  return source.publicToken;
-}
-
 /**
  * Create a customer's card at the counter, or return the one they already have.
  *
@@ -85,10 +87,12 @@ export async function enrollAtCounter(
 ): Promise<CounterEnrollmentResult> {
   requirePermission(ctx, Permission.EDIT_CUSTOMERS);
 
-  const sourceToken = await resolveDirectSourceToken(ctx);
+  // Tenant-scoped, inside this business only. A template id from another business is "not
+  // available for enrolment" - the same answer as one that does not exist.
+  const target = await resolveEnrollmentTarget(prisma, ctx.businessId, input.templateId);
 
   const result = await enrollCustomer({
-    sourceToken,
+    sourceToken: target.sourceToken,
     phone: input.phone,
     firstName: input.firstName,
     lastName: input.lastName,
@@ -105,7 +109,7 @@ export async function enrollAtCounter(
     businessId: ctx.businessId,
     actorUserId: ctx.userId,
     // No phone, no name, no token, no URL. Who did it, to which card, and whether it was new.
-    metadata: { created: result.created, welcomeStampsGranted: result.welcomeStampsGranted },
+    metadata: { created: result.created, cardType: result.cardType, welcomeUnitsGranted: result.welcomeUnitsGranted },
   });
 
   const cardUrl = publicCardUrl(result.shareToken);
@@ -113,7 +117,10 @@ export async function enrollAtCounter(
     created: result.created,
     customerCardId: result.customerCardId,
     serialNumber: result.serialNumber,
+    cardType: result.cardType,
+    templateId: result.templateId,
     stampBalance: result.stampBalance,
+    pointBalance: result.pointBalance,
     rewardBalance: result.rewardBalance,
     cardUrl,
     cardQrSvg: qrSvg(cardUrl, { cellSize: 5, margin: 4 }),

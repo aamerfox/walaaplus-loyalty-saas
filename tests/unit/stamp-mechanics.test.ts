@@ -125,11 +125,26 @@ describe("stamp mechanics contract", () => {
       ["referrals", { referralBonusStamps: 1 }],
       ["promotions", { promotions: [] }],
       ["named campaigns", { utmCampaigns: ["eid"] }],
-      ["multi-location", { availableLocations: ["loc-1"] }],
       ["a typo", { stampsRequiredPerRewards: 10 }],
     ];
     it.each(deferred)("refuses %s rather than ignoring it", (_label, extra) => {
       expect(() => parseStampMechanics({ ...base, ...extra })).toThrow(ValidationError);
+    });
+
+    /*
+     * `availableLocations` was on the list above until Phase 1b implemented it. It is accepted now,
+     * and still validated: the ids are checked against the business when the version is created and
+     * again, under the transaction, every time value moves. Absent still means Main-only, which is
+     * what every version written before this phase says.
+     */
+    it("accepts the multi-location field Phase 1b added, and still refuses a nonsense one", () => {
+      expect(parseStampMechanics({ ...base, availableLocations: ["loc-1", "loc-2"] }).availableLocations).toEqual([
+        "loc-1",
+        "loc-2",
+      ]);
+      expect(parseStampMechanics(base).availableLocations).toBeUndefined();
+      expect(() => parseStampMechanics({ ...base, availableLocations: [] })).toThrow(ValidationError);
+      expect(() => parseStampMechanics({ ...base, availableLocations: ["loc-1", "loc-1"] })).toThrow(ValidationError);
     });
   });
 

@@ -1,10 +1,13 @@
 import { CardType, Permission, Prisma, ProgramVersionStatus, TemplateStatus } from "@prisma/client";
 import { AuditAction, recordAudit } from "../audit/audit";
 import { CONTENDED_TX, prisma, type Tx } from "../db";
-import { ConflictError, NotFoundError, ValidationError } from "../errors";
+import { NotFoundError, ValidationError } from "../errors";
 import { opaqueToken } from "../security/tokens";
 import { requirePermission, type TenantContext } from "../tenant/context";
+import { assertLocationsBelongToBusiness } from "./available-locations";
 import { parseStampMechanics, readStampMechanics, type StampMechanics, type StampMechanicsInput } from "./mechanics";
+import { assertProgramSlotAvailable } from "./programs";
+import { DIRECT_SOURCE_NAME, DIRECT_UTM_SOURCE } from "./sources";
 
 /**
  * Creating the one stamp program a Phase 1a pilot café runs.
@@ -19,14 +22,22 @@ import { parseStampMechanics, readStampMechanics, type StampMechanics, type Stam
  * version leaves DRAFT, so the tier is written first and the version is activated last.
  */
 
-/** The `direct` enrollment source every template gets (PRODUCT-SPEC §4 UtmSourceLink). */
-export const DIRECT_SOURCE_NAME = "Direct";
-export const DIRECT_UTM_SOURCE = "direct";
+/** Re-exported from `./sources` so existing importers keep working; see that file for why it moved. */
+export { DIRECT_SOURCE_NAME, DIRECT_UTM_SOURCE };
 
 export interface CreateStampProgramInput {
   /** Merchant-facing program name, e.g. "بطاقة القهوة". */
   name: string;
   mechanics: StampMechanicsInput;
+  /**
+   * Opt in to creating a SECOND live program for this business (Phase 1b).
+   *
+   * Defaults to false, which is the Phase 1a contract this project shipped on: a repeated
+   * submission conflicts and the caller is handed the program that already exists. The Phase 1a
+   * owner screen has no program picker, so letting its double-click create a second live program
+   * would give one customer two cards, two QRs and two balances. Prompt 2's screen passes true.
+   */
+  allowAdditionalProgram?: boolean;
 }
 
 export interface StampProgramSummary {
@@ -73,12 +84,16 @@ export async function createStampProgram(ctx: TenantContext, input: CreateStampP
     // both pass the "already has a program" check below and create two live programs.
     await tx.$executeRaw`SELECT id FROM "Business" WHERE id = ${ctx.businessId} FOR UPDATE`;
 
-    // Phase 1a pilot rule: exactly one live program per business. Phase 1b lifts this, which is
-    // why it is enforced here and not as a database constraint that would have to be dropped.
-    const live = await tx.programTemplate.count({
-      where: { businessId: ctx.businessId, status: { in: [TemplateStatus.ACTIVE, TemplateStatus.PAUSED] } },
+    // Phase 1b lifted the "one live program" pilot rule, and did not lift it for callers written
+    // before the lift: `allowAdditionalProgram` defaults to false. The name rule applies either way.
+    await assertProgramSlotAvailable(tx, ctx.businessId, {
+      name,
+      allowAdditional: input.allowAdditionalProgram === true,
     });
-    if (live > 0) throw new ConflictError("This business already has a loyalty program; Phase 1a supports one");
+
+    if (mechanics.availableLocations) {
+      await assertLocationsBelongToBusiness(tx, ctx.businessId, mechanics.availableLocations);
+    }
 
     // Also the location the program will operate at. Resolved inside the transaction so a program
     // can never be created for a business whose default location was just deactivated.

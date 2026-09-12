@@ -43,6 +43,14 @@ export const AuditAction = {
    * people and kept far longer than the screen that legitimately shows a capability.
    */
   CARD_LINK_REVEALED: "card.link_revealed",
+
+  // ── Phase 1b: staff, locations and named sources ──────────────────────────
+  /** A membership's location assignments were replaced. Carries location ids, never names or staff details. */
+  MEMBERSHIP_LOCATIONS_CHANGED: "membership.locations_changed",
+  /** A named enrolment source was created. The token is a capability and is never written here. */
+  SOURCE_LINK_CREATED: "program.source_link_created",
+  /** A named enrolment source was activated or deactivated. */
+  SOURCE_LINK_ACTIVATION_CHANGED: "program.source_link_activation_changed",
 } as const;
 export type AuditActionName = (typeof AuditAction)[keyof typeof AuditAction];
 

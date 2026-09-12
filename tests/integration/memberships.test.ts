@@ -1,7 +1,7 @@
 import { MembershipRole, Permission } from "@prisma/client";
 import { beforeAll, describe, expect, it } from "vitest";
 import { prisma } from "@/server/db";
-import { ConflictError, ForbiddenError } from "@/server/errors";
+import { ForbiddenError } from "@/server/errors";
 import { requireBusinessMembership } from "@/server/tenant/context";
 import {
   addMembership,
@@ -63,12 +63,22 @@ describe("membership changes take effect from database state", () => {
     expect(ctx.permissions.has(Permission.EDIT_TEMPLATES)).toBe(false);
   });
 
-  it("the last active owner cannot be demoted or deactivated", async () => {
+  it("an owner cannot demote or deactivate themselves", async () => {
+    /*
+     * Phase 1a expected a ConflictError here, from the "a business keeps one active owner" rule.
+     * Phase 1b refuses earlier and for a broader reason: nobody edits their own membership, whatever
+     * their role. The business still cannot lose its last owner - only an owner may act on an owner,
+     * and they may not act on themselves - and the last-owner check remains beneath this one for a
+     * business that has two.
+     */
     const ownerCtx = await requireBusinessMembership(prisma, owner.userId, owner.businessId);
     await expect(changeMembershipRole(ownerCtx, owner.membershipId, MembershipRole.MANAGER)).rejects.toBeInstanceOf(
-      ConflictError,
+      ForbiddenError,
     );
-    await expect(deactivateMembership(ownerCtx, owner.membershipId)).rejects.toBeInstanceOf(ConflictError);
+    await expect(deactivateMembership(ownerCtx, owner.membershipId)).rejects.toBeInstanceOf(ForbiddenError);
+
+    const stillOwner = await requireBusinessMembership(prisma, owner.userId, owner.businessId);
+    expect(stillOwner.role).toBe(MembershipRole.OWNER);
   });
 
   it("deactivation removes access on the next request", async () => {

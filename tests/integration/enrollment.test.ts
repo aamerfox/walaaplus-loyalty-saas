@@ -117,7 +117,7 @@ describe("customer enrollment", () => {
       expect(second.created).toBe(false);
       expect(second.customerCardId).toBe(first.customerCardId);
       expect(second.qrToken).toBe(first.qrToken);
-      expect(second.welcomeStampsGranted).toBe(0);
+      expect(second.welcomeUnitsGranted).toBe(0);
       expect(await prisma.loyaltyOperation.count({ where: { customerCardId: first.customerCardId } })).toBe(operationsBefore);
       expect(await prisma.customerCard.count({ where: { customerBusinessProfileId: first.customerBusinessProfileId } })).toBe(1);
     });
@@ -164,7 +164,7 @@ describe("customer enrollment", () => {
 
       const cardId = results[0].customerCardId;
       expect(new Set(results.map((r) => r.customerCardId)).size).toBe(1);
-      expect(results.filter((r) => r.welcomeStampsGranted > 0)).toHaveLength(1);
+      expect(results.filter((r) => r.welcomeUnitsGranted > 0)).toHaveLength(1);
 
       const welcomeRows = await prisma.loyaltyOperation.findMany({
         where: { customerCardId: cardId, kind: OperationKind.WELCOME_BONUS },
@@ -181,7 +181,7 @@ describe("customer enrollment", () => {
   describe("the welcome bonus", () => {
     it("is written through the ledger as an enrollment bonus that is not a visit", async () => {
       const result = await enrolCustomer(welcoming);
-      expect(result.welcomeStampsGranted).toBe(2);
+      expect(result.welcomeUnitsGranted).toBe(2);
       expect(result.stampBalance).toBe(2);
 
       const rows = await prisma.loyaltyOperation.findMany({ where: { customerCardId: result.customerCardId } });
@@ -207,7 +207,7 @@ describe("customer enrollment", () => {
 
     it("is absent when the program does not configure one", async () => {
       const result = await enrolCustomer(cafe);
-      expect(result.welcomeStampsGranted).toBe(0);
+      expect(result.welcomeUnitsGranted).toBe(0);
       expect(result.stampBalance).toBe(0);
       expect(await prisma.loyaltyOperation.count({ where: { customerCardId: result.customerCardId } })).toBe(0);
     });

@@ -13,6 +13,8 @@ import { requireBusinessMembership, type TenantContext } from "@/server/tenant/c
 import { enrollCustomer, type EnrollCustomerInput } from "@/server/customers/enrollment";
 import { reconcileCardBalances } from "@/server/ledger/reconciliation";
 import type { StampMechanicsInput } from "@/server/program/mechanics";
+import type { PointsMechanicsInput } from "@/server/program/points-mechanics";
+import { createPointsProgram, type PointsProgramSummary, type RewardTierInput } from "@/server/program/programs";
 import { createStampProgram, type StampProgramSummary } from "@/server/program/stamp-program";
 
 const APP_TABLES = [
@@ -281,4 +283,93 @@ export async function expectReconciled(businessId: string): Promise<void> {
   if (report.mismatches.length > 0) {
     throw new Error(`reconciliation drift: ${JSON.stringify(report.mismatches)}`);
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 1b: a real points merchant
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Mechanics a merchant would actually configure: 1 point per 1,000 minor units of spend. */
+export const SHOP_POINTS_MECHANICS: PointsMechanicsInput = {
+  kind: "POINTS",
+  contractVersion: 1,
+  earnMode: "SPEND_BLOCK",
+  spendAmountPerBlockMinor: 1_000,
+  pointsPerBlock: 1,
+  countRewardRedemptionAsVisit: false,
+};
+
+/** Two rewards, so a test can tell "the cheap one" from "the one they cannot afford yet". */
+export const SHOP_TIERS: RewardTierInput[] = [
+  { name: "خصم صغير", requiredPoints: 10, rewardValueMinor: 5_000 },
+  { name: "هدية", requiredPoints: 50, rewardValueMinor: 40_000 },
+];
+
+export interface PointsShopFixture {
+  userId: string;
+  businessId: string;
+  locationId: string;
+  ctx: TenantContext;
+  program: PointsProgramSummary;
+  /** The cheapest tier, which most tests redeem. */
+  cheapTierId: string;
+}
+
+/**
+ * Owner + business + live points program + tiers + direct source, through the REAL services.
+ *
+ * Built the same way as `createStampCafe`, and for the same reason: a fixture that hand-writes its
+ * own program drifts from what the service produces, and then the tests prove nothing about the
+ * code that ships.
+ */
+export async function createPointsShop(
+  opts: {
+    mechanics?: Partial<PointsMechanicsInput>;
+    tiers?: RewardTierInput[];
+    timezone?: string;
+    name?: string;
+    allowAdditionalProgram?: boolean;
+    existing?: { userId: string; businessId: string; locationId: string };
+  } = {},
+): Promise<PointsShopFixture> {
+  const base = opts.existing ?? (await registerTestOwner());
+  if (opts.timezone) {
+    await prisma.business.update({ where: { id: base.businessId }, data: { timezone: opts.timezone } });
+  }
+  const ctx = await requireBusinessMembership(prisma, base.userId, base.businessId);
+  const program = await createPointsProgram(ctx, {
+    name: opts.name ?? "Points card",
+    mechanics: { ...SHOP_POINTS_MECHANICS, ...opts.mechanics } as PointsMechanicsInput,
+    tiers: opts.tiers ?? SHOP_TIERS,
+    allowAdditionalProgram: opts.allowAdditionalProgram ?? opts.existing !== undefined,
+  });
+
+  const cheap = await prisma.rewardTier.findFirstOrThrow({
+    where: { programVersionId: program.programVersionId },
+    orderBy: { requiredPoints: "asc" },
+    select: { id: true },
+  });
+
+  return {
+    userId: base.userId,
+    businessId: base.businessId,
+    locationId: base.locationId,
+    ctx,
+    program,
+    cheapTierId: cheap.id,
+  };
+}
+
+/** Enrol a customer into a points program through the real enrolment service. */
+export async function enrolPointsCustomer(fx: PointsShopFixture, overrides: Partial<EnrollCustomerInput> = {}) {
+  const source = await prisma.utmSourceLink.findFirstOrThrow({
+    where: { id: fx.program.directSourceId },
+    select: { publicToken: true },
+  });
+  return enrollCustomer({
+    sourceToken: source.publicToken,
+    phone: overrides.phone ?? uniqueSyrianPhone(),
+    firstName: overrides.firstName ?? "زبون",
+    ...overrides,
+  });
 }
