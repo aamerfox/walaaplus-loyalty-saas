@@ -1,6 +1,8 @@
 # Phase 3A, Prompt 1 — wallet web links and safe referral sharing
 
 Baseline `08f38c29abaa45e2e8f8fffc52aa6047550f955a`. Branch `rebuild/phase-0-foundation`.
+**Amended after a read-only review** — see §12. The verification figures below are from the
+re-run after the correction, not from the original pass.
 Local work only: nothing contacted OCI, staging, Freebuff, Caddy, DNS, Docker infrastructure, a real
 customer, or any external service. No Caddy, DNS, TLS, Compose, Docker, secret or environment
 template was touched, and the official Zademi assets in `public/brand/` are byte-identical.
@@ -152,9 +154,11 @@ saved again, and the owner UI says exactly that.
 ## 5. The public page
 
 `/share`, one path for every business, capability in the fragment. Shows the Zademi mark, the
-business name, a QR of **its own URL**, native share where the device has it, copy, the link as
-selectable text, eight platform links, and one line telling a newcomer that cards come from the
-counter.
+business name, a QR of **the canonical invitation URL**, native share where the device has it, copy,
+the link as selectable text, eight platform links, and one line telling a newcomer that cards come
+from the counter.
+
+**What it hands out is locale-neutral** — corrected after review, see §12.
 
 Shows **no** customer name, phone, card number, serial, balance, programme, card link or scanner QR.
 The browser test reads the real values out of the database and asserts each is absent from the DOM.
@@ -209,10 +213,10 @@ own phase in the capability map, not a feature flag here.
 
 | check | result |
 |---|---|
-| `node scripts/gate.mjs` | **PASS 15/15**, 520.7 s |
-| `npx playwright test` (run 1) | **68 passed**, 2.2 m |
-| `npx playwright test` (run 2) | **68 passed**, 2.2 m |
-| `npx vitest run` | **81 files, 1046 tests, all passed**, 373 s |
+| `node scripts/gate.mjs` | **PASS 15/15**, 469.1 s |
+| `npx playwright test` (run 1) | **70 passed**, 2.4 m |
+| `npx playwright test` (run 2) | **70 passed**, 2.1 m |
+| `npx vitest run` | **81 files, 1046 tests, all passed**, 364 s |
 | `npm audit` | 0 vulnerabilities |
 | `npm audit --omit=dev` | 0 vulnerabilities |
 | `node scripts/db-migrate.mjs status` | 11 migrations, schema up to date |
@@ -221,8 +225,9 @@ own phase in the capability map, not a feature flag here.
 | secret scan | only the `sk_live_...` / `pk_live_...` literal placeholders in the committed `.env.production.example` |
 | raw-capability scan | no `/share#<token>` in any tracked file |
 
-Tests added: 25 unit (16 wallet payload, 9 capability and wording), 31 integration, 14 browser, plus
-3 bypass attempts and 1 privilege assertion in the runtime-role suite.
+Tests added: 25 unit (16 wallet payload, 9 capability and wording), 31 integration, **16** browser,
+plus 3 bypass attempts and 1 privilege assertion in the runtime-role suite. The two extra browser
+tests are the locale-neutrality coverage from §12.
 
 ### Failures on the way, reported rather than hidden
 
@@ -307,3 +312,98 @@ is a first-class owner action and why re-issuing a pass retires the previous lin
 **Limitation: the feature is not reachable by a customer yet.** A capability is minted only by wallet
 pass issuance, and nothing can sign a pass. The invitation page is complete and tested; the path that
 puts a link into a customer's hands opens when the certificates do.
+
+---
+
+## 12. Correction after review — the shared URL carried a locale
+
+A read-only review of `3aeb17a` found one correctness defect, and it was real.
+
+### What was wrong
+
+The canonical invitation URL is deliberately locale-neutral, and `publicShareUrl` on the server
+emits it that way. But the public page is locale-routed: a visitor reaches it at `/en/share#…` or
+`/ar/share#…`, and `ShareInvite.tsx` built everything it hands out — the visible link, the QR, the
+clipboard, the native share sheet and all eight platform targets — from `window.location.href`.
+
+So a link forwarded by an Arabic-speaking customer opened in Arabic for an English-speaking
+recipient, and the other way round. A link sent into a chat outlives the moment it was sent and has
+no business choosing a language for whoever opens it. The server was already right about this; the
+browser was not agreeing with it.
+
+### What changed
+
+One function in one client component. The page now derives what it shares from the token it
+resolved, rather than reading it back out of the address bar:
+
+```
+`${window.location.origin}/share#${token}`
+```
+
+Three properties, each deliberate:
+
+- **the origin comes from the browser**, not from configuration — a visitor may legitimately be on a
+  different host or port than the server's configured one, and the link has to work where they are;
+- **the token stays in the fragment.** Nothing moved to a path or a query, and the capability is
+  still never sent with a request;
+- **the address bar is untouched.** The token is not stripped from the URL the visitor arrived on;
+  the fix builds a *different* URL rather than rewriting the one they are looking at.
+
+The page still renders in the locale it was opened in. A visitor reads their own language; what they
+pass on picks nobody's.
+
+### What did not change
+
+No database schema, no migration, no public response contract, no permission, no wallet payload
+placement, no B7 behaviour, no routing policy, no asset, no translation, and no dependency. Nothing
+was added: no tracking, analytics, logging, rate limiting, provider, issuance route, signing or
+deployment configuration. `public/` has zero changed files.
+
+### Coverage, and proof that it catches the defect
+
+`tests/e2e/share-invite-ui.spec.ts` gained a describe block that runs for **both locales** and
+checks, for each:
+
+- the page renders in that locale — `lang`, `dir`, and the translated heading;
+- the browser's own address still carries the prefix *and* the capability, so the fix is not
+  achieved by mutating the URL the visitor arrived on;
+- and that all five surfaces carry the canonical URL with no prefix: the **visible copy**, the
+  **QR**, the **clipboard**, the **native share** URL, and **every one of the eight social targets**;
+- plus that the locale-prefixed address appears nowhere in the rendered page.
+
+The QR is checked by regenerating the symbol from the canonical URL with `qrcode-generator` — the
+dependency the component already uses — and comparing the module paths. Identical modules mean an
+identical encoded payload, and a locale-prefixed URL is four characters longer and produces a
+visibly different symbol. No decoder, and no new dependency.
+
+Three pre-existing assertions were also tightened, because each was satisfiable by the defective
+behaviour: the visible URL, the clipboard result and the native-share URL were checked with
+`toContain("/share#…")`, which a locale-prefixed URL passes. They are exact comparisons now.
+
+**The new tests were confirmed to fail before they were kept.** `canonicalShareUrl` was temporarily
+reverted to `window.location.href`, both locale tests failed, and the fix was restored. A regression
+test that has never been red is a test nobody has checked.
+
+### Verification after the correction
+
+| check | result |
+|---|---|
+| `node scripts/gate.mjs` | **PASS 15/15**, 469.1 s |
+| `npx playwright test` (run 1) | **70 passed**, 2.4 m |
+| `npx playwright test` (run 2) | **70 passed**, 2.1 m |
+| `npx vitest run` | **81 files, 1046 tests, all passed**, 364 s |
+| `npm audit` / `--omit=dev` | 0 vulnerabilities |
+| `node scripts/db-migrate.mjs status` | 11 migrations, schema up to date (unchanged) |
+| `prisma migrate diff` | only the two pre-existing `ConsentRecord` name differences |
+| `git diff --check` | clean |
+| secret scan | only the committed `.env.production.example` placeholders |
+| raw-capability scan | no `/share#<token>` in any tracked file |
+| `public/` | 0 changed files |
+
+### Which SHA to deploy
+
+**Replace `3aeb17a`.** It is not broken in a way that loses data or leaks anything — the capability,
+the fragment design, the permissions and B7 are all unaffected — but every link shared from it
+carries the sender's locale, and those links are forwarded into chats where they outlive any later
+fix. Deploying `3aeb17a` first would mean links already in circulation that a correction cannot
+reach.

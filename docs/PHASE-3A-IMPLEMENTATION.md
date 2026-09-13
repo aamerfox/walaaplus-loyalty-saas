@@ -109,9 +109,9 @@ every later guard on that bit to decide whether a cashier should have it. So:
 business or customer is in the path, so the address in a browser history, a screenshot or a chat
 preview says only "somebody opened Zademi's invitation page".
 
-**What it shows**: the Zademi mark, the business name, a QR of **its own URL**, a native share button
-where the device has one, a copy button, the link as selectable text, eight platform links, and one
-line telling a newcomer that cards come from the counter.
+**What it shows**: the Zademi mark, the business name, a QR of **the canonical invitation URL**, a
+native share button where the device has one, a copy button, the link as selectable text, eight
+platform links, and one line telling a newcomer that cards come from the counter.
 
 **What it never shows**: a customer name, phone, card number, serial, balance, programme, card link,
 or the scanner QR. The browser test reads the real values out of the database and asserts each is
@@ -141,6 +141,43 @@ There is no referral reward policy (**D15**), so no string on this page or on a 
 that sharing earns anybody anything. `tests/unit/share-capability.test.ts` walks every message in
 both locales against a list of reward words, and the browser suite checks the rendered page in both
 languages. A wallet pass is the one surface a customer cannot re-read a correction on.
+
+### What is shared is locale-neutral — a correction
+
+The page is locale-routed: a visitor reaches it at `/en/share#…` or `/ar/share#…`. The first
+implementation built everything it hands out — the visible link, the QR, the clipboard, the native
+share sheet and all eight platform targets — from `window.location.href`.
+
+That was wrong, and a read-only review caught it. It meant a link sent by an Arabic-speaking customer
+opened in Arabic for an English-speaking recipient, and the other way round. A link forwarded from a
+chat outlives the moment it was sent and has no business choosing a language for whoever opens it —
+which is exactly why `publicShareUrl` on the server emits no prefix, and the browser simply was not
+agreeing with it.
+
+The page now derives what it shares from the token it resolved:
+
+```
+`${window.location.origin}/share#${token}`
+```
+
+Three properties of that, each deliberate:
+
+- **the origin comes from the browser**, not from configuration, because a visitor may legitimately
+  be on a different host or port than the server's configured one and the link has to work where
+  they actually are;
+- **the token stays in the fragment.** Nothing moved to a path or a query, and the capability is
+  still never sent with a request;
+- **the address bar is left alone.** The token is not stripped from the URL the visitor arrived on.
+  The fix builds a *different* URL; it does not rewrite the one they are looking at.
+
+The page itself still renders in the locale it was opened in. A visitor reads their own language;
+what they pass on picks nobody's.
+
+`tests/e2e/share-invite-ui.spec.ts` covers both locales and checks all five surfaces, including the
+QR — decoded by regenerating the symbol from the canonical URL with `qrcode-generator` and comparing
+the module paths, because the QR is the one artefact a recipient cannot read before acting on it, and
+because that needs no decoder and no new dependency. The test was confirmed to fail against the old
+`window.location.href` behaviour before the fix was kept.
 
 ---
 
