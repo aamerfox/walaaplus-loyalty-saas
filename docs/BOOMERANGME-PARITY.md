@@ -3,7 +3,7 @@
 `BOOMERANGME-REFERENCE.md` describes the reference product. This file answers the question a reader
 actually has: **which of those capabilities exist in this codebase today, and where is the rest?**
 
-Updated at Phase 2 Prompt 3. One row per capability, and the "Where" column points at the code so a
+Updated at Phase 3A Prompt 1. One row per capability, and the "Where" column points at the code so a
 claim can be checked rather than believed.
 
 ---
@@ -34,6 +34,9 @@ claim can be checked rather than believed.
 | Frozen audience for a decision | **Built (Prompt 3)** — an immutable snapshot taken at approval, holding internal profile references and the consent observed at that instant. No phone, name, card, serial, link or token is in it, and no row at all for a customer who may not be contacted | `CampaignAudienceSnapshot`, `CampaignAudienceMember` |
 | Campaign audience from a segment | **Foundation (Prompt 2)** — one saved segment per draft, re-evaluated live and returned as three integers: matched, may be contacted, may not. No recipient list is built, stored, returned or logged | `src/server/campaigns/campaigns.ts` `previewAudience` |
 | Localized message preview | **Built (Prompt 2)** — Arabic RTL and English LTR both first-class, drawn from fixed sample values so no customer is ever read to render one. Two placeholders exist, `{{firstName}}` and `{{businessName}}`; anything else is refused by name | `src/server/campaigns/placeholders.ts` |
+| Wallet pass web link | **Built (Phase 3A)** — a tappable link on the pass that opens Zademi's invitation page. Apple: a back field with link detection. Google: `linksModuleData`. Never in a barcode, never on the front of a card | `src/server/wallet/pass-payloads.ts` |
+| Customer-facing sharing | **Built (Phase 3A)** — a public invitation page with a QR of its own link, native share, copy, and eight platform links that need no SDK and no account. Arabic and English | `/share`, `src/app/[locale]/share/` |
+| Revocable share capability | **Built (Phase 3A)** — 256 bits per card, stored as a digest only, carried in a URL fragment so it reaches no server log, revocable and replaceable from the owner UI | `src/server/share/share-links.ts` |
 | PWA customer card | **Built** — per-card manifest and scope, service worker that caches nothing | `src/app/[locale]/card/` |
 | Arabic-first bilingual UI | **Built** — every string in both locales, RTL structure, an Arabic-capable font stack | `messages/`, `docs/BRAND.md` §3 |
 
@@ -46,6 +49,8 @@ claim can be checked rather than believed.
 | Editing a live card template | **A live program's rules are frozen; a new VERSION is published instead** | A card keeps the rules it was sold under. Prompt 3 built the lifecycle that makes a change possible without touching a single issued card: draft, review, publish, with the old version retired and its cards left on it |
 | A campaign approval that can be edited or revoked in place | **Approval is append-only; a withdrawal is a second row** | An approval that can be edited is a label, not a decision. The history of what a person signed off, and when, and about which exact words, is the only thing that makes an approval worth asking for |
 | An audience list attached to a campaign | **A snapshot of internal references, or nothing** | A merchant never sees who is in an audience and neither does a campaign: the screen shows counts, the snapshot holds profile ids and a consent observation, and resolving a contact detail is a future delivery phase's problem to justify |
+| A share link that identifies the sharer | **The invitation page shows a business name and nothing else** | It is opened by whoever a link was forwarded to. It names no customer, no card, no balance, no programme and no serial, and it looks identical whether the link is revoked, unknown or malformed |
+| Counting who opened a share link | **Nothing is recorded, at all** | No audit row, no visit counter, no IP, no device. A capability that leaves a trail each time it is opened reports who has been looking at it, and an invitation page has no business knowing that |
 | Deleting a location, a program, a version or a card | **No destructive verb exists** | Every one of them is referenced by ledger rows that are append-only by trigger. Locations close, programs pause, versions retire, and nothing is ever removed |
 
 ## Foundation only — built, and deliberately not finished
@@ -58,6 +63,8 @@ lying to the person reading it.
 |---|---|---|
 | Customer segments | Saved definitions, server-derived counts, archive/restore | A campaign draft can now NAME a segment as its intended audience. Nothing still acts on one: no message, no automation, no export |
 | Campaign drafts and approval | Name, channel label, language, revisioned content, an intended audience, validated placeholders, a preview, archive/restore, explicit approval and withdrawal, a frozen audience snapshot, and a readiness contract that always answers no | **Everything that delivers.** No provider, no credentials, no queue, no worker, no scheduler, no send verb, and no state a draft can enter that means any of those. Also missing: per-channel length and formatting rules, unsubscribe handling, delivery receipts, and any record of what was sent to whom. A second approver is deliberately not invented (D12), and no retention period exists for a snapshot (D13) |
+| Wallet passes | Apple `pass.json` and Google `loyaltyObject` builders, fixture-tested, carrying the invitation link in the correct field on each platform | **Signing and delivery.** No Apple Pass Type certificate, no Google service account, no issuer id, no class, no "Add to Wallet" action, no bundle images, no localised bundle, no update channel — so a pass already saved never gains the link on its own. Real-device verification is a manual gate (`docs/WALLET-CAPABILITY-MATRIX.md` §6) |
+| Sharing | An invitation page, a QR, native share, copy, eight platform links | **Attribution.** Nothing records who shared, who opened, or who joined afterwards — and nothing grants anybody anything for it (D15). Messenger is absent: its web dialog needs a registered Facebook app id |
 | Marketing preference | Append-only history, capture context, actor, reason, the enrolment answer as the first entry, and a strict reading of what counts as permission | No customer-facing preference page and no unsubscribe route — both need a way to prove who is asking, which is the same unsolved problem as B7. No retention or erasure policy is implemented. No per-channel preference: the record says "marketing", not "SMS but not email" |
 | Analytics | Ledger-derived counts, breakdowns, date ranges, a per-branch filter | No cohort or retention view, no rollup table (recomputed per load, bounded — see `docs/evidence/phase-2-prompt-1.md` §5), no revenue or lifetime-value figures because the data to compute them honestly does not exist |
 | Customer record | Identity, every card, balances, pinned versions, branch context, source name, ledger activity | No notes, no tags, no manual adjustment, and no export — export needs its own privacy, retention, authorization and audit contract |
@@ -76,12 +83,15 @@ lying to the person reading it.
 | **Provider-side message templates** (WhatsApp/SMS template approval and their own placeholder grammars) | blocked on D2/D4 |
 | **Customer-facing preference centre** — a person changing their own marketing preference | blocked on the same unsolved problem as B7: proving who is asking |
 | **Per-channel consent** — agreeing to SMS but not email | 2+, once a channel exists to consent to |
-| **Referrals, promotions and games** | 3a |
+| **Referral attribution and reward policy** — who is credited for an invitation, on what evidence, when, and within what limits. Phase 3A Prompt 1 built the sharing and deliberately built none of this: a link click is not proof of a referral, and the public link enrols nobody | 3a, next prompt. Blocked on D15 |
+| **Promotions and games** | 3a |
+| **Wallet pass signing and delivery** — Apple certificate, Google issuer, "Add to Wallet" | 3a / 1.5. See `docs/WALLET-CAPABILITY-MATRIX.md` §5 |
+| **Wallet pass updates** — Apple `webServiceURL` + APNs, Google object PATCH | 3a+, and D16 (device-token retention) |
+| **Wallet notifications, location relevance, Smart Tap / Apple VAS** | D17, D18, and platform approval. No date |
 | **POS, public API, webhooks and integrations** | 3b |
 | **Advanced loyalty card mechanics** — cashback, discount, gift, membership, coupon, multipass | 2+ |
 | **Agency, white-label, custom domain, billing, affiliate and franchise** | 4 / 5 |
 | **Workflow automation, AI assistance and prospecting** | 4+ |
-| Wallet passes (Apple, Google) | 1.5 |
 | Per-period reward limits, and showing a customer what they have already used | 2 |
 | CSV import | 2 |
 | SMS and WhatsApp delivery | blocked on decisions D2/D4 |

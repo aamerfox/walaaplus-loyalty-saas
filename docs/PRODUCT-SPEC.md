@@ -372,6 +372,15 @@ CampaignAudienceSnapshot  id, businessId, campaignId, campaignRevisionId,
 CampaignAudienceMember    id, snapshotId, customerBusinessProfileId,
                           consentState, consentRecordId           APPEND-ONLY
 ```
+### CardShareLink (built, Phase 3A Prompt 1)
+```
+CardShareLink  id, businessId, customerCardId, tokenDigest (unique),
+               issuedFor, issuedAt, issuedByUserId, revokedAt
+               ISSUE-ONCE: no DELETE, no TRUNCATE, and one UPDATE (revokedAt, once, from NULL)
+```
+`tokenDigest` is SHA-256 of a 32-byte random capability. **The raw value is never stored.** One live
+row per card, enforced by a partial unique index.
+
 `Campaign.state` is `DRAFT | IN_REVIEW | APPROVED | WITHDRAWN | ARCHIVED` — there is no sent,
 scheduled or queued value, and `channel` is a LABEL on the draft, not a route to anything. `APPROVED`
 and `WITHDRAWN` are written only by the approval service, never by a state-setting request.
@@ -741,6 +750,79 @@ ends with `NO_DELIVERY_CHANNEL_EXISTS`, and `consentMustBeRecheckedAtDispatch` i
 one instant, never its authority. Whatever builds delivery re-reads each customer's current consent
 at the moment it contacts them: a customer who withdraws tomorrow must not be messaged from a
 snapshot taken today.
+
+### 8A.9 The invitation capability, and the public page a wallet pass opens (Phase 3A)
+
+A card may carry a fifth opaque value beside its `qrToken`, `shareToken`, serial and enrolment
+source: an **invitation capability**, drawn independently of all of them so that holding one yields
+none of the others.
+
+**Only the SHA-256 digest is stored.** The raw value exists in the response that mints it and in the
+wallet pass built from it, and nothing reads it back. No salt and no keyed HMAC: the input is 32
+bytes of `crypto.randomBytes`, so there is no dictionary to precompute, and a keyed digest would
+need a secret this phase may not introduce. A copy of the database yields nobody a working link.
+
+**The link is `https://<host>/share#<capability>`.** The token is in the fragment, which is never
+sent with a request — so it appears in no access log, no proxy log, no `Referer` header and no error
+report. The page reads it in the browser and posts it to `/api/share/resolve` in a body, which is
+the only point on the server that ever sees one.
+
+`/api/share/resolve` **writes nothing**: no audit row, no visit counter, no timestamp, no IP, no
+user agent, and no rate-limit record. It is not rate limited, deliberately — a per-address limit
+would mean storing the address of everyone who opens an invitation, which is the tracking this page
+exists without, and a 256-bit token behind one indexed lookup does not need one. Every failure —
+unknown, revoked, malformed, a card since deleted, a business gone inactive — answers in one
+identical shape.
+
+**Lifecycle.** Minted lazily, only by the authorized wallet-pass issuance path; nothing backfills and
+no bulk job walks the card table. Issuing retires the card's previous link in the same transaction,
+so a card never has two live ones. Revoking is explicit and final. `CardShareLink` refuses DELETE and
+TRUNCATE by trigger and permits exactly one UPDATE — `revokedAt`, once, from NULL — and the runtime
+role holds SELECT, INSERT and UPDATE on it and never DELETE or TRUNCATE (`NO_DELETE_TABLES` in
+`scripts/db-roles.mjs`).
+
+**Permissions.** Minting takes `EDIT_CUSTOMERS` and a cashier may do it: handing over a card and
+adding it to a wallet are the same moment at the counter. Revoking destroys something the customer
+already holds, and reading a card's link history is reading their record, so both take
+`EDIT_CUSTOMERS`/`VIEW_CUSTOMERS` **and not a cashier** — the same bar as the consent history.
+
+**The public page shows a business name and nothing else.** No customer name, phone, card number,
+serial, balance, programme, card link or scanner QR. Its QR encodes the page's own URL, which is
+what a visitor hands to a friend. Its share targets are plain links — no SDK, no script, no app id,
+no account — so nothing third-party is loaded onto it.
+
+**It joins nobody to anything.** No form, no field, no enrolment, no lookup: public self-service
+enrolment stays withdrawn (B7 option 3, §6.1.1), and a page reachable by a forwarded link is the last
+place to reintroduce one. It also grants nothing — no stamp, no reward, no referral credit — because
+no referral policy exists (§D15). The copy says "invite your friends" and "share the link", which is
+what actually happens, and a unit test enforces that neither locale promises otherwise.
+
+### 8A.10 Wallet passes
+
+Apple `pass.json` and Google `loyaltyObject` payload builders exist, are fixture-tested, and are
+**not signed and not delivered**: Apple needs a Pass Type ID certificate and Google a service-account
+key, and this phase adds no secret or environment variable. Issuer identifiers are parameters filled
+with visible placeholders in a preview, because a configuration decision written as a constant is a
+configuration decision nobody made.
+
+Where the invitation link goes, and where it must not:
+
+| | Apple | Google |
+|---|---|---|
+| the link | a **back field** with `dataDetectorTypes: ["PKDataDetectorTypeLink"]` | `linksModuleData.uris[]`, the official tappable-link field |
+| the barcode | the card's scanner `qrToken`, unchanged | the same, unchanged |
+| the front of the card | **never** — front fields print on a lock screen | **never** — text modules render in the card body |
+
+Apple renders **no button on the front of a pass**; a product claiming one would be describing an
+interface the platform does not have.
+
+**A pass already saved in a customer's wallet does not gain the link on its own.** There is no update
+channel — Apple's needs `webServiceURL` and APNs, Google's needs the API — so the link appears when
+the pass is issued again and saved again. The owner UI says this rather than implying otherwise.
+
+Everything each platform offers, what Zademi uses and what it does not, is audited in
+`docs/WALLET-CAPABILITY-MATRIX.md`, including the manual device gate (§6 there) that must be
+completed before any production claim about wallet passes.
 
 ---
 
