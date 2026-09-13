@@ -3,7 +3,7 @@
 `BOOMERANGME-REFERENCE.md` describes the reference product. This file answers the question a reader
 actually has: **which of those capabilities exist in this codebase today, and where is the rest?**
 
-Updated at Phase 2 Prompt 2. One row per capability, and the "Where" column points at the code so a
+Updated at Phase 2 Prompt 3. One row per capability, and the "Where" column points at the code so a
 claim can be checked rather than believed.
 
 ---
@@ -30,6 +30,8 @@ claim can be checked rather than believed.
 | Saved customer segments | **Foundation (Phase 2)** — a validated, versioned, tenant-scoped DEFINITION with an allowlist of nine fields; membership and counts are derived server-side on every read and never stored. Nothing sends to a segment yet | `src/server/segments/`, `/business/segments` |
 | Customer marketing preference | **Built (Prompt 2)** — an append-only history: every state, when it was recorded, how it was captured, by whom, and what it was before. The enrolment answer is the first entry and is never rewritten. A record that cannot say WHEN or TO WHAT WORDING somebody agreed reads as `UNKNOWN`, which is never a permission | `src/server/consent/consent.ts`, `/business/customers/[profileId]` |
 | Campaign composer and content revisions | **Foundation (Prompt 2)** — a draft with a name, an intended channel, a language, and content kept as numbered revisions that cannot be edited or deleted. Drafts archive; they never hard-delete. There is no sent, scheduled or queued state to reach | `src/server/campaigns/campaigns.ts`, `/business/campaigns` |
+| Campaign review and sign-off | **Built (Prompt 3)** — an append-only decision naming the approver, the moment, one exact revision and one declared channel. Editing approved words drops the approval back to draft; the decision row stays, still true about the revision it named. Withdrawal adds a row rather than removing one | `src/server/campaigns/approvals.ts`, `/business/campaigns/[id]` |
+| Frozen audience for a decision | **Built (Prompt 3)** — an immutable snapshot taken at approval, holding internal profile references and the consent observed at that instant. No phone, name, card, serial, link or token is in it, and no row at all for a customer who may not be contacted | `CampaignAudienceSnapshot`, `CampaignAudienceMember` |
 | Campaign audience from a segment | **Foundation (Prompt 2)** — one saved segment per draft, re-evaluated live and returned as three integers: matched, may be contacted, may not. No recipient list is built, stored, returned or logged | `src/server/campaigns/campaigns.ts` `previewAudience` |
 | Localized message preview | **Built (Prompt 2)** — Arabic RTL and English LTR both first-class, drawn from fixed sample values so no customer is ever read to render one. Two placeholders exist, `{{firstName}}` and `{{businessName}}`; anything else is refused by name | `src/server/campaigns/placeholders.ts` |
 | PWA customer card | **Built** — per-card manifest and scope, service worker that caches nothing | `src/app/[locale]/card/` |
@@ -42,6 +44,8 @@ claim can be checked rather than believed.
 | Public self-service enrolment by phone number | **Withdrawn** — staff issue cards at the counter | Owner decision **B7 option 3**: a public form that issues a card to a new number and nothing to an existing one reports whether a number is already a customer. See `docs/evidence/phase-1a-b7-option-3.md` |
 | Public enrolment QR and campaign links | **Not published** — named sources exist as server-side attribution records only | Same decision. They become usable when proof of phone ownership exists and has been independently audited |
 | Editing a live card template | **A live program's rules are frozen; a new VERSION is published instead** | A card keeps the rules it was sold under. Prompt 3 built the lifecycle that makes a change possible without touching a single issued card: draft, review, publish, with the old version retired and its cards left on it |
+| A campaign approval that can be edited or revoked in place | **Approval is append-only; a withdrawal is a second row** | An approval that can be edited is a label, not a decision. The history of what a person signed off, and when, and about which exact words, is the only thing that makes an approval worth asking for |
+| An audience list attached to a campaign | **A snapshot of internal references, or nothing** | A merchant never sees who is in an audience and neither does a campaign: the screen shows counts, the snapshot holds profile ids and a consent observation, and resolving a contact detail is a future delivery phase's problem to justify |
 | Deleting a location, a program, a version or a card | **No destructive verb exists** | Every one of them is referenced by ledger rows that are append-only by trigger. Locations close, programs pause, versions retire, and nothing is ever removed |
 
 ## Foundation only — built, and deliberately not finished
@@ -53,7 +57,7 @@ lying to the person reading it.
 | Capability | What exists today | What is still missing |
 |---|---|---|
 | Customer segments | Saved definitions, server-derived counts, archive/restore | A campaign draft can now NAME a segment as its intended audience. Nothing still acts on one: no message, no automation, no export |
-| Campaign drafts | Name, channel label, language, revisioned content, an intended audience, validated placeholders, a preview, archive/restore | **Everything that delivers.** No provider, no credentials, no queue, no worker, no scheduler, no send verb, and no state a draft can enter that means any of those. Also missing: per-channel length and formatting rules, unsubscribe handling, delivery receipts, and any record of what was sent to whom |
+| Campaign drafts and approval | Name, channel label, language, revisioned content, an intended audience, validated placeholders, a preview, archive/restore, explicit approval and withdrawal, a frozen audience snapshot, and a readiness contract that always answers no | **Everything that delivers.** No provider, no credentials, no queue, no worker, no scheduler, no send verb, and no state a draft can enter that means any of those. Also missing: per-channel length and formatting rules, unsubscribe handling, delivery receipts, and any record of what was sent to whom. A second approver is deliberately not invented (D12), and no retention period exists for a snapshot (D13) |
 | Marketing preference | Append-only history, capture context, actor, reason, the enrolment answer as the first entry, and a strict reading of what counts as permission | No customer-facing preference page and no unsubscribe route — both need a way to prove who is asking, which is the same unsolved problem as B7. No retention or erasure policy is implemented. No per-channel preference: the record says "marketing", not "SMS but not email" |
 | Analytics | Ledger-derived counts, breakdowns, date ranges, a per-branch filter | No cohort or retention view, no rollup table (recomputed per load, bounded — see `docs/evidence/phase-2-prompt-1.md` §5), no revenue or lifetime-value figures because the data to compute them honestly does not exist |
 | Customer record | Identity, every card, balances, pinned versions, branch context, source name, ledger activity | No notes, no tags, no manual adjustment, and no export — export needs its own privacy, retention, authorization and audit contract |
@@ -64,7 +68,9 @@ lying to the person reading it.
 |---|---|
 | Archiving a program (what happens to cards pinned to its versions is not designed) | 2 |
 | Customer export (CSV or otherwise) — needs a privacy, retention, authorization and audit contract | 2 |
-| **Message delivery of any kind** — provider setup and credentials, a send verb, a delivery queue, a worker, retries, delivery reports | 2 / 1.5 |
+| **Message delivery of any kind** — provider setup and credentials, a send verb, a delivery queue, a worker, retries, delivery reports. `src/server/campaigns/delivery.ts` is the named place this will arrive, and its only implementation refuses before it can resolve a recipient | 2 / 1.5 |
+| **A record of what was actually sent to whom** — the delivery log an approval is currently the closest thing to, and is not | 2 / 1.5 |
+| **Multi-person approval** — a second pair of eyes before a campaign reaches customers | blocked on D12; meaningless while a pilot merchant is one person |
 | **Scheduled and triggered sends** — a future send time, birthday and inactivity triggers, recurring campaigns | 2 / 1.5 |
 | **Unsubscribe links, tracking pixels and click tracking** | not scheduled — see B7; each one is a public endpoint that identifies a customer |
 | **Provider-side message templates** (WhatsApp/SMS template approval and their own placeholder grammars) | blocked on D2/D4 |

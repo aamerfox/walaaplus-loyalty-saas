@@ -328,3 +328,210 @@ Both were caught by reading a rendered page rather than by a failing test:
 A third, smaller one: the draft-only banner rendered twice on the drafts screen, once from the page
 and once from the editor mounted below it. A warning repeated twice on one screen is read once. The
 editor no longer carries its own.
+
+---
+
+# Prompt 3 — approval, a frozen audience, and a wall where delivery would go
+
+Prompt 2 ended with a draft that could not be sent and an audience that was three integers on a
+screen. Prompt 3 adds the two things that have to exist **before** delivery is even discussed: a
+record of a person deciding, and a record of who that decision covered.
+
+It adds no way to deliver either. What it adds instead is a named place where delivery would go, and
+that place refuses on its first line.
+
+---
+
+## 11. `READY` became `IN_REVIEW`, and that is the whole of the rename
+
+Prompt 2's `READY` meant "the merchant considers the wording finished" — which is exactly the moment
+a campaign is handed over for a decision. So this prompt did not add a parallel `IN_REVIEW` beside
+it and leave two labels meaning one thing. The migration rebuilds the enum with an explicit CASE
+that maps `READY → IN_REVIEW` and leaves `DRAFT` and `ARCHIVED` alone. Every stored row keeps its
+meaning; a campaign a merchant had marked ready is in review afterwards, which is what they meant.
+
+The state model now has five values and **two owners**:
+
+| state | written by | means |
+|---|---|---|
+| `DRAFT` | `campaigns.ts` | being written; the only state in which content may change |
+| `IN_REVIEW` | `campaigns.ts` | submitted for a decision |
+| `APPROVED` | **`approvals.ts` only** | an approval row exists for the current revision |
+| `WITHDRAWN` | **`approvals.ts` only** | an approval was explicitly taken back |
+| `ARCHIVED` | `campaigns.ts` | put away; cannot be approved or edited until restored |
+
+That split is the design, not bookkeeping. `setState` accepts three values and the API route lists
+them literally, so **no request can set `APPROVED`**. A product where somebody can set a campaign to
+"approved" has a label; this one has a decision, and the label is a consequence of the decision
+existing. `tests/integration/campaign-approval.test.ts` asserts both `APPROVED` and `WITHDRAWN` are
+refused by `setState` with a 400.
+
+The merchant-driven transitions live in one table, `MERCHANT_TRANSITIONS`, rather than as scattered
+`if` statements. `APPROVED` has an empty row: there is nothing a merchant can do to an approved
+campaign except withdraw the approval, which is a decision of its own.
+
+---
+
+## 12. An approval is a record of a person
+
+`CampaignApproval` is append-only, by trigger and by grant, like the ledger and the consent history.
+One row carries: the campaign, **the exact revision**, the revision number, the decision, the
+declared intended channel, the snapshot, who decided, when, and an optional note.
+
+Three of those deserve the argument behind them.
+
+**The exact revision.** Approval never covers "the campaign"; it covers the words somebody actually
+read. That is the entire reason `CampaignRevision` was made append-only in Prompt 2, and this is
+where the guarantee pays for itself.
+
+**The declared channel.** Recorded at the decision rather than read from the draft afterwards. A
+merchant who approves an SMS and later flips the label to WhatsApp has not approved a WhatsApp
+message, and a decision row that read the channel back from the draft would quietly claim otherwise.
+
+**The revision number, sent by the client and checked.** It is the concurrency guard. If a colleague
+saved an edit while the approval screen was open, the number no longer matches the server's latest
+and the approval is refused with a 409 rather than landing on words nobody read.
+
+### Editing approved content
+
+Refusing the edit would be worse than allowing it: a merchant who spots a typo after approval needs
+a way to fix it that is not "make a second campaign". So an edit is allowed, and in the same
+transaction the campaign drops to `DRAFT` and its approval pointers are cleared.
+
+**The approval row is untouched.** It remains a true statement about revision 3, forever. What
+changed is which revision is current. That distinction — history stays, status moves — is the same
+one the consent history makes, and it is the reason both are append-only.
+
+The invalidation is audited separately (`campaign.approval_invalidated`), because it happens as a
+side effect of something a merchant did for another reason, and a side effect nobody recorded is how
+an audit trail develops a hole.
+
+Changing the **audience** of an approved campaign is refused rather than silently invalidated. The
+snapshot was taken over that segment; swapping it underneath would leave an approval whose audience
+came from a group nobody approved. Withdrawing first makes that a decision somebody takes, with a
+row to show for it.
+
+### The approval policy, stated because it was not going to be obvious
+
+**One approver.** `EDIT_PUSHES` — the existing engagement permission, held by an owner and a manager
+— plus a membership with **no branch restriction**, because a snapshot is business-wide and a
+branch-scoped approver would be signing off on a number they cannot verify.
+
+A mandatory second approver is deliberately not invented. A pilot merchant is one person; requiring
+two would mean requiring them to create a second account to approve their own campaign, which is
+theatre rather than control. Recorded as **D12** for the moment a business has staff who are not its
+owner, and again in **D11** for what `READY`-equivalent sign-off should commit to once delivery
+exists.
+
+---
+
+## 13. The audience snapshot
+
+A segment is a live definition: its membership moves as customers earn, spend and enrol. That is
+right for a segment and wrong for a decision, because "you approved this for 412 people" has to
+still be true next week.
+
+So approving takes an immutable `CampaignAudienceSnapshot` **inside the approving transaction** —
+not two reads with a gap between them that a concurrent enrolment can fall into. The header carries
+the counts and the segment's name as it was; a rename afterwards does not rewrite the history of a
+decision.
+
+### What a snapshot holds, and the one thing it does not
+
+| stored | not stored |
+|---|---|
+| internal profile reference | phone, name, email |
+| the consent state observed at that instant | card id, serial, card URL |
+| the consent record that decided it, or null for an enrolment answer | QR token, share token, source token |
+| campaign, revision, segment, timestamps, counts | any rendered message |
+
+**Only eligible customers get a row.** The excluded are counted on the header — `unknownCount` and
+`withdrawnCount` — and never listed. Somebody who never agreed to be contacted has not agreed to
+appear in a marketing artefact either, and no future delivery needs them.
+
+`consentRecordId` is null when the permission came from the enrolment answer itself rather than from
+a recorded change. That is a fact worth being able to tell apart later, and inventing a reference to
+make the column look tidy would be the same mistake Prompt 2 refused when it declined to backfill a
+consent history.
+
+**Retention is not decided here.** Nothing deletes a snapshot, and there is no retention period,
+because a period invented by an implementation is a policy nobody agreed to. Recorded as **D13**.
+
+---
+
+## 14. The wall
+
+`src/server/campaigns/delivery.ts` is the only thing in this codebase shaped like a delivery port. It
+exists because the step from "an approved campaign with a count of contactable people" to "somebody
+writes a loop" is one small step, and the honest way to handle that is to put the step somewhere
+visible and make it refuse.
+
+```ts
+export const disabledDelivery: CampaignDeliveryPort = {
+  async dispatchApprovedSnapshot(): Promise<never> {
+    throw new DeliveryDisabledError();
+  },
+};
+```
+
+Note the shape. `snapshotId` is accepted and never used: the function cannot reach a recipient
+because it never looks one up, and a reviewer confirms that by reading four lines rather than by
+tracing a call graph. `tests/unit/campaign-delivery-boundary.test.ts` spies on the database client
+and asserts that refusing touches it zero times.
+
+The port is deliberately narrow — a snapshot id and nothing else. There is no variant taking a
+recipient, a phone number or a rendered message, because a port shaped like that is a port somebody
+can call with data they assembled themselves.
+
+### `readinessOf`, and the blocker that never clears
+
+Every campaign response carries a `DeliveryReadiness`: the state, the approved revision, the
+approved audience size, `deliverable: false`, and a list of blockers that always ends with
+`NO_DELIVERY_CHANNEL_EXISTS`. A merchant reads their own blockers first and the state of the product
+underneath them.
+
+It also carries `consentMustBeRecheckedAtDispatch: true` — a standing instruction to whatever builds
+delivery, in the contract rather than only in a comment, because a comment is not returned by an API.
+
+**An approval is not permission to contact anybody.** A snapshot records who *could* have been
+contacted at the instant of a decision; consent moves afterwards. The integration suite proves the
+case that matters: a customer withdraws after approval, the snapshot still lists them — because it is
+a record of what was true and rewriting it would make it useless as one — and the live consent check
+returns nobody. Any delivery must re-read current consent per recipient and treat a snapshot as the
+*ceiling* of an audience, never as its authority. The screen says so too.
+
+---
+
+## 15. What the screens say
+
+The campaign detail page states that nothing sends in three separate places: the draft-only banner,
+the approval panel (above every control that leads to a decision), and the readiness section, whose
+last line is the reason that never clears.
+
+Approving and withdrawing each take **two deliberate steps**. Approval and its snapshot are
+append-only, and a later withdrawal adds a row rather than removing one, so a single click that
+writes permanent history is a click somebody makes by accident. The confirmation states what is
+about to be recorded — which revision, which channel — and says plainly that it still sends nothing.
+
+`tests/e2e/campaign-approval-ui.spec.ts` asserts that no button or link on any campaign screen is
+named anything like send, schedule, queue or dispatch in either language, and that **none is
+disabled**. It also reads the real tokens, serial and phone out of the database and asserts their
+absence from the rendered HTML of an *approved* campaign — which is the moment the product is
+holding a list of contactable people for the first time.
+
+---
+
+## 16. What the screenshots found this time
+
+**A localized label sent as a value.** The approval panel received the channel as
+`t("channel.PUSH")` and posted the translated string — "App notification" — as `intendedChannel`,
+which the server rejected as invalid. The panel now takes the enum and the label as separate props:
+one is declared on the decision, the other is shown to the reader.
+
+**A date that read as a different date.** On the Arabic approval screen the snapshot line rendered
+`2026-09-13` inside an Arabic sentence, where the bidi algorithm reorders an unisolated left-to-right
+run. The date and the segment name are now wrapped in `<bdi>`, and the messages end before the value
+rather than interpolating it. On a record of a decision an ambiguous date is not a cosmetic problem.
+
+**A success badge on a number that is not a success** — already fixed in Prompt 2, and the snapshot
+section inherited the same rule: the "may be contacted" badge is neutral below one.

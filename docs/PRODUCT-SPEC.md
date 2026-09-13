@@ -357,9 +357,27 @@ ConsentRecord     id, businessId, customerBusinessProfileId, scope, state,
                   previousState, policyVersion, capturedVia, reason,
                   recordedByUserId, recordedAt                    APPEND-ONLY
 ```
-`Campaign.state` is `DRAFT | READY | ARCHIVED` — there is no sent, scheduled or queued value, and
-`channel` is a LABEL on the draft, not a route to anything. Both append-only tables are protected by
-trigger and by a runtime role that holds only `SELECT` and `INSERT` on them.
+### Campaign approval (built, Phase 2 Prompt 3)
+```
+CampaignApproval          id, businessId, campaignId, campaignRevisionId,
+                          revisionNumber, decision, intendedChannel,
+                          audienceSnapshotId, withdrawsApprovalId,
+                          decidedByUserId, decidedAt, note        APPEND-ONLY
+
+CampaignAudienceSnapshot  id, businessId, campaignId, campaignRevisionId,
+                          segmentId, segmentName, takenAt, matchedCount,
+                          eligibleCount, unknownCount, withdrawnCount,
+                          takenByUserId                           APPEND-ONLY
+
+CampaignAudienceMember    id, snapshotId, customerBusinessProfileId,
+                          consentState, consentRecordId           APPEND-ONLY
+```
+`Campaign.state` is `DRAFT | IN_REVIEW | APPROVED | WITHDRAWN | ARCHIVED` — there is no sent,
+scheduled or queued value, and `channel` is a LABEL on the draft, not a route to anything. `APPROVED`
+and `WITHDRAWN` are written only by the approval service, never by a state-setting request.
+
+All five append-only tables are protected twice: by trigger, and by a runtime role that holds only
+`SELECT` and `INSERT` on them.
 
 ### UtmSourceLink
 ```
@@ -649,9 +667,9 @@ The history is append-only in the database, by trigger, and the runtime role hol
 ### 8A.5 A campaign is a draft, and this phase gives it nothing to send with
 
 A campaign is a name, an intended channel label, a language, an optional saved segment as its
-audience, and content kept as numbered, append-only revisions. It has three states — `DRAFT`,
-`READY`, `ARCHIVED` — none of which is operational. `READY` means a merchant considers the wording
-finished; it does not schedule, queue or reserve anything.
+audience, and content kept as numbered, append-only revisions. It has five states — `DRAFT`,
+`IN_REVIEW`, `APPROVED`, `WITHDRAWN`, `ARCHIVED` — none of which is operational, and none of which
+schedules, queues or reserves anything.
 
 **No delivery exists anywhere in this phase**: no provider, credential, queue, worker, scheduler or
 send verb, and no state a draft can enter that implies one. Drafts archive and restore; they are
@@ -669,6 +687,60 @@ placeholder is refused by name. `programName`, `stampBalance`, `pointBalance` an
 refused with their own reason: a customer may hold several cards, and the product does not guess
 which one was meant. Previews render from fixed sample values in the draft's own language and
 direction, so no customer is ever read to draw one.
+
+### 8A.6 Approval is a record of a person, and it authorises nothing
+
+**`APPROVED` is a consequence, not a setting.** It is what it looks like from outside when an
+append-only `CampaignApproval` row exists for a campaign's current revision. No request can set it:
+the state-setting action accepts `DRAFT`, `IN_REVIEW` and `ARCHIVED` and refuses everything else.
+
+One approval row carries the campaign, **the exact revision**, the decision, the channel declared at
+the moment of the decision, the audience snapshot, the approver, the time, and an optional note. The
+channel is declared rather than read back from the draft: approving an SMS and later relabelling the
+draft as WhatsApp does not approve a WhatsApp message.
+
+**The approval policy is one approver** — `EDIT_PUSHES`, plus a membership with no branch
+restriction, because a snapshot is business-wide and a branch-scoped approver cannot verify the
+number they are signing off. A mandatory second approver is not invented while a pilot merchant is
+one person (§D12).
+
+Editing approved content is allowed and **drops the campaign back to `DRAFT`**, clearing its approval
+pointers, in the same transaction that writes the new revision. The approval row is untouched: it
+remains a true statement about the revision it named. Changing the *audience* while approved is
+refused outright — withdrawing first makes that a decision somebody takes.
+
+Withdrawal is explicit, audited and **adds a row** pointing at the approval it took back. Nothing is
+deleted, and approving again writes a third row and a new snapshot.
+
+### 8A.7 The audience snapshot, and why it is frozen
+
+A segment is a live definition whose membership moves. A decision has to keep meaning what it meant,
+so approving takes an immutable snapshot in the same transaction.
+
+A snapshot stores the counts, the segment's name as it was, and **one row per customer who may be
+contacted** — an internal profile reference, the consent state observed at that instant, and the
+consent record that decided it (null when the permission came from the enrolment answer itself).
+
+It stores no phone, name, email, card id, serial, card URL, QR token, share token, source token or
+rendered message. **No row at all is written for an excluded customer**: the two exclusion reasons
+live on the header as counts, because somebody who never agreed to be contacted has not agreed to
+appear in a marketing artefact either.
+
+Retention is an open decision (§D13). Nothing deletes a snapshot today.
+
+### 8A.8 The delivery boundary
+
+`src/server/campaigns/delivery.ts` is the only delivery-shaped thing in the product. Its sole
+implementation throws before reading anything, and it takes a snapshot id and nothing else — no
+variant accepts a recipient, a phone number or a rendered message.
+
+Every campaign response carries a readiness object: `deliverable` is `false`, the blocker list always
+ends with `NO_DELIVERY_CHANNEL_EXISTS`, and `consentMustBeRecheckedAtDispatch` is `true`.
+
+**An approval is not permission to contact anybody.** A snapshot is the *ceiling* of an audience at
+one instant, never its authority. Whatever builds delivery re-reads each customer's current consent
+at the moment it contacts them: a customer who withdraws tomorrow must not be messaged from a
+snapshot taken today.
 
 ---
 
