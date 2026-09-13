@@ -4,6 +4,7 @@ import { z } from "zod";
 import { ValidationError } from "@/server/errors";
 import { errorResponse, readJsonObject } from "@/server/http";
 import { reverseCounterOperation } from "@/server/program/counter";
+import { enforceStaffLimit } from "@/server/security/staff-limit";
 import { requireScannerContext } from "@/server/tenant/scanner-context";
 
 /**
@@ -38,6 +39,9 @@ export async function POST(req: Request) {
     const input = parsed.data;
 
     const { ctx } = await requireScannerContext(input.businessId ?? null);
+    // Finding M-11: one member of staff, one window. Counted after the membership is verified
+    // (there is nothing to key on before that) and before the service runs.
+    await enforceStaffLimit(ctx, "write");
     return NextResponse.json(
       await reverseCounterOperation(ctx, {
         transactionGroupId: input.transactionGroupId,

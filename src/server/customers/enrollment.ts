@@ -61,6 +61,21 @@ export interface EnrollCustomerInput {
   marketingConsent?: boolean;
   /** Version of the consent text the customer actually saw, stored for later proof. */
   consentTextVersion?: string;
+  /**
+   * Who, if anyone, did this at a till (finding M-10).
+   *
+   * Absent for any other caller. When present, the `CARD_ISSUED_AT_COUNTER` attribution row is
+   * written INSIDE this function's transaction, next to the issuance it attributes.
+   *
+   * It used to be written by `enrollAtCounter` afterwards, with the global client. A crash in the
+   * few milliseconds between the two left the issuance audited and **unattributed** — a card that
+   * appeared from nowhere, with no record of which member of staff handed it over, which is
+   * exactly the question an audit of counter enrolment exists to answer. Passing the actor in is
+   * what lets the two rows share a commit.
+   *
+   * It carries an actor, never a customer: no phone, no name, no token.
+   */
+  counterActor?: { userId: string; membershipId: string };
 }
 
 export type EnrollmentResult = {
@@ -305,6 +320,31 @@ export async function enrollCustomer(input: EnrollCustomerInput): Promise<Enroll
           welcomeUnits: source.welcomeUnits,
         },
       });
+
+      /*
+       * The attribution row, in the same transaction as the issuance it describes (M-10).
+       *
+       * Written only on the call that actually CREATED the card, which is the same arbiter the
+       * welcome bonus uses: `RETURNING id` yields a row to exactly one transaction. A repeat
+       * enrolment of a customer who already has a card is recorded by `enrollAtCounter` instead,
+       * because nothing was issued and there is no issuance to attribute.
+       */
+      if (input.counterActor) {
+        await recordAudit(tx, {
+          action: AuditAction.CARD_ISSUED_AT_COUNTER,
+          entityType: "CustomerCard",
+          entityId: customerCardId,
+          businessId: source.businessId,
+          actorUserId: input.counterActor.userId,
+          // No phone, no name, no token, no URL. Who did it, to which card, and what it granted.
+          metadata: {
+            created: true,
+            cardType: source.cardType,
+            welcomeUnitsGranted: source.welcomeUnits,
+            membershipId: input.counterActor.membershipId,
+          },
+        });
+      }
 
       if (source.welcomeUnits > 0) {
         const reason = `welcome bonus on enrollment via ${source.utmSource}`;

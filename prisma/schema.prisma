@@ -346,11 +346,17 @@ model ProgramVersion {
   mechanics     Json                 @default("{}") // earn rules, thresholds, limits, expiry, countRewardRedemptionAsVisit
   createdAt     DateTime             @default(now())
   activatedAt   DateTime?
+  /// When this version stopped being the live one. NULL on a DRAFT, on the ACTIVE version, and on
+  /// anything retired before the column existed - which is not backfilled, because a fabricated
+  /// timestamp shown to a merchant is worse than an honest blank.
+  retiredAt     DateTime?
 
   template    ProgramTemplate    @relation(fields: [templateId], references: [id])
   rewardTiers RewardTier[]
   cards       CustomerCard[]
   operations  LoyaltyOperation[]
+  // Also, in SQL: one ACTIVE and one DRAFT per template, as partial unique indexes Prisma cannot
+  // express. See prisma/migrations/*/migration.sql.
 
   @@unique([templateId, versionNumber])
 }
@@ -381,7 +387,10 @@ model UtmSourceLink {
   id                           String   @id @default(uuid())
   templateId                   String
   name                         String
-  publicToken                  String   @unique // high-entropy, appears in QR/URL
+  /// High-entropy server-side attribution key. Since owner decision B7 it appears in NO QR and no
+  /// URL: public self-enrollment is withdrawn, `/api/enroll` is a constant 410, and counter
+  /// enrolment resolves this value from the staff member's own membership. Nothing returns it.
+  publicToken                  String   @unique
   utmSource                    String
   utmMedium                    String?
   utmCampaign                  String?

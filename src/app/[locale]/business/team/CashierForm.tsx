@@ -59,31 +59,31 @@ export default function CashierForm({ businessId }: { businessId: string }) {
     <form
       onSubmit={onSubmit}
       data-testid="cashier-form"
-      className="space-y-4 rounded-2xl border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900"
+      className="space-y-4 rounded-2xl border border-border bg-surface p-5"
     >
-      <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">{t("createTitle")}</h2>
+      <h2 className="font-display text-lg font-bold text-ink">{t("createTitle")}</h2>
 
       <div className="grid gap-4 sm:grid-cols-2">
         <label className="block text-sm">
-          <span className="mb-1 block font-medium text-zinc-700 dark:text-zinc-300">{t("firstName")}</span>
+          <span className="mb-1 block font-semibold text-ink">{t("firstName")}</span>
           <input
             required
             value={firstName}
             onChange={(e) => setFirstName(e.target.value)}
             data-testid="cashier-firstName"
-            className="w-full rounded-xl border border-zinc-300 px-3 py-2 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
+            className="h-11 w-full rounded-xl border border-border bg-surface px-4 text-sm text-ink outline-none transition-colors focus:border-turquoise-500"
           />
         </label>
         <label className="block text-sm">
-          <span className="mb-1 block font-medium text-zinc-700 dark:text-zinc-300">{t("lastName")}</span>
+          <span className="mb-1 block font-semibold text-ink">{t("lastName")}</span>
           <input
             value={lastName}
             onChange={(e) => setLastName(e.target.value)}
-            className="w-full rounded-xl border border-zinc-300 px-3 py-2 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
+            className="h-11 w-full rounded-xl border border-border bg-surface px-4 text-sm text-ink outline-none transition-colors focus:border-turquoise-500"
           />
         </label>
         <label className="block text-sm">
-          <span className="mb-1 block font-medium text-zinc-700 dark:text-zinc-300">{t("email")}</span>
+          <span className="mb-1 block font-semibold text-ink">{t("email")}</span>
           <input
             required
             type="email"
@@ -92,11 +92,11 @@ export default function CashierForm({ businessId }: { businessId: string }) {
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             data-testid="cashier-email"
-            className="w-full rounded-xl border border-zinc-300 px-3 py-2 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
+            className="h-11 w-full rounded-xl border border-border bg-surface px-4 text-sm text-ink outline-none transition-colors focus:border-turquoise-500"
           />
         </label>
         <label className="block text-sm">
-          <span className="mb-1 block font-medium text-zinc-700 dark:text-zinc-300">{t("password")}</span>
+          <span className="mb-1 block font-semibold text-ink">{t("password")}</span>
           <input
             required
             type="password"
@@ -106,9 +106,9 @@ export default function CashierForm({ businessId }: { businessId: string }) {
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             data-testid="cashier-password"
-            className="w-full rounded-xl border border-zinc-300 px-3 py-2 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
+            className="h-11 w-full rounded-xl border border-border bg-surface px-4 text-sm text-ink outline-none transition-colors focus:border-turquoise-500"
           />
-          <span className="mt-1 block text-xs text-zinc-400">{t("passwordHint")}</span>
+          <span className="mt-1 block text-xs text-ink-faint">{t("passwordHint")}</span>
         </label>
       </div>
 

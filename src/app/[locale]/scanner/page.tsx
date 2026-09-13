@@ -37,7 +37,7 @@ export default async function ScannerPage({
 
   if (resolved.kind === "none") {
     return (
-      <main className="flex min-h-screen items-center justify-center bg-zinc-950 p-6 text-center text-zinc-300">
+      <main className="flex min-h-screen items-center justify-center bg-navy-950 p-6 text-center text-white/70">
         <p>{t("noBusiness")}</p>
       </main>
     );
@@ -45,14 +45,14 @@ export default async function ScannerPage({
 
   if (resolved.kind === "choose") {
     return (
-      <main className="min-h-screen bg-zinc-950 p-6 text-zinc-100">
+      <main className="min-h-screen bg-navy-950 p-6 text-white">
         <h1 className="mb-4 text-xl font-bold">{t("chooseBusiness")}</h1>
         <ul className="space-y-2">
           {resolved.businesses.map((business) => (
             <li key={business.id}>
               <Link
                 href={`/${locale}/scanner?b=${business.id}`}
-                className="block rounded-xl bg-zinc-900 px-4 py-3 font-medium ring-1 ring-white/10 hover:bg-zinc-800"
+                className="block rounded-xl bg-navy-900 px-4 py-3 font-semibold ring-1 ring-white/10 hover:bg-navy-800"
               >
                 {business.name}
               </Link>

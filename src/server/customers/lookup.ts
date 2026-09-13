@@ -49,6 +49,17 @@ interface CardSearchBase {
    * customer data: safe on a staff screen, and nowhere near a public one.
    */
   earnMode: "MANUAL" | "PER_VISIT" | "SPEND_BLOCK";
+  /**
+   * The counters THIS CARD may be served at, from its own pinned version. `null` means the main
+   * counter only, which is what every version written before multi-location says.
+   *
+   * Read from the card, deliberately, and not from the program's current version. Once a program
+   * can publish a new version, the two genuinely differ: a card issued under "main only" is still
+   * main-only after its program opens a branch, and a card issued under "main and branch" is still
+   * both after its program narrows to the branch. A picker built from the program would offer the
+   * cashier a counter the write then refuses, or hide one it would have accepted.
+   */
+  pinnedLocations: readonly string[] | null;
   expiresAt: Date | null;
   lastActivityAt: Date | null;
 }
@@ -134,6 +145,7 @@ function toSearchResult(card: CardWithProfile): CardSearchResult {
     return {
       ...base,
       earnMode: mechanics.earnMode,
+      pinnedLocations: mechanics.availableLocations ?? null,
       cardType: CardType.POINTS,
       pointBalance: card.pointBalance,
       pointsLabel: mechanics.pointsLabel ?? null,
@@ -150,6 +162,7 @@ function toSearchResult(card: CardWithProfile): CardSearchResult {
   return {
     ...base,
     earnMode: mechanics.earnMode,
+    pinnedLocations: mechanics.availableLocations ?? null,
     cardType: CardType.STAMP,
     stampBalance: card.stampBalance,
     rewardBalance: card.rewardBalance,

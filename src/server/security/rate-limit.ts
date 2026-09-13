@@ -44,9 +44,23 @@ export const RateLimitScope = {
    * serving".
    */
   REGISTER_GLOBAL: "auth.register.global",
-  /** Public customer enrollment. Welcome bonuses make this an abuse target (PRODUCT-SPEC §6.1). */
-  ENROLL_IP: "enroll.ip",
-  ENROLL_LINK: "enroll.link",
+
+  /*
+   * Per-actor counter limits (Phase 1b Prompt 3, finding M-11).
+   *
+   * Keyed on the MEMBERSHIP, not the user and not the address. A member of staff is authenticated,
+   * belongs to exactly one business through that membership, and is recorded on every row they
+   * write — so the membership id is the only key that is both unforgeable and meaningful. Keying on
+   * the user would merge two jobs at two businesses into one window; keying on an address would key
+   * on nothing at all, because staging trusts no proxy header.
+   *
+   * What they bound is a real abuse: `enrollAtCounter` grants a welcome bonus, so a cashier with a
+   * list of phone numbers can mint value one card at a time. The comparable fraud on an existing
+   * card - awarding yourself stamps - is already bounded per card by `dailyAwardLimit`; this is the
+   * per-PERSON bound that was missing.
+   */
+  STAFF_ENROLL: "staff.enroll",
+  STAFF_WRITE: "staff.write",
 } as const;
 export type RateLimitScopeName = (typeof RateLimitScope)[keyof typeof RateLimitScope];
 
@@ -254,28 +268,85 @@ export async function consumeSignInLimit(identifier: string, clientIp: string | 
   return decision;
 }
 
-/**
- * Public enrollment: one window per client address, and one per enrollment LINK.
+/*
+ * There is no public-enrolment limiter here any more.
  *
- * The link window is what holds when no trusted proxy supplies an address, and it is also the
- * right shape for the actual threat: a welcome bonus is worth farming, and farming it means
- * hammering ONE merchant's link. It is deliberately generous — a café handing out QR cards at a
- * launch event has many genuine customers joining from one network in an hour.
+ * `consumeEnrollmentLimit` and its two scopes were dead from the moment owner decision B7 made
+ * `/api/enroll` a constant 410 that reads nothing: no caller, no window, no possible effect. They
+ * were recorded as finding L-15 rather than removed in the gate that found them, because that
+ * gate's whole point was that the audited tree was the deployed tree. They are removed now.
+ *
+ * The point is not the dead bytes. It is that a reader of this file could reasonably have concluded
+ * that customer enrolment was rate-limited, when what actually limits it is that the endpoint does
+ * not exist and the counter path requires a session. The per-actor windows above are what bounds
+ * enrolment today.
  */
-export async function consumeEnrollmentLimit(clientIp: string | null, sourceToken: string): Promise<RateLimitDecision> {
-  const e = env();
-  const rules: RateLimitRule[] = [
-    { scope: RateLimitScope.ENROLL_IP, max: e.ENROLL_RATE_LIMIT_IP_MAX, windowSeconds: e.ENROLL_RATE_LIMIT_WINDOW_SECONDS },
-    { scope: RateLimitScope.ENROLL_LINK, max: e.ENROLL_RATE_LIMIT_LINK_MAX, windowSeconds: e.ENROLL_RATE_LIMIT_WINDOW_SECONDS },
-  ];
-  const identifiers: Partial<Record<RateLimitScopeName, string>> = { [RateLimitScope.ENROLL_LINK]: sourceToken };
-  if (clientIp) identifiers[RateLimitScope.ENROLL_IP] = clientIp;
-  const decision = await consumeRateLimit(rules, identifiers);
-  await maybePrune();
-  return decision;
-}
 
 /** Clear a successful signer's identifier window. The address window is left as it is. */
 export async function clearSignInLimit(identifier: string): Promise<void> {
   await resetRateLimit(RateLimitScope.SIGNIN_IDENTIFIER, identifier);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * Per-actor counter limits (M-11)
+ * ────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * What one member of staff may do in an hour.
+ *
+ * **Constants, not environment variables, and deliberately so.** A new variable would have to be
+ * added to the environment templates and the deployed staging environment to mean anything, and
+ * this prompt may change neither; a variable that exists in code and nowhere else is a default
+ * wearing a disguise. These are the defaults, they are written down, and they move by a code change
+ * that can be reviewed.
+ *
+ * The numbers are sized from the counter, not from a threat model in the abstract:
+ *
+ *  - **60 enrolments an hour** is one new customer a minute, sustained, by one cashier. A launch
+ *    day at a busy café does not reach it; a script farming welcome bonuses does within seconds.
+ *  - **300 writes an hour** is five counter operations a minute, sustained. A till serving a
+ *    customer every twelve seconds for a solid hour is already an unusual day.
+ *
+ * Both fail in the direction of "this one member of staff waits" rather than "the café stops
+ * serving": the window is per membership, so every other person on the floor is unaffected.
+ */
+export const STAFF_ENROLL_MAX = 60;
+export const STAFF_WRITE_MAX = 300;
+export const STAFF_WINDOW_SECONDS = 3_600;
+
+/** Which counter window an action belongs to. */
+export type StaffAction = "enroll" | "write";
+
+export interface StaffLimitContext {
+  membershipId: string;
+  businessId: string;
+  userId: string;
+}
+
+/**
+ * Count one counter action against the actor's window.
+ *
+ * Audited on the first refusal of each window, tenant-scoped, and carrying nothing about the
+ * customer who happened to be standing there: which member, which window, how long. An operator
+ * needs to know that a till hit its limit; nobody needs the phone number that was being typed.
+ */
+export async function consumeStaffActionLimit(ctx: StaffLimitContext, action: StaffAction): Promise<RateLimitDecision> {
+  const rule: RateLimitRule =
+    action === "enroll"
+      ? { scope: RateLimitScope.STAFF_ENROLL, max: STAFF_ENROLL_MAX, windowSeconds: STAFF_WINDOW_SECONDS }
+      : { scope: RateLimitScope.STAFF_WRITE, max: STAFF_WRITE_MAX, windowSeconds: STAFF_WINDOW_SECONDS };
+
+  const decision = await consumeOne(rule, hashKey(rule.scope, ctx.membershipId));
+  if (!decision.allowed) {
+    await recordAudit(prisma, {
+      action: AuditAction.STAFF_RATE_LIMITED,
+      entityType: "BusinessMembership",
+      entityId: ctx.membershipId,
+      businessId: ctx.businessId,
+      actorUserId: ctx.userId,
+      metadata: { scope: rule.scope, limit: rule.max, windowSeconds: rule.windowSeconds },
+    }).catch(() => undefined); // auditing must never turn a refusal into a 500
+  }
+  await maybePrune();
+  return decision;
 }

@@ -124,17 +124,23 @@ const envSchema = z.object({
    */
   AUTH_RATE_LIMIT_PEPPER: z.string().min(16, "must be at least 16 characters").optional(),
 
-  // ── Public enrollment (src/app/api/enroll/route.ts) ─────────────────────────
-  // Deliberately generous: a café handing out QR cards at a launch event has many genuine
-  // customers joining from one network within the hour. The limit exists to stop a script
-  // farming welcome bonuses, not to throttle a queue at the counter.
-
-  /** Enrollment attempts per client address per window. */
-  ENROLL_RATE_LIMIT_IP_MAX: z.coerce.number().int().min(1).max(100_000).default(20),
-  /** Enrollment attempts per enrollment LINK per window; holds when no address is trusted. */
-  ENROLL_RATE_LIMIT_LINK_MAX: z.coerce.number().int().min(1).max(100_000).default(200),
-  /** Enrollment window length, seconds. */
-  ENROLL_RATE_LIMIT_WINDOW_SECONDS: z.coerce.number().int().min(1).max(86_400).default(3_600),
+  /*
+   * ── No public-enrollment window (finding L-15, closed) ─────────────────────
+   *
+   * `ENROLL_RATE_LIMIT_IP_MAX`, `ENROLL_RATE_LIMIT_LINK_MAX` and
+   * `ENROLL_RATE_LIMIT_WINDOW_SECONDS` used to be parsed here. Owner decision B7 made
+   * `/api/enroll` a constant 410 that reads no body and opens no window, so they have had no
+   * effect since; parsing them made this file claim a control the product does not have.
+   *
+   * The schema is `z.object`, not `z.strictObject`, so an environment that still SETS them is
+   * unaffected - the values are ignored rather than rejected. The deployed environment templates
+   * still list them, and this prompt may not change an environment template; that residue is
+   * recorded in the Prompt 3 evidence rather than quietly left for a reader to trip over.
+   *
+   * What bounds counter enrolment today is the per-actor window in
+   * `src/server/security/rate-limit.ts`, whose limits are constants for the same reason: a new
+   * variable would need a template change to mean anything.
+   */
 });
 
 export type Env = z.infer<typeof envSchema>;

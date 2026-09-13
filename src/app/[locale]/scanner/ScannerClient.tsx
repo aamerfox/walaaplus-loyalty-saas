@@ -40,6 +40,8 @@ interface CardBase {
   templateId: string;
   programName: string;
   earnMode: "MANUAL" | "PER_VISIT" | "SPEND_BLOCK";
+  /** The counters this card's own pinned version allows. `null` means the main counter only. */
+  pinnedLocations: string[] | null;
 }
 
 interface StampCard extends CardBase {
@@ -59,10 +61,18 @@ interface PointsCard extends CardBase {
 
 type CardSummary = StampCard | PointsCard;
 
-/** Which counters this member may operate each program at. `locations: null` means Main only. */
+/**
+ * What the server says this member may do, and where.
+ *
+ * `programs` describes the LIVE version of each program, which is what the enrolment picker needs.
+ * `usableLocations` is every counter that is open and assigned to this member right now, and it is
+ * what an existing CARD is measured against — because a card is served under the version it was
+ * issued with, not under whatever version the program has since published.
+ */
 export interface ScannerScope {
   programs: { templateId: string; name: string; cardType: "STAMP" | "POINTS"; locations: { id: string; name: string }[] | null }[];
   defaultLocationId: string | null;
+  usableLocations: { id: string; name: string }[];
 }
 
 interface OperationResult {
@@ -200,8 +210,16 @@ export default function ScannerClient({
          * location at all (the server refuses one), and a program that lists exactly one gets it
          * without asking — the picker appears only when there is a decision to make.
          */
-        const program = scope.programs.find((p) => p.templateId === found.templateId);
-        setLocationId(program?.locations?.length === 1 ? program.locations[0].id : "");
+        /*
+         * Derived from the CARD's pinned version, intersected with the counters this member may use
+         * now. A program that has since published a new version does not move a card that was
+         * issued before it.
+         */
+        const usable =
+          found.pinnedLocations === null
+            ? null
+            : scope.usableLocations.filter((l) => found.pinnedLocations!.includes(l.id));
+        setLocationId(usable?.length === 1 ? usable[0].id : "");
       } catch {
         setFeedback({ tone: "error", text: t("notFound") });
       } finally {
@@ -444,7 +462,19 @@ export default function ScannerClient({
    * belongs to, and the server says where that program runs and where this member may stand. A
    * picker built from anything else could offer an option the write would then refuse.
    */
-  const programLocations = card === null ? null : (scope.programs.find((p) => p.templateId === card.templateId)?.locations ?? null);
+  const programLocations =
+    card === null || card.pinnedLocations === null
+      ? null
+      : scope.usableLocations.filter((l) => card.pinnedLocations!.includes(l.id));
+
+  /**
+   * Every counter this card's version runs at is closed, or none of them is assigned to this member.
+   *
+   * It is a real state now that counters can be closed and versions can name them: the card is
+   * valid, the program is live, and this till still cannot serve it. Saying so is the whole fix —
+   * the alternative is enabled buttons and a server refusal with a customer waiting.
+   */
+  const noUsableCounter = programLocations !== null && programLocations.length === 0;
 
   /**
    * Every write is blocked until a required counter is chosen.
@@ -453,7 +483,8 @@ export default function ScannerClient({
    * version of that refusal — it fails before the request rather than after it, and the line under
    * the picker says why.
    */
-  const actionsBlocked = busy || (programLocations !== null && programLocations.length > 1 && locationId === "");
+  const actionsBlocked =
+    busy || noUsableCounter || (programLocations !== null && programLocations.length > 1 && locationId === "");
 
   const toneClass = {
     ok: "bg-mint-500/15 text-mint-500",
@@ -701,6 +732,12 @@ export default function ScannerClient({
             </p>
 
             {/* The counter. Present only when there is a real choice; required when there is. */}
+            {noUsableCounter && (
+              <p role="status" data-testid="scanner-no-counter" className="rounded-xl bg-amber-500/10 px-3 py-2 text-sm text-amber-300">
+                {t("noUsableCounter")}
+              </p>
+            )}
+
             {programLocations !== null && programLocations.length > 0 && (
               <div data-testid="scanner-location">
                 <label htmlFor="scanner-location-select" className="text-xs uppercase tracking-wide text-white/55">

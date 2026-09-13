@@ -44,9 +44,9 @@ export default function ProgramSummary({
         </p>
       )}
 
-      <section className="rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-        <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">{programName}</h2>
-        <p className="mt-1 text-sm text-zinc-500" data-testid="program-summary">
+      <section className="rounded-2xl border border-border bg-surface p-6 shadow-sm">
+        <h2 className="font-display text-lg font-bold text-ink">{programName}</h2>
+        <p className="mt-1 text-sm text-ink-muted" data-testid="program-summary">
           {t("summary", { stamps: stampsRequiredPerReward, reward: rewardName })}
           {welcomeStamps > 0 ? ` · ${t("welcomeSummary", { count: welcomeStamps })}` : ""}
         </p>
@@ -56,9 +56,9 @@ export default function ProgramSummary({
         data-testid="enrollment-guidance"
         className="rounded-2xl border border-navy-200 bg-navy-50 p-6 dark:border-navy-200/20 dark:bg-navy-800/10"
       >
-        <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">{t("howToEnrollTitle")}</h2>
-        <p className="mt-2 text-sm text-zinc-700 dark:text-zinc-300">{t("howToEnrollBody")}</p>
-        <p className="mt-2 text-xs text-zinc-500">{t("howToEnrollWhy")}</p>
+        <h2 className="font-display text-lg font-bold text-ink">{t("howToEnrollTitle")}</h2>
+        <p className="mt-2 text-sm leading-relaxed text-ink">{t("howToEnrollBody")}</p>
+        <p className="mt-2 text-xs text-ink-muted">{t("howToEnrollWhy")}</p>
         <div className="mt-4 flex flex-wrap gap-3">
           <Link
             href="/scanner"
@@ -72,7 +72,7 @@ export default function ProgramSummary({
             href="/business/team"
             locale={locale}
             data-testid="next-cashier"
-            className="rounded-xl border border-zinc-300 px-5 py-3 font-medium text-zinc-800 transition-colors hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+            className="rounded-xl border border-border px-5 py-3 font-semibold text-ink transition-colors hover:bg-surface-muted"
           >
             {t("nextCashier")}
           </Link>

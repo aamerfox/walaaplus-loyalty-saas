@@ -1,12 +1,20 @@
 import { NextResponse } from "next/server";
 import { env } from "./env";
-import { isAppError, ValidationError } from "./errors";
+import { isAppError, RateLimitedError, ValidationError } from "./errors";
 
 /**
  * Map a thrown error to an HTTP response. Domain errors carry their own status and code.
  * Anything else is a 500 with a generic body — internals are logged server-side, never returned.
  */
 export function errorResponse(e: unknown): NextResponse {
+  if (e instanceof RateLimitedError) {
+    // `Retry-After` as well as the body: it is the standard header for this status, and a client
+    // that honours it backs off without having to understand our error shape.
+    return NextResponse.json(
+      { error: { code: e.code, message: e.message, retryAfterSeconds: e.retryAfterSeconds } },
+      { status: e.status, headers: { "retry-after": String(e.retryAfterSeconds) } },
+    );
+  }
   if (isAppError(e)) {
     return NextResponse.json({ error: { code: e.code, message: e.message } }, { status: e.status });
   }

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { enrollAtCounter } from "@/server/customers/counter-enrollment";
 import { ValidationError } from "@/server/errors";
 import { errorResponse, readJsonObject } from "@/server/http";
+import { enforceStaffLimit } from "@/server/security/staff-limit";
 import { requireScannerContext } from "@/server/tenant/scanner-context";
 
 /**
@@ -40,6 +41,9 @@ export async function POST(req: Request) {
     const input = parsed.data;
 
     const { ctx } = await requireScannerContext(input.businessId ?? null);
+    // Finding M-11: one member of staff, one window. Counted after the membership is verified
+    // (there is nothing to key on before that) and before the service runs.
+    await enforceStaffLimit(ctx, "enroll");
 
     const result = await enrollAtCounter(ctx, {
       phone: input.phone,

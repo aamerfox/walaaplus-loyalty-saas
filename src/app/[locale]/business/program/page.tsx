@@ -41,7 +41,7 @@ export default async function ProgramPage({
   const t = await getTranslations("Program");
   const resolved = await resolveScannerContext(userId, b ?? null);
   if (resolved.kind !== "ready") {
-    return <p className="text-zinc-500">{t("noBusiness")}</p>;
+    return <p className="text-ink-muted">{t("noBusiness")}</p>;
   }
 
   const { ctx, businessName } = resolved.context;
@@ -101,8 +101,8 @@ export default async function ProgramPage({
 function Header({ title, subtitle }: { title: string; subtitle: string }) {
   return (
     <header>
-      <h1 className="text-3xl font-bold tracking-tight text-zinc-900 dark:text-zinc-100">{title}</h1>
-      <p className="mt-1 text-zinc-500 dark:text-zinc-400">{subtitle}</p>
+      <h1 className="font-display text-2xl font-extrabold tracking-tight text-ink sm:text-3xl">{title}</h1>
+      <p className="mt-1 text-ink-muted">{subtitle}</p>
     </header>
   );
 }

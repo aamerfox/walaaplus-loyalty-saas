@@ -2,7 +2,7 @@ import { Permission, Prisma, TemplateStatus } from "@prisma/client";
 import { z } from "zod";
 import { AuditAction, recordAudit } from "../audit/audit";
 import { prisma } from "../db";
-import { ConflictError, NotFoundError, ValidationError } from "../errors";
+import { ConflictCode, ConflictError, NotFoundError, ValidationError } from "../errors";
 import { opaqueToken } from "../security/tokens";
 import { requirePermission, type TenantContext } from "../tenant/context";
 import { DIRECT_SOURCE_NAME, DIRECT_UTM_SOURCE } from "./sources";
@@ -59,6 +59,13 @@ export interface SourceLinkSummary {
   utmCampaign: string | null;
   welcomeUnitQuantity: number | null;
   active: boolean;
+  /**
+   * The built-in counter source every program is created with.
+   *
+   * It is what `enrollAtCounter` resolves, so it cannot be renamed, deactivated or removed — and a
+   * screen must be able to say so without re-deriving it from a reserved string of its own.
+   */
+  isDirect: boolean;
   /** Cards attributed to this source. The number a merchant actually asked for. */
   cardCount: number;
   createdAt: Date;
@@ -148,11 +155,11 @@ export async function createSourceLink(ctx: TenantContext, input: CreateSourceLi
         },
       });
 
-      return { ...link, cardCount: 0 };
+      return { ...link, isDirect: false, cardCount: 0 };
     });
   } catch (e) {
     if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
-      throw new ConflictError("This program already has a source with that name");
+      throw new ConflictError("This program already has a source with that name", ConflictCode.NAME_TAKEN);
     }
     throw e;
   }
@@ -188,7 +195,99 @@ export async function listSourceLinks(ctx: TenantContext, templateId?: string): 
     orderBy: [{ templateId: "asc" }, { createdAt: "asc" }],
   });
 
-  return links.map(({ _count, ...link }) => ({ ...link, cardCount: _count.cards }));
+  return links.map(({ _count, ...link }) => ({
+    ...link,
+    isDirect: link.utmSource === DIRECT_UTM_SOURCE,
+    cardCount: _count.cards,
+  }));
+}
+
+const updateSourceLinkSchema = z
+  .strictObject({
+    name: z.string().trim().min(1).max(120).optional(),
+    utmMedium: z.union([z.string().trim().min(1).max(60), z.literal("")]).optional(),
+    utmCampaign: z.union([z.string().trim().min(1).max(120), z.literal("")]).optional(),
+  })
+  .refine((v) => Object.values(v).some((field) => field !== undefined), { message: "Nothing to update" });
+export type UpdateSourceLinkInput = z.input<typeof updateSourceLinkSchema>;
+
+/**
+ * Rename a source, or correct its campaign fields.
+ *
+ * **`utmSource` is deliberately not editable, and neither is the welcome bonus.** Both are baked
+ * into cards that have already been issued: a card carries `utmSourceLinkId`, and the profile
+ * behind it carries the `utmSource` it arrived with. Editing either would rewrite the meaning of
+ * history — last month's forty cards would silently be reported as having come from somewhere they
+ * did not — and the welcome bonus a customer was given cannot be changed after they were given it.
+ * A merchant who wants different terms creates a new source; the old one is deactivated and keeps
+ * its cards.
+ *
+ * A rename is safe for the same reason a location rename is: nothing joins on the name.
+ */
+export async function updateSourceLink(
+  ctx: TenantContext,
+  sourceLinkId: string,
+  input: UpdateSourceLinkInput,
+): Promise<SourceLinkSummary> {
+  requirePermission(ctx, Permission.EDIT_TEMPLATES);
+  const parsed = updateSourceLinkSchema.safeParse(input);
+  if (!parsed.success) throw new ValidationError("Invalid source", parsed.error.issues);
+  const data = parsed.data;
+
+  const link = await prisma.utmSourceLink.findFirst({
+    where: { id: sourceLinkId, template: { businessId: ctx.businessId } },
+    select: { id: true, templateId: true, utmSource: true },
+  });
+  if (!link) throw new NotFoundError("Source not found");
+  if (link.utmSource === DIRECT_UTM_SOURCE) {
+    throw new ConflictError("The counter source is built in and cannot be renamed", ConflictCode.SOURCE_PROTECTED);
+  }
+  if (data.name !== undefined && data.name.toLocaleLowerCase() === DIRECT_SOURCE_NAME.toLocaleLowerCase()) {
+    throw new ValidationError(`"${DIRECT_SOURCE_NAME}" is reserved for the source every program is created with`);
+  }
+
+  try {
+    return await prisma.$transaction(async (tx) => {
+      const updated = await tx.utmSourceLink.update({
+        where: { id: link.id },
+        data: {
+          ...(data.name !== undefined ? { name: data.name } : {}),
+          ...(data.utmMedium !== undefined ? { utmMedium: data.utmMedium === "" ? null : data.utmMedium } : {}),
+          ...(data.utmCampaign !== undefined ? { utmCampaign: data.utmCampaign === "" ? null : data.utmCampaign } : {}),
+        },
+        select: {
+          id: true,
+          templateId: true,
+          name: true,
+          utmSource: true,
+          utmMedium: true,
+          utmCampaign: true,
+          welcomeUnitQuantity: true,
+          active: true,
+          createdAt: true,
+          _count: { select: { cards: true } },
+        },
+      });
+
+      await recordAudit(tx, {
+        businessId: ctx.businessId,
+        actorUserId: ctx.userId,
+        action: AuditAction.SOURCE_LINK_UPDATED,
+        entityType: "UtmSourceLink",
+        entityId: link.id,
+        // The token is a capability and is never written to the audit log.
+        metadata: { templateId: link.templateId, name: updated.name, utmMedium: updated.utmMedium, utmCampaign: updated.utmCampaign },
+      });
+
+      const { _count, ...rest } = updated;
+      return { ...rest, isDirect: false, cardCount: _count.cards };
+    });
+  } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
+      throw new ConflictError("This program already has a source with that name", ConflictCode.NAME_TAKEN);
+    }
+    throw e;
+  }
 }
 
 /**
@@ -210,7 +309,10 @@ export async function setSourceLinkActive(ctx: TenantContext, sourceLinkId: stri
   });
   if (!link) throw new NotFoundError("Source not found");
   if (link.utmSource === DIRECT_UTM_SOURCE && !active) {
-    throw new ConflictError("The direct source is how staff enrol customers and cannot be deactivated");
+    throw new ConflictError(
+      "The direct source is how staff enrol customers and cannot be deactivated",
+      ConflictCode.SOURCE_PROTECTED,
+    );
   }
   if (link.active === active) return;
 

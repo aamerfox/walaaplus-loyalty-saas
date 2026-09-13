@@ -102,9 +102,9 @@ export default function ProgramForm({ locale, businessId }: { locale: string; bu
       onSubmit={onSubmit}
       noValidate
       data-testid="program-form"
-      className="max-w-xl space-y-5 rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-800 dark:bg-zinc-900"
+      className="max-w-xl space-y-5 rounded-2xl border border-border bg-surface p-6 shadow-sm"
     >
-      <p className="text-sm text-zinc-500 dark:text-zinc-400">{t("intro")}</p>
+      <p className="text-sm text-ink-muted">{t("intro")}</p>
 
       <Field id="program-name" label={t("nameLabel")} help={t("nameHelp")}>
         <input
@@ -188,16 +188,16 @@ export default function ProgramForm({ locale, businessId }: { locale: string; bu
 }
 
 const INPUT =
-  "w-full rounded-xl border border-zinc-300 px-4 py-3 text-zinc-900 outline-none focus:border-navy-200 focus:ring-2 focus:ring-turquoise-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100";
+  "h-11 w-full rounded-xl border border-border bg-surface px-4 text-sm text-ink outline-none transition-colors focus:border-turquoise-500";
 
 function Field({ id, label, help, children }: { id: string; label: string; help: string; children: React.ReactNode }) {
   return (
     <div>
-      <label htmlFor={id} className="mb-1 block text-sm font-medium text-zinc-700 dark:text-zinc-300">
+      <label htmlFor={id} className="mb-1 block text-sm font-semibold text-ink">
         {label}
       </label>
       {children}
-      <p className="mt-1 text-xs text-zinc-400">{help}</p>
+      <p className="mt-1 text-xs text-ink-faint">{help}</p>
     </div>
   );
 }

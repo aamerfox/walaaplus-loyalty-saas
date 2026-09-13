@@ -2,6 +2,9 @@ import { CardType, Permission } from "@prisma/client";
 import { AuditAction, recordAudit } from "../audit/audit";
 import { prisma } from "../db";
 import { NotFoundError } from "../errors";
+import { readAvailableLocations } from "../program/available-locations";
+import { isStampMechanics, readStampMechanics } from "../program/mechanics";
+import { isPointsMechanics, readPointsMechanics } from "../program/points-mechanics";
 import { resolveEnrollmentTarget } from "../program/programs";
 import { publicCardUrl } from "../program/public-urls";
 import { qrSvg } from "../qr";
@@ -100,17 +103,31 @@ export async function enrollAtCounter(
     // Stamped from the server's constant, exactly as the public route used to. The counter screen
     // shows the same two sentences the join page showed, so the version means the same thing.
     consentTextVersion: ENROLLMENT_CONSENT_VERSION,
+    /*
+     * Finding M-10, closed. The attribution row is written inside the enrolment transaction, so
+     * the issuance and the member of staff who made it commit together or not at all. This call
+     * site used to write it afterwards with the global client, and a crash in that window left a
+     * card issued with no record of who issued it.
+     */
+    counterActor: { userId: ctx.userId, membershipId: ctx.membershipId },
   });
 
-  await recordAudit(prisma, {
-    action: AuditAction.CARD_ISSUED_AT_COUNTER,
-    entityType: "CustomerCard",
-    entityId: result.customerCardId,
-    businessId: ctx.businessId,
-    actorUserId: ctx.userId,
-    // No phone, no name, no token, no URL. Who did it, to which card, and whether it was new.
-    metadata: { created: result.created, cardType: result.cardType, welcomeUnitsGranted: result.welcomeUnitsGranted },
-  });
+  if (!result.created) {
+    /*
+     * Nothing was issued: this customer already had a card, and the staff member was shown it.
+     * That is worth a row of its own — it is how a manager sees that a till is looking customers
+     * up — but it is NOT an issuance, and recording it as one would inflate the count of cards a
+     * member of staff created. Outside the transaction because there is no write to join.
+     */
+    await recordAudit(prisma, {
+      action: AuditAction.CARD_LINK_REVEALED,
+      entityType: "CustomerCard",
+      entityId: result.customerCardId,
+      businessId: ctx.businessId,
+      actorUserId: ctx.userId,
+      metadata: { via: "counter_enrollment_repeat" },
+    });
+  }
 
   const cardUrl = publicCardUrl(result.shareToken);
   return {
@@ -134,6 +151,51 @@ export interface CardLinkReveal {
 }
 
 /**
+ * May this member of staff see a card at all? (Finding L-17, closed.)
+ *
+ * Phase 1a was Main-only, so there was nothing to cross and the reveal checked only the tenant and
+ * `VIEW_CUSTOMERS`. Phase 1b creates the boundary this closes: with several counters, a cashier
+ * assigned to one branch could otherwise reveal the card link — a live capability that opens the
+ * customer's card — for a customer served only at another.
+ *
+ * The rule is the one the write path already uses, read-only:
+ *
+ *  - **OWNER and MANAGER** (`locationIds === null`) see every card of their business. They are the
+ *    people who answer a support call about a branch they are not standing in.
+ *  - **A cashier** sees a card whose pinned version runs at one of the counters they are assigned
+ *    to. A version that names no counters runs at Main, so serving it means being assigned to Main.
+ *  - **A cashier with no assignment at all** sees nothing. An empty assignment list is not
+ *    "unrestricted" anywhere in this system, and this is not the place to make it the exception.
+ *
+ * The refusal is a 404, matching the tenant miss above: a member who may not serve a card learns
+ * only that they cannot, not that it exists.
+ */
+async function assertCardWithinMemberScope(ctx: TenantContext, mechanics: unknown): Promise<void> {
+  if (ctx.locationIds === null) return;
+  if (ctx.locationIds.length === 0) throw new NotFoundError("Card not found");
+
+  const parsed = isPointsMechanics(mechanics)
+    ? readPointsMechanics(mechanics)
+    : isStampMechanics(mechanics)
+      ? readStampMechanics(mechanics)
+      : null;
+  // A row that parses as neither contract is corrupt. Failing closed is the only safe reading when
+  // the thing being handed over is a capability.
+  if (!parsed) throw new NotFoundError("Card not found");
+
+  const allowed = readAvailableLocations(parsed);
+  if (allowed === null) {
+    const main = await prisma.location.findFirst({
+      where: { businessId: ctx.businessId, isDefault: true },
+      select: { id: true },
+    });
+    if (!main || !ctx.locationIds.includes(main.id)) throw new NotFoundError("Card not found");
+    return;
+  }
+  if (!allowed.some((id) => ctx.locationIds!.includes(id))) throw new NotFoundError("Card not found");
+}
+
+/**
  * Show a customer their own card link again, at the counter.
  *
  * This is the restore path, and the only one Phase 1a has. A customer who lost their link cannot
@@ -151,9 +213,16 @@ export async function revealCardLink(ctx: TenantContext, customerCardId: string)
   // Tenant-filtered, not checked afterwards: another business's card id is simply not found.
   const card = await prisma.customerCard.findFirst({
     where: { id: customerCardId, businessId: ctx.businessId },
-    select: { shareToken: true, serialNumber: true },
+    select: {
+      shareToken: true,
+      serialNumber: true,
+      // The card's PINNED mechanics, never the template's current ones: the question is which
+      // counters THIS card is served at, and that was decided when it was issued.
+      programVersion: { select: { mechanics: true } },
+    },
   });
   if (!card) throw new NotFoundError("Card not found");
+  await assertCardWithinMemberScope(ctx, card.programVersion.mechanics);
 
   await recordAudit(prisma, {
     action: AuditAction.CARD_LINK_REVEALED,

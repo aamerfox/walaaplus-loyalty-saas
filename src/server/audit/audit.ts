@@ -12,6 +12,12 @@ export const AuditAction = {
   MEMBERSHIP_DEACTIVATED: "membership.deactivated",
   MEMBERSHIP_REACTIVATED: "membership.reactivated",
   LOCATION_CREATED: "location.created",
+  /** A location was renamed, or its staff note changed. Carries the new label, never an address. */
+  LOCATION_UPDATED: "location.updated",
+  /** A counter was closed to new value. Nothing already written at it moves or changes. */
+  LOCATION_DEACTIVATED: "location.deactivated",
+  /** A closed counter was opened again, keeping its id and therefore its whole history. */
+  LOCATION_REACTIVATED: "location.reactivated",
   /** A ledger group written by the platform rather than by a signed-in staff member. */
   LEDGER_SYSTEM_GROUP_APPENDED: "ledger.system_group_appended",
   /** An authentication window was exhausted. Recorded once per window; never carries credentials. */
@@ -51,6 +57,26 @@ export const AuditAction = {
   SOURCE_LINK_CREATED: "program.source_link_created",
   /** A named enrolment source was activated or deactivated. */
   SOURCE_LINK_ACTIVATION_CHANGED: "program.source_link_activation_changed",
+
+  // ── Phase 1b Prompt 3: the program-version lifecycle ──────────────────────
+  /** A draft version was created from the live one. Carries the version numbers, not the mechanics. */
+  PROGRAM_DRAFT_CREATED: "program.draft_created",
+  /** A draft's mechanics or reward tiers were edited. Drafts are mutable; this says when. */
+  PROGRAM_DRAFT_UPDATED: "program.draft_updated",
+  /** A draft was discarded. Only DRAFT rows can be deleted, enforced by trigger. */
+  PROGRAM_DRAFT_DISCARDED: "program.draft_discarded",
+  /**
+   * A draft became the live version, and the previous one was retired in the same transaction.
+   * Carries both version ids and the full published mechanics, because "what were the rules on the
+   * day this card was sold" is the question an audit of a loyalty program has to answer.
+   */
+  PROGRAM_VERSION_PUBLISHED: "program.version_published",
+  /** A program was paused (no new enrolment) or resumed. Existing cards are untouched either way. */
+  PROGRAM_STATUS_CHANGED: "program.status_changed",
+  /** A named source was renamed or its attribution fields changed. Never carries the token. */
+  SOURCE_LINK_UPDATED: "program.source_link_updated",
+  /** A staff member exhausted their per-actor counter window. Carries no customer data. */
+  STAFF_RATE_LIMITED: "staff.rate_limited",
 } as const;
 export type AuditActionName = (typeof AuditAction)[keyof typeof AuditAction];
 

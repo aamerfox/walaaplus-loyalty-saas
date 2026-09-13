@@ -118,8 +118,18 @@ describe("ScannerClient — the camera", () => {
    */
   it("sends a location only when one was chosen, and never invents one", () => {
     expect(code).toContain('locationId !== "" ? { locationId } : {}');
-    // The list comes from the server-resolved scope, not from anything the component derives.
-    expect(code).toContain("scope.programs.find");
+    /*
+     * The list is built from two SERVER-resolved facts and nothing else: the counters this member
+     * may use right now (`scope.usableLocations`, already filtered by assignment and by the counter
+     * still being open) and the counters the CARD's own pinned version allows.
+     *
+     * Prompt 3 tightened this. It used to read the locations of the program's LIVE version, which
+     * was right while a program had exactly one version for its whole life. Now that a merchant can
+     * publish a new one, the live version and a card's pinned version genuinely differ, and the
+     * live version is the wrong answer for a card issued before it.
+     */
+    expect(code).toContain("scope.usableLocations.filter");
+    expect(code).toContain("pinnedLocations");
     // No default, no fallback, no "first location" anywhere in the component.
     expect(code).not.toMatch(/locationId\s*=\s*["'][a-z0-9-]{8,}["']/i);
     expect(code).not.toContain("defaultLocationId ??");

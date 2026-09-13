@@ -3,6 +3,7 @@ import { z } from "zod";
 import { revealCardLink } from "@/server/customers/counter-enrollment";
 import { ValidationError } from "@/server/errors";
 import { errorResponse, readJsonObject } from "@/server/http";
+import { enforceStaffLimit } from "@/server/security/staff-limit";
 import { requireScannerContext } from "@/server/tenant/scanner-context";
 
 /**
@@ -34,6 +35,10 @@ export async function POST(req: Request) {
     if (!parsed.success) throw new ValidationError("Invalid request", parsed.error.issues);
 
     const { ctx } = await requireScannerContext(parsed.data.businessId ?? null);
+    // Counted against the same per-actor window as a counter write (M-11). A reveal hands over a
+    // live capability - the link that opens a customer's card - so unbounded reveals is precisely
+    // the shape of abuse this window exists for.
+    await enforceStaffLimit(ctx, "write");
     // Tenant-filtered inside the service: another business's card id is not found, not forbidden.
     return NextResponse.json(await revealCardLink(ctx, parsed.data.customerCardId), { status: 200 });
   } catch (e) {

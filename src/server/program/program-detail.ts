@@ -212,6 +212,15 @@ export interface ScannerScope {
   }[];
   /** The business's Main location, which is where a Main-only program writes. */
   defaultLocationId: string | null;
+  /**
+   * Every ACTIVE counter this member may operate at, whatever program it belongs to.
+   *
+   * The counter screen intersects this with the CARD's own pinned locations, which is the only pair
+   * that gives the right answer: the card says where its rules allow, and this says where the
+   * business is still open and this member is still assigned. A counter closed this morning
+   * disappears from here without any card changing.
+   */
+  usableLocations: { id: string; name: string }[];
 }
 
 export async function getScannerScope(ctx: TenantContext): Promise<ScannerScope> {
@@ -267,5 +276,6 @@ export async function getScannerScope(ctx: TenantContext): Promise<ScannerScope>
       };
     }),
     defaultLocationId: locations.find((l) => l.isDefault)?.id ?? null,
+    usableLocations: locations.filter((l) => mayUse(l.id)).map((l) => ({ id: l.id, name: l.name })),
   };
 }

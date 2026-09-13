@@ -1,14 +1,17 @@
-import { CardType } from "@prisma/client";
+import { CardType, Permission } from "@prisma/client";
 import { getTranslations } from "next-intl/server";
 import { notFound, redirect } from "next/navigation";
 import { Link } from "@/i18n/routing";
-import { Badge, Card, DetailRow, Notice, PageHeader, StatTile } from "@/components/ui";
+import { Badge, Card, DetailRow, Notice, PageHeader, Section, StatTile, Table, Td, Th } from "@/components/ui";
 import { getBusinessMetrics } from "@/server/analytics/metrics";
 import { getCurrentUserId } from "@/server/auth/session";
 import { isAppError } from "@/server/errors";
 import { getProgramDetail, type ProgramDetail } from "@/server/program/program-detail";
 import { listSourceLinks } from "@/server/program/source-links";
+import { listProgramVersions } from "@/server/program/versions";
 import { resolveScannerContext } from "@/server/tenant/scanner-context";
+import ProgramLifecycle from "./ProgramLifecycle";
+import SourceManager from "./SourceManager";
 
 /**
  * One loyalty program, in full.
@@ -17,11 +20,15 @@ import { resolveScannerContext } from "@/server/tenant/scanner-context";
  * pinned to the live version, and `getBusinessMetrics` — the same function the dashboard uses —
  * narrowed to this template for the activity. Nothing on this page is computed twice or here.
  *
- * The configuration is READ-ONLY, and that is a property of the domain rather than a gap in this
- * screen: a program version's mechanics and its reward tiers are frozen by database triggers once
- * the version activates, so that a card sold under one set of rules keeps them. Changing a live
- * program means publishing a new version, and the Phase 1b core has no contract for that yet. The
- * screen says so plainly instead of offering an edit button that could only fail.
+ * The live configuration is READ-ONLY, and that is a property of the domain rather than a gap in
+ * this screen: a program version's mechanics and its reward tiers are frozen by database triggers
+ * once the version activates, so that a card sold under one set of rules keeps them.
+ *
+ * What Prompt 3 adds is the way FORWARD from that. A merchant who needs different rules opens a
+ * draft of the next version, reviews exactly what differs, and publishes it — and the version
+ * history below makes the consequence legible: each past version is listed with the number of cards
+ * still pinned to it, still running on its rules. "Existing cards keep their version" stops being a
+ * sentence in a document and becomes a number on a screen.
  */
 export default async function ProgramDetailPage({
   params,
@@ -62,6 +69,15 @@ export default async function ProgramDetailPage({
    */
   const sources = await listSourceLinks(ctx, templateId).catch(() => []);
 
+  // The version history, and whether a draft is already open. Tenant-scoped like everything else.
+  const history = await listProgramVersions(ctx, templateId);
+  const mayEdit = ctx.permissions.has(Permission.EDIT_TEMPLATES);
+  const dates = new Intl.DateTimeFormat(locale === "ar" ? "ar-SY-u-nu-latn" : "en-GB", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+
   const numbers = new Intl.NumberFormat(locale === "ar" ? "ar-SY-u-nu-latn" : "en");
   const money = (minor: number | null) =>
     minor === null ? t("notSet") : numbers.format(minor);
@@ -82,16 +98,35 @@ export default async function ProgramDetailPage({
         title={program.name}
         description={t(`cardType.${program.cardType}`)}
         actions={
-          <Link href="/business/programs" className="rounded-xl border border-border px-4 py-2 font-semibold text-ink-muted hover:bg-surface-muted">
-            {t("backToList")}
-          </Link>
+          <>
+            {mayEdit ? (
+              <ProgramLifecycle
+                businessId={ctx.businessId}
+                templateId={templateId}
+                status={program.status}
+                hasDraft={history.draftVersionNumber !== null}
+              />
+            ) : null}
+            <Link href="/business/programs" className="rounded-xl border border-border px-4 py-2 font-semibold text-ink-muted hover:bg-surface-muted">
+              {t("backToList")}
+            </Link>
+          </>
         }
       />
 
       <div className="flex flex-wrap items-center gap-2">
         <Badge tone={program.status === "ACTIVE" ? "success" : "warn"}>{t(`statuses.${program.status}`)}</Badge>
         <Badge tone="brand">{t("versionNumber", { number: program.versionNumber })}</Badge>
+        {history.draftVersionNumber !== null ? (
+          <Badge tone="accent">{t("draftOpen", { number: history.draftVersionNumber })}</Badge>
+        ) : null}
       </div>
+
+      {program.status === "PAUSED" ? (
+        <Notice tone="warn" testId="program-paused">
+          {t("pausedNote")}
+        </Notice>
+      ) : null}
 
       <Card>
         <h2 className="font-display text-lg font-bold text-ink">{t("howItWorks")}</h2>
@@ -154,7 +189,7 @@ export default async function ProgramDetailPage({
         )}
 
         <Notice tone="info" testId="program-immutable">
-          {t("immutableNote")}
+          {t("immutableNoteWithDraft")}
         </Notice>
       </Card>
 
@@ -173,23 +208,72 @@ export default async function ProgramDetailPage({
         </div>
       ) : null}
 
-      {sources.length > 0 ? (
-        <Card>
-          <h2 className="font-display text-lg font-bold text-ink">{t("sources")}</h2>
-          <p className="mt-1 text-sm text-ink-muted">{t("sourcesHelp")}</p>
-          <ul className="mt-3 divide-y divide-border" data-testid="source-list">
-            {sources.map((source) => (
-              <li key={source.id} className="flex flex-wrap items-center justify-between gap-2 py-3">
-                <span className="font-semibold text-ink">{source.name}</span>
-                <span className="flex items-center gap-3 text-sm text-ink-muted">
-                  <span className="tabular-nums">{t("sourceCards", { count: source.cardCount })}</span>
-                  <Badge tone={source.active ? "success" : "neutral"}>{source.active ? t("sourceActive") : t("sourceInactive")}</Badge>
-                </span>
-              </li>
+      <Section title={t("versionHistory")} description={t("versionHistoryHelp")} testId="version-history">
+        <Table testId="version-table">
+          <thead>
+            <tr>
+              <Th>{t("version")}</Th>
+              <Th>{t("versionStatus")}</Th>
+              <Th>{t("versionLive")}</Th>
+              <Th>{t("versionRetired")}</Th>
+              <Th className="text-end">{t("versionCards")}</Th>
+            </tr>
+          </thead>
+          <tbody>
+            {history.versions.map((version) => (
+              <tr key={version.versionNumber}>
+                <Td className="font-semibold">{t("versionNumber", { number: version.versionNumber })}</Td>
+                <Td>
+                  <Badge
+                    tone={version.status === "ACTIVE" ? "success" : version.status === "DRAFT" ? "accent" : "neutral"}
+                  >
+                    {t(`versionStatuses.${version.status}`)}
+                  </Badge>
+                </Td>
+                <Td>{version.activatedAt ? dates.format(version.activatedAt) : t("notSet")}</Td>
+                {/*
+                 * Three different states, and they are not the same sentence. A live or draft
+                 * version has not been retired, which is a dash. A retired one with no timestamp
+                 * was retired before the column existed, which reads "not recorded" — not
+                 * backfilled and not borrowed from its successor, because a fabricated date in
+                 * front of a merchant is worse than an honest blank.
+                 */}
+                <Td>
+                  {version.retiredAt
+                    ? dates.format(version.retiredAt)
+                    : version.status === "RETIRED"
+                      ? t("notRecorded")
+                      : "—"}
+                </Td>
+                <Td className="text-end tabular-nums">{numbers.format(version.cardCount)}</Td>
+              </tr>
             ))}
-          </ul>
+          </tbody>
+        </Table>
+        <Notice tone="info" testId="version-pinning">
+          {t("versionPinningNote")}
+        </Notice>
+      </Section>
+
+      <Section title={t("sources")} description={t("sourcesHelp")}>
+        <Card>
+          <SourceManager
+            businessId={ctx.businessId}
+            templateId={templateId}
+            mayEdit={mayEdit}
+            sources={sources.map((source) => ({
+              id: source.id,
+              name: source.name,
+              utmSource: source.utmSource,
+              utmMedium: source.utmMedium,
+              utmCampaign: source.utmCampaign,
+              active: source.active,
+              isDirect: source.isDirect,
+              cardCount: source.cardCount,
+            }))}
+          />
         </Card>
-      ) : null}
+      </Section>
 
       <Notice tone="info" testId="program-counter-note">
         {t("counterOnly")}

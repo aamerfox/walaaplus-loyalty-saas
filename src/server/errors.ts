@@ -57,6 +57,26 @@ export const ConflictCode = {
   CARD_NOT_TRANSACTABLE: "CARD_NOT_TRANSACTABLE",
   /** The group was already reversed, or is itself a reversal. */
   ALREADY_REVERSED: "ALREADY_REVERSED",
+
+  /*
+   * Phase 1b Prompt 3. The lifecycle refusals a merchant can act on.
+   *
+   * Each of these is a 409 that a screen must explain differently, in the merchant's own language.
+   * The English message stays for logs; the CODE is what the UI translates, which is why a refusal
+   * that would otherwise need the server to speak Arabic does not.
+   */
+  /** The main counter is where enrolment and every main-only program writes. */
+  LOCATION_IS_MAIN: "LOCATION_IS_MAIN",
+  /** A business must keep at least one active counter. */
+  LOCATION_LAST_ACTIVE: "LOCATION_LAST_ACTIVE",
+  /** Closing this counter would leave a live program with nowhere to trade. */
+  LOCATION_STRANDS_PROGRAM: "LOCATION_STRANDS_PROGRAM",
+  /** Another active row of the same kind already uses this name. */
+  NAME_TAKEN: "NAME_TAKEN",
+  /** The draft changed while it was being reviewed; it must be read again before publishing. */
+  DRAFT_STALE: "DRAFT_STALE",
+  /** The built-in counter source cannot be renamed or switched off. */
+  SOURCE_PROTECTED: "SOURCE_PROTECTED",
 } as const;
 export type ConflictCodeName = (typeof ConflictCode)[keyof typeof ConflictCode];
 
@@ -77,6 +97,21 @@ export class IdempotencyConflictError extends AppError {
 export class LedgerInvariantError extends AppError {
   constructor(message: string) {
     super("LEDGER_INVARIANT", message, 422);
+  }
+}
+
+/**
+ * A window is spent. 429, with the seconds to wait.
+ *
+ * `retryAfterSeconds` is carried on the error rather than assembled at the route, so every caller
+ * answers the same way and a screen can say "try again in a minute" instead of "something went
+ * wrong". It says nothing about WHOSE window, or what else has been done in it.
+ */
+export class RateLimitedError extends AppError {
+  readonly retryAfterSeconds: number;
+  constructor(retryAfterSeconds: number, message = "Too many requests; please wait a moment") {
+    super("RATE_LIMITED", message, 429);
+    this.retryAfterSeconds = retryAfterSeconds;
   }
 }
 
