@@ -77,6 +77,19 @@ export const AuditAction = {
   SOURCE_LINK_UPDATED: "program.source_link_updated",
   /** A staff member exhausted their per-actor counter window. Carries no customer data. */
   STAFF_RATE_LIMITED: "staff.rate_limited",
+
+  // ── Phase 2 Prompt 1: saved customer segments ─────────────────────────────
+  /**
+   * A saved segment was created, changed, archived or restored.
+   *
+   * The metadata carries the DEFINITION — which is the merchant's own selection rule — and never
+   * the customers it matches. An audit row is read by more people and kept far longer than the
+   * screen that legitimately shows a count.
+   */
+  SEGMENT_CREATED: "segment.created",
+  SEGMENT_UPDATED: "segment.updated",
+  SEGMENT_ARCHIVED: "segment.archived",
+  SEGMENT_RESTORED: "segment.restored",
 } as const;
 export type AuditActionName = (typeof AuditAction)[keyof typeof AuditAction];
 

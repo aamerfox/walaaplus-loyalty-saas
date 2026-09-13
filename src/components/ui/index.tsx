@@ -267,10 +267,12 @@ export function Badge({
   children,
   tone = "neutral",
   className,
+  testId,
 }: {
   children: ReactNode;
   tone?: "neutral" | "brand" | "accent" | "success" | "warn" | "danger";
   className?: string;
+  testId?: string;
 }) {
   const tones = {
     neutral: "bg-surface-muted text-ink-muted ring-border",
@@ -282,6 +284,7 @@ export function Badge({
   } as const;
   return (
     <span
+      data-testid={testId}
       className={cn(
         "inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-semibold ring-1 ring-inset",
         tones[tone],

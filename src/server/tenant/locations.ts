@@ -135,6 +135,29 @@ export async function listBusinessLocations(ctx: TenantContext): Promise<Busines
   }));
 }
 
+/**
+ * The branches this member may read, for a picker.
+ *
+ * Deliberately NOT `listBusinessLocations`: that one is gated on `VIEW_LOCATIONS`, which a
+ * location-restricted member may not hold, and it returns closed branches and staff counts that a
+ * filter control has no use for. This returns names and ids only, narrowed to the member's own
+ * assignment, so a picker can never offer a branch its owner could not have read anyway.
+ *
+ * Closed branches are included when the member may read them: a merchant comparing this month with
+ * last month needs the branch they closed in between, and the numbers recorded there are still
+ * theirs.
+ */
+export async function listReadableLocations(ctx: TenantContext): Promise<{ id: string; name: string }[]> {
+  return prisma.location.findMany({
+    where: {
+      businessId: ctx.businessId,
+      ...(ctx.locationIds === null ? {} : { id: { in: [...ctx.locationIds] } }),
+    },
+    select: { id: true, name: true },
+    orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }],
+  });
+}
+
 /** Load one location inside the caller's tenant, or refuse exactly as if it did not exist. */
 async function requireOwnLocation(db: Tx, businessId: string, locationId: string) {
   const location = await db.location.findFirst({

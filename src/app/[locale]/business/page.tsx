@@ -4,9 +4,13 @@ import { redirect } from "next/navigation";
 import { Link } from "@/i18n/routing";
 import { Badge, buttonClass, Card, EmptyState, Notice, PageHeader, Section, StatGroup, StatTile } from "@/components/ui";
 import { getBusinessMetrics } from "@/server/analytics/metrics";
+import { isRangePreset, resolveRange } from "@/server/analytics/ranges";
 import { getCurrentUserId } from "@/server/auth/session";
+import { isAppError } from "@/server/errors";
 import { listBusinessPrograms } from "@/server/program/programs";
+import { listReadableLocations } from "@/server/tenant/locations";
 import { resolveScannerContext } from "@/server/tenant/scanner-context";
+import DashboardFilters from "./DashboardFilters";
 
 /**
  * The merchant dashboard.
@@ -15,6 +19,14 @@ import { resolveScannerContext } from "@/server/tenant/scanner-context";
  * definitions live (`docs/PHASE-1B-IMPLEMENTATION.md` §7). Nothing is counted in the browser,
  * nothing is cached, nothing is estimated.
  *
+ * ## The range is the merchant's own day, not the server's
+ *
+ * Presets and the custom range are resolved through `resolveRange` in the BUSINESS's timezone, the
+ * same one `dailyAwardLimit` counts in. A dashboard that counted in UTC would disagree with the till
+ * about which day a 01:00 coffee belonged to, and a merchant would have two screens and no way to
+ * tell which was lying. A malformed or oversized range falls back to the default and says so rather
+ * than rendering numbers for a range nobody asked for.
+ *
  * ## Grouped by what a merchant is asking
  *
  * The first version put eight identical tiles in one grid, which is a field of numbers rather than a
@@ -22,17 +34,15 @@ import { resolveScannerContext } from "@/server/tenant/scanner-context";
  * three questions in the order a merchant asks them: **who came**, **what happened at the counter**,
  * **what it paid out**. Same data, same source, a screen that can be read at a glance.
  */
-const WINDOW_DAYS = 30;
-
 export default async function BusinessHome({
   params,
   searchParams,
 }: {
   params: Promise<{ locale: string }>;
-  searchParams: Promise<{ b?: string }>;
+  searchParams: Promise<{ b?: string; range?: string; from?: string; to?: string; loc?: string }>;
 }) {
   const { locale } = await params;
-  const { b } = await searchParams;
+  const { b, range, from, to, loc } = await searchParams;
   const userId = await getCurrentUserId();
   if (!userId) redirect(`/${locale}/auth/login`);
 
@@ -64,9 +74,29 @@ export default async function BusinessHome({
     );
   }
 
-  const now = new Date();
-  const from = new Date(now.getTime() - WINDOW_DAYS * 86_400_000);
-  const [metrics, programs] = await Promise.all([getBusinessMetrics(ctx, { from, to: now }), listBusinessPrograms(ctx)]);
+  const timeZone = resolved.context.timeZone;
+  const preset = isRangePreset(range) ? range : "30d";
+  let window;
+  let rangeError = false;
+  try {
+    window = resolveRange({ preset, timeZone, from, to });
+  } catch (e) {
+    // A hand-edited URL is the only way to get here. Fall back to the default range and say so,
+    // rather than rendering an error page over numbers that are perfectly readable.
+    if (!isAppError(e)) throw e;
+    rangeError = true;
+    window = resolveRange({ preset: "30d", timeZone });
+  }
+
+  // Only the branches this member may read. A branch id in the URL that is not one of them is
+  // dropped here, and refused by the metric read even if it were not.
+  const locations = await listReadableLocations(ctx);
+  const locationId = loc && locations.some((l) => l.id === loc) ? loc : undefined;
+
+  const [metrics, programs] = await Promise.all([
+    getBusinessMetrics(ctx, { from: window.from, to: window.to, locationId }),
+    listBusinessPrograms(ctx),
+  ]);
 
   const numbers = new Intl.NumberFormat(locale === "ar" ? "ar-SY-u-nu-latn" : "en");
 
@@ -92,13 +122,27 @@ export default async function BusinessHome({
     <>
       <PageHeader
         title={t("title")}
-        description={t("window", { days: WINDOW_DAYS })}
+        description={t("windowDates", { from: window.fromLocalDate, to: window.toLocalDate })}
         actions={
           <Link href="/scanner" className={buttonClass("accent")}>
             {t("openScanner")}
           </Link>
         }
       />
+
+      <DashboardFilters
+        preset={window.preset}
+        fromLocalDate={window.fromLocalDate}
+        toLocalDate={window.toLocalDate}
+        locationId={locationId ?? ""}
+        locations={locations}
+      />
+
+      {rangeError ? (
+        <Notice tone="warn" testId="range-fallback">
+          {t("rangeFallback")}
+        </Notice>
+      ) : null}
 
       <StatGroup title={t("groupCustomers")} testId="dashboard-stats">
         <StatTile label={t("cardsIssued")} value={numbers.format(metrics.cardsIssued)} hint={t("cardsIssuedHint")} />
@@ -185,7 +229,7 @@ export default async function BusinessHome({
       ) : null}
 
       <p className="text-xs leading-relaxed text-ink-faint" data-testid="metrics-provenance">
-        {t("provenance")}
+        {t("provenance")} {t("timezoneNote")}
       </p>
     </>
   );

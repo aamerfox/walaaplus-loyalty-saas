@@ -19,6 +19,14 @@ import { requireBusinessMembership, type TenantContext } from "./context";
 export interface ScannerContext {
   ctx: TenantContext;
   businessName: string;
+  /**
+   * The business's own timezone, resolved with the membership rather than re-read per screen.
+   *
+   * Every "day" this product counts is a business-timezone day (PRODUCT-SPEC §5.6), so a screen
+   * that needs one should not have to remember to fetch it — and must not fall back to the
+   * server's zone when it forgets.
+   */
+  timeZone: string;
 }
 
 export type ScannerResolution =
@@ -35,8 +43,11 @@ export type ScannerResolution =
 export async function resolveScannerContext(userId: string, requestedBusinessId?: string | null): Promise<ScannerResolution> {
   if (requestedBusinessId) {
     const ctx = await requireBusinessMembership(prisma, userId, requestedBusinessId);
-    const business = await prisma.business.findUniqueOrThrow({ where: { id: ctx.businessId }, select: { name: true } });
-    return { kind: "ready", context: { ctx, businessName: business.name } };
+    const business = await prisma.business.findUniqueOrThrow({
+      where: { id: ctx.businessId },
+      select: { name: true, timezone: true },
+    });
+    return { kind: "ready", context: { ctx, businessName: business.name, timeZone: business.timezone } };
   }
 
   const memberships = await listUserBusinesses(userId);
@@ -47,7 +58,8 @@ export async function resolveScannerContext(userId: string, requestedBusinessId?
 
   const only = memberships[0].business;
   const ctx = await requireBusinessMembership(prisma, userId, only.id);
-  return { kind: "ready", context: { ctx, businessName: only.name } };
+  const business = await prisma.business.findUniqueOrThrow({ where: { id: only.id }, select: { timezone: true } });
+  return { kind: "ready", context: { ctx, businessName: only.name, timeZone: business.timezone } };
 }
 
 /**

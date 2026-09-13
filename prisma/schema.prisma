@@ -176,6 +176,7 @@ model User {
   operations   LoyaltyOperation[]   @relation("OperationActor")
   auditLogs    AuditLog[]           @relation("AuditActor")
   pushMessages PushMessage[]        @relation("PushAuthor")
+  segments     CustomerSegment[]    @relation("SegmentAuthor")
 }
 
 model Business {
@@ -201,6 +202,7 @@ model Business {
   operations         LoyaltyOperation[]
   idempotencyRecords IdempotencyRecord[]
   auditLogs          AuditLog[]
+  segments           CustomerSegment[]
   pushMessages       PushMessage[]
   pushSubscriptions  PushSubscription[]
 }
@@ -528,6 +530,31 @@ model IdempotencyRecord {
 
   @@unique([businessId, key])
   @@index([createdAt])
+}
+
+/// A saved, reusable customer selection. A DEFINITION, never a stored list of people: membership is
+/// derived on read from the same cards and ledger every other screen uses, so a segment cannot go
+/// stale and cannot become a second copy of anybody's personal data.
+model CustomerSegment {
+  id                String    @id @default(uuid())
+  businessId        String
+  name              String
+  /// Lower-cased, whitespace-collapsed. Unique per business, enforced in SQL.
+  normalizedName    String
+  /// Validated against an allowlist of fields and operators before it is written. Never executed.
+  definition        Json
+  definitionVersion Int       @default(1)
+  /// Archived, never deleted: a later phase's campaigns will reference a segment by id.
+  archivedAt        DateTime?
+  createdByUserId   String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  business  Business @relation(fields: [businessId], references: [id])
+  createdBy User?    @relation("SegmentAuthor", fields: [createdByUserId], references: [id])
+
+  @@unique([businessId, normalizedName])
+  @@index([businessId, archivedAt])
 }
 
 /// Non-ledger security and business events: registration, membership changes, template activation,

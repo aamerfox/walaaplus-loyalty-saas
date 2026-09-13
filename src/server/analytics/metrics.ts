@@ -1,4 +1,4 @@
-import { CardType, OperationKind, Permission, UnitType } from "@prisma/client";
+import { CardType, Permission, Prisma } from "@prisma/client";
 import { prisma } from "../db";
 import { ValidationError } from "../errors";
 import { AWARD_KINDS } from "../ledger/visits";
@@ -15,6 +15,22 @@ import { requirePermission, type TenantContext } from "../tenant/context";
  *
  * Read-only, tenant-scoped, and gated on `VIEW_DASHBOARD` — which an owner and a manager hold and a
  * cashier does not. There is no write path in this file.
+ *
+ * ## Where the counting happens (Phase 1b finding M-12, closed)
+ *
+ * It used to happen in Node. `groupBy(["transactionGroupId"])` returned one row per counter event in
+ * the range and `.length` counted them; the per-location and per-template breakdowns returned one
+ * row per (location, group) pair and counted them in a `Map`; `liveRedemptions` fetched every
+ * redemption and every reversal of one and subtracted the sets. All of that is correct, and all of
+ * it moves the whole range across the wire to count it. A café doing two hundred operations a day
+ * was fine; the same query over a 400-day range at a busy branch is tens of thousands of rows
+ * fetched to produce eleven integers.
+ *
+ * Every count is now a PostgreSQL aggregate, and every query in this file returns either **one row**
+ * or **one row per location or per program**. `COUNT(DISTINCT "transactionGroupId")` is the whole
+ * reason it is raw SQL: Prisma's `groupBy` cannot express a distinct count, so the choice was
+ * between fetching the distinct values or writing the aggregate. The definitions in the table above
+ * did not change, and the tests that pinned them were written before this and still pass.
  *
  * ## The definitions, stated once so two screens cannot disagree
  *
@@ -103,39 +119,71 @@ function assertRange(range: MetricsRange): void {
  * but the moment Phase 1b's permission editor can grant `VIEW_DASHBOARD` to a restricted
  * membership, a dashboard that ignored the restriction would show them every branch's takings.
  */
-function operationScope(ctx: TenantContext, query: MetricsQuery) {
-  const locationIds =
-    ctx.locationIds === null
-      ? query.locationId
-        ? [query.locationId]
-        : undefined
-      : query.locationId
-        ? ctx.locationIds.filter((id) => id === query.locationId)
-        : [...ctx.locationIds];
-
-  return {
-    businessId: ctx.businessId,
-    createdAt: { gte: query.from, lt: query.to },
-    ...(query.templateId ? { templateId: query.templateId } : {}),
-    ...(locationIds ? { locationId: { in: locationIds } } : {}),
-  };
+function scopedLocationIds(ctx: TenantContext, query: MetricsQuery): string[] | undefined {
+  if (ctx.locationIds === null) return query.locationId ? [query.locationId] : undefined;
+  return query.locationId ? ctx.locationIds.filter((id) => id === query.locationId) : [...ctx.locationIds];
 }
 
-/** Ids of reward redemptions in scope that have NOT been reversed, with what they cost. */
-async function liveRedemptions(scope: ReturnType<typeof operationScope>) {
-  const redemptions = await prisma.loyaltyOperation.findMany({
-    where: { ...scope, kind: OperationKind.REWARD_REDEEMED },
-    select: { id: true, redemptionValueMinor: true, locationId: true, templateId: true },
-  });
-  if (redemptions.length === 0) return [];
 
-  const reversals = await prisma.loyaltyOperation.findMany({
-    where: { reversalOfOperationId: { in: redemptions.map((r) => r.id) } },
-    select: { reversalOfOperationId: true },
-  });
-  const reversed = new Set(reversals.map((r) => r.reversalOfOperationId));
-  return redemptions.filter((r) => !reversed.has(r.id));
+/**
+ * The same scope as a SQL predicate, for the aggregates Prisma cannot express.
+ *
+ * Every value is a bound parameter — `Prisma.sql` interpolates placeholders, never text — so a
+ * template id or a location id is data at every step. An EMPTY allowed-location list becomes
+ * `IN (NULL)`, which matches nothing: a member restricted to no locations sees no numbers, which is
+ * the same answer the Prisma path gives and the only safe reading of "assigned nowhere".
+ */
+function sqlScope(ctx: TenantContext, query: MetricsQuery): Prisma.Sql {
+  const locationIds = scopedLocationIds(ctx, query);
+  return Prisma.sql`
+        o."businessId" = ${ctx.businessId}
+    AND o."createdAt" >= ${query.from} AND o."createdAt" < ${query.to}
+    ${query.templateId ? Prisma.sql`AND o."templateId" = ${query.templateId}` : Prisma.empty}
+    ${
+      locationIds
+        ? Prisma.sql`AND o."locationId" IN (${locationIds.length > 0 ? Prisma.join(locationIds) : Prisma.sql`NULL`})`
+        : Prisma.empty
+    }`;
 }
+
+/** Postgres returns `bigint` for COUNT and SUM; the API speaks in numbers. */
+function num(value: bigint | number | null): number {
+  return value === null ? 0 : Number(value);
+}
+
+interface HeadlineRow {
+  groups: bigint;
+  reversalGroups: bigint;
+  visits: bigint;
+  stamps: bigint | null;
+  points: bigint | null;
+  redemptions: bigint;
+  redemptionValue: bigint | null;
+  repeatCustomers: bigint;
+}
+
+interface LocationRow {
+  locationId: string;
+  transactions: bigint;
+  visits: bigint;
+  redemptions: bigint;
+}
+
+interface TemplateRow {
+  templateId: string;
+  transactions: bigint;
+  redemptions: bigint;
+}
+
+/**
+ * "A redemption the merchant took back is not a reward given", as a SQL predicate.
+ *
+ * `NOT EXISTS` rather than a `LEFT JOIN … IS NULL` or a fetched id set: it stops at the first
+ * matching reversal, uses `LoyaltyOperation_reversalOfOperationId_key`, and reads the same way as
+ * the sentence it implements.
+ */
+const NOT_REVERSED = Prisma.sql`
+  NOT EXISTS (SELECT 1 FROM "LoyaltyOperation" r WHERE r."reversalOfOperationId" = o."id")`;
 
 /**
  * Every headline figure for one business and one range.
@@ -152,45 +200,59 @@ export async function getBusinessMetrics(ctx: TenantContext, query: MetricsQuery
     // Tenant-scoped: another business's template id reports nothing rather than reporting theirs.
     if (owned === 0) throw new ValidationError("That program does not belong to this business");
   }
-  const scope = operationScope(ctx, query);
-
-  const [groups, visits, awards, redemptions, locations, templates] = await Promise.all([
-    // One row per group, so "transactions" counts counter events rather than ledger rows.
-    prisma.loyaltyOperation.groupBy({
-      by: ["transactionGroupId"],
-      where: scope,
-      _max: { kind: true },
-    }),
-    prisma.loyaltyOperation.count({ where: { ...scope, countsAsVisit: true } }),
-    prisma.loyaltyOperation.groupBy({
-      by: ["unitType"],
-      where: { ...scope, kind: { in: [...AWARD_KINDS] }, quantity: { gt: 0 } },
-      _sum: { quantity: true },
-    }),
-    liveRedemptions(scope),
-    prisma.location.findMany({ where: { businessId: ctx.businessId }, select: { id: true, name: true } }),
-    prisma.programTemplate.findMany({
-      where: { businessId: ctx.businessId, ...(query.templateId ? { id: query.templateId } : {}) },
-      select: { id: true, name: true, cardType: true },
-    }),
-  ]);
+  if (query.locationId) {
+    const owned = await prisma.location.count({ where: { id: query.locationId, businessId: ctx.businessId } });
+    if (owned === 0) throw new ValidationError("That location does not belong to this business");
+  }
+  const where = sqlScope(ctx, query);
 
   /*
-   * A group is a reversal group when its rows are REVERSAL rows. `_max: { kind }` is enough to tell:
-   * the ledger writes a group of one kind on the compensating side, and REVERSAL sorts last among
-   * the enum values, so a mixed group could never be produced by `reverseOperationGroup` anyway.
+   * Four queries, and each one returns a bounded result: one row, or one row per location, or one
+   * row per program. Issued in parallel because they are independent reads of the same range —
+   * and inside one range, so eleven tiles cannot be taken at eleven different moments.
    */
-  const reversals = groups.filter((g) => g._max.kind === OperationKind.REVERSAL).length;
+  const [headline, byLocationRows, byTemplateRows, cardsIssued, cardsByTemplate, locations, templates] = await Promise.all([
+    prisma.$queryRaw<HeadlineRow[]>`
+      SELECT
+        -- The ::text cast is for the parameterised lists only. A string LITERAL coerces to the
+        -- enum type; a bound parameter arrives as text, and PostgreSQL compares neither for you.
+        COUNT(DISTINCT o."transactionGroupId")                                              AS "groups",
+        COUNT(DISTINCT o."transactionGroupId") FILTER (WHERE o."kind" = 'REVERSAL')         AS "reversalGroups",
+        COUNT(*) FILTER (WHERE o."countsAsVisit")                                           AS "visits",
+        SUM(o."quantity") FILTER (WHERE o."unitType" = 'STAMP' AND o."quantity" > 0
+                                    AND o."kind"::text IN (${Prisma.join([...AWARD_KINDS])})) AS "stamps",
+        SUM(o."quantity") FILTER (WHERE o."unitType" = 'POINT' AND o."quantity" > 0
+                                    AND o."kind"::text IN (${Prisma.join([...AWARD_KINDS])})) AS "points",
+        COUNT(*)               FILTER (WHERE o."kind" = 'REWARD_REDEEMED' AND ${NOT_REVERSED}) AS "redemptions",
+        COALESCE(SUM(o."redemptionValueMinor")
+                 FILTER (WHERE o."kind" = 'REWARD_REDEEMED' AND ${NOT_REVERSED}), 0)        AS "redemptionValue",
+        COUNT(DISTINCT o."customerBusinessProfileId") FILTER (
+          WHERE EXISTS (
+            SELECT 1 FROM "CustomerBusinessProfile" p
+             WHERE p."id" = o."customerBusinessProfileId" AND p."firstSeenAt" < ${query.from}))  AS "repeatCustomers"
+        FROM "LoyaltyOperation" o
+       WHERE ${where}`,
 
-  const [newCustomers, repeatProfiles, cardsIssued] = await Promise.all([
-    prisma.customerBusinessProfile.count({
-      where: { businessId: ctx.businessId, firstSeenAt: { gte: query.from, lt: query.to } },
-    }),
-    // People who transacted in the range and existed before it. Distinct profiles, not rows.
-    prisma.loyaltyOperation.groupBy({
-      by: ["customerBusinessProfileId"],
-      where: { ...scope, profile: { firstSeenAt: { lt: query.from } } },
-    }),
+    prisma.$queryRaw<LocationRow[]>`
+      SELECT o."locationId"                                                                  AS "locationId",
+             COUNT(DISTINCT o."transactionGroupId")
+               FILTER (WHERE o."kind" <> 'REVERSAL')                                         AS "transactions",
+             COUNT(*) FILTER (WHERE o."countsAsVisit")                                       AS "visits",
+             COUNT(*) FILTER (WHERE o."kind" = 'REWARD_REDEEMED' AND ${NOT_REVERSED})        AS "redemptions"
+        FROM "LoyaltyOperation" o
+       WHERE ${where}
+       GROUP BY o."locationId"`,
+
+    prisma.$queryRaw<TemplateRow[]>`
+      SELECT o."templateId"                                                                  AS "templateId",
+             COUNT(DISTINCT o."transactionGroupId")
+               FILTER (WHERE o."kind" <> 'REVERSAL')                                         AS "transactions",
+             COUNT(*) FILTER (WHERE o."kind" = 'REWARD_REDEEMED' AND ${NOT_REVERSED})        AS "redemptions"
+        FROM "LoyaltyOperation" o
+       WHERE ${where}
+       GROUP BY o."templateId"`,
+
+    // Cards and profiles are not ledger rows, so they are ordinary counts on their own indexes.
     prisma.customerCard.count({
       where: {
         businessId: ctx.businessId,
@@ -198,11 +260,6 @@ export async function getBusinessMetrics(ctx: TenantContext, query: MetricsQuery
         ...(query.templateId ? { templateId: query.templateId } : {}),
       },
     }),
-  ]);
-
-  const [byLocationGroups, byTemplateGroups, cardsByTemplate] = await Promise.all([
-    prisma.loyaltyOperation.groupBy({ by: ["locationId", "transactionGroupId"], where: scope }),
-    prisma.loyaltyOperation.groupBy({ by: ["templateId", "transactionGroupId"], where: scope }),
     prisma.customerCard.groupBy({
       by: ["templateId"],
       where: {
@@ -212,58 +269,64 @@ export async function getBusinessMetrics(ctx: TenantContext, query: MetricsQuery
       },
       _count: { _all: true },
     }),
+    prisma.location.findMany({ where: { businessId: ctx.businessId }, select: { id: true, name: true } }),
+    prisma.programTemplate.findMany({
+      where: { businessId: ctx.businessId, ...(query.templateId ? { id: query.templateId } : {}) },
+      select: { id: true, name: true, cardType: true },
+    }),
   ]);
 
-  const visitsByLocation = await prisma.loyaltyOperation.groupBy({
-    by: ["locationId"],
-    where: { ...scope, countsAsVisit: true },
-    _count: { _all: true },
+  const newCustomers = await prisma.customerBusinessProfile.count({
+    where: { businessId: ctx.businessId, firstSeenAt: { gte: query.from, lt: query.to } },
   });
 
-  const countBy = <K extends string>(rows: { [P in K]: string }[], key: K): Map<string, number> => {
-    const out = new Map<string, number>();
-    for (const row of rows) out.set(row[key], (out.get(row[key]) ?? 0) + 1);
-    return out;
-  };
+  // An empty range produces no row from an aggregate with GROUP BY, and one all-zero row from one
+  // without. Both are handled rather than assumed.
+  const h = headline[0];
+  const groups = num(h?.groups ?? 0);
+  const reversals = num(h?.reversalGroups ?? 0);
 
-  const groupsPerLocation = countBy(byLocationGroups, "locationId");
-  const groupsPerTemplate = countBy(byTemplateGroups, "templateId");
-  const redemptionsPerLocation = countBy(redemptions, "locationId");
-  const redemptionsPerTemplate = countBy(redemptions, "templateId");
-  const visitsPerLocation = new Map(visitsByLocation.map((v) => [v.locationId, v._count._all]));
+  const locationNames = new Map(locations.map((l) => [l.id, l.name]));
   const cardsPerTemplate = new Map(cardsByTemplate.map((c) => [c.templateId, c._count._all]));
-
-  const awarded = (unit: UnitType) => awards.find((a) => a.unitType === unit)?._sum.quantity ?? 0;
 
   return {
     range: { from: query.from, to: query.to },
-    transactions: groups.length - reversals,
+    transactions: groups - reversals,
     reversals,
-    visits,
+    visits: num(h?.visits ?? 0),
     newCustomers,
-    repeatCustomers: repeatProfiles.length,
+    repeatCustomers: num(h?.repeatCustomers ?? 0),
     cardsIssued,
-    rewardsRedeemed: redemptions.length,
-    rewardValueMinorRedeemed: redemptions.reduce((sum, r) => sum + (r.redemptionValueMinor ?? 0), 0),
-    unitsAwarded: { stamps: awarded(UnitType.STAMP), points: awarded(UnitType.POINT) },
-    byLocation: locations
-      .map((l) => ({
-        locationId: l.id,
-        name: l.name,
-        transactions: groupsPerLocation.get(l.id) ?? 0,
-        visits: visitsPerLocation.get(l.id) ?? 0,
-        rewardsRedeemed: redemptionsPerLocation.get(l.id) ?? 0,
-      }))
-      .filter((l) => l.transactions > 0 || l.visits > 0 || l.rewardsRedeemed > 0),
+    rewardsRedeemed: num(h?.redemptions ?? 0),
+    rewardValueMinorRedeemed: num(h?.redemptionValue ?? 0),
+    unitsAwarded: { stamps: num(h?.stamps ?? 0), points: num(h?.points ?? 0) },
+    /*
+     * Driven by the aggregate rows, not by the location list: a counter with nothing in the range
+     * produces no row and therefore no line, which is what the previous `.filter(...)` achieved by
+     * building every line and throwing the empty ones away. A location the aggregate names but the
+     * business no longer lists cannot occur — `locationId` is a foreign key — so a missing name is
+     * an invariant break rather than a case to paper over, and it is left visible as an empty name.
+     */
+    byLocation: byLocationRows.map((row) => ({
+      locationId: row.locationId,
+      name: locationNames.get(row.locationId) ?? "",
+      transactions: num(row.transactions),
+      visits: num(row.visits),
+      rewardsRedeemed: num(row.redemptions),
+    })),
     byTemplate: templates
-      .map((t) => ({
-        templateId: t.id,
-        name: t.name,
-        cardType: t.cardType,
-        cardsIssued: cardsPerTemplate.get(t.id) ?? 0,
-        transactions: groupsPerTemplate.get(t.id) ?? 0,
-        rewardsRedeemed: redemptionsPerTemplate.get(t.id) ?? 0,
-      }))
+      .map((t) => {
+        const row = byTemplateRows.find((r) => r.templateId === t.id);
+        return {
+          templateId: t.id,
+          name: t.name,
+          cardType: t.cardType,
+          cardsIssued: cardsPerTemplate.get(t.id) ?? 0,
+          transactions: num(row?.transactions ?? 0),
+          rewardsRedeemed: num(row?.redemptions ?? 0),
+        };
+      })
+      // A program with no cards and no activity in the range is not a line on a dashboard.
       .filter((t) => t.cardsIssued > 0 || t.transactions > 0 || t.rewardsRedeemed > 0),
   };
 }

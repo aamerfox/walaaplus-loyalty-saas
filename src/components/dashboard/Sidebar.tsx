@@ -2,7 +2,7 @@
 
 import { useTranslations } from "next-intl";
 import { Link, usePathname } from "@/i18n/routing";
-import { CreditCard, LayoutDashboard, MapPin, ScanLine, ShieldCheck, Users } from "lucide-react";
+import { CreditCard, Filter, LayoutDashboard, MapPin, ScanLine, ShieldCheck, Users } from "lucide-react";
 import { Wordmark } from "@/components/brand/Wordmark";
 import { cn } from "@/lib/utils";
 import SignOutButton from "./SignOutButton";
@@ -37,6 +37,7 @@ export default function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
     { name: t("programs"), href: "/business/programs", icon: CreditCard },
     { name: t("scanner"), href: "/scanner", icon: ScanLine },
     { name: t("customers"), href: "/business/customers", icon: Users },
+    { name: t("segments"), href: "/business/segments", icon: Filter },
     { name: t("locations"), href: "/business/locations", icon: MapPin },
     { name: t("team"), href: "/business/team", icon: ShieldCheck },
   ];

@@ -217,11 +217,22 @@ export async function findCardBySerial(ctx: TenantContext, serialNumber: string)
 
 export interface CustomerListItem {
   customerBusinessProfileId: string;
-  customerCardId: string | null;
   firstName: string | null;
   lastName: string | null;
   phone: string;
+  /** How many programs this customer holds a card in. One row per person, not per card. */
+  cardCount: number;
+  /**
+   * Balances summed across every card this customer holds.
+   *
+   * Stamps, points and rewards are reported separately and never added together: they are three
+   * different things and a single "balance" column would be a number with no meaning. A customer
+   * with a stamp card and a points card is ONE row, because `CustomerBusinessProfile` is one person
+   * per business — which is also why the directory used to be wrong. It read `cards[0]` and showed
+   * whichever card happened to be oldest, so a customer's points were invisible behind their stamps.
+   */
   stampBalance: number;
+  pointBalance: number;
   rewardBalance: number;
   firstSeenAt: Date;
   lastSeenAt: Date | null;
@@ -235,6 +246,8 @@ export interface ListPage<T> {
 
 const MAX_PAGE = 100;
 const DEFAULT_PAGE = 25;
+/** Longer than any name this product stores, and short enough that a search is never a weapon. */
+export const MAX_SEARCH_LENGTH = 80;
 
 function pageSize(limit: number | undefined): number {
   if (limit === undefined) return DEFAULT_PAGE;
@@ -259,7 +272,12 @@ export async function listCustomers(
   }
 
   const take = pageSize(opts.limit);
-  const search = opts.search?.trim();
+  /*
+   * Bounded before it reaches the database. A `contains` over an unbounded string is a scan whose
+   * cost the caller chooses, and 80 characters is already longer than any name this product stores
+   * (`firstName` and `lastName` are capped at 80 on write).
+   */
+  const search = opts.search?.trim().slice(0, MAX_SEARCH_LENGTH) || undefined;
   const phone = search ? tryNormalizeSyrianPhone(search) : null;
 
   const profiles = await prisma.customerBusinessProfile.findMany({
@@ -284,8 +302,15 @@ export async function listCustomers(
       firstSeenAt: true,
       lastSeenAt: true,
       customer: { select: { normalizedPhone: true } },
-      cards: { select: { id: true, stampBalance: true, rewardBalance: true }, orderBy: { createdAt: "asc" }, take: 1 },
+      /*
+       * Every card, not the first. Prisma reads them in ONE extra query for the whole page, so this
+       * is two round trips regardless of the page size — not an N+1. No token is selected here, and
+       * none ever should be: the directory is a list, and a card link is a capability.
+       */
+      cards: { select: { stampBalance: true, pointBalance: true, rewardBalance: true } },
     },
+    // `id` ascending is a total order over an immutable key, which is what makes the cursor stable:
+    // a customer enrolled while a merchant is on page two cannot shift the rows behind them.
     orderBy: { id: "asc" },
     take: take + 1,
     ...(opts.cursor ? { cursor: { id: opts.cursor }, skip: 1 } : {}),
@@ -293,12 +318,13 @@ export async function listCustomers(
 
   const items = profiles.slice(0, take).map((p) => ({
     customerBusinessProfileId: p.id,
-    customerCardId: p.cards[0]?.id ?? null,
     firstName: p.firstName,
     lastName: p.lastName,
     phone: formatSyrianPhone(p.customer.normalizedPhone),
-    stampBalance: p.cards[0]?.stampBalance ?? 0,
-    rewardBalance: p.cards[0]?.rewardBalance ?? 0,
+    cardCount: p.cards.length,
+    stampBalance: p.cards.reduce((sum, c) => sum + c.stampBalance, 0),
+    pointBalance: p.cards.reduce((sum, c) => sum + c.pointBalance, 0),
+    rewardBalance: p.cards.reduce((sum, c) => sum + c.rewardBalance, 0),
     firstSeenAt: p.firstSeenAt,
     lastSeenAt: p.lastSeenAt,
   }));

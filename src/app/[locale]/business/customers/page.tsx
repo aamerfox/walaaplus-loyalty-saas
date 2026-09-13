@@ -71,6 +71,10 @@ export default async function CustomersPage({
         </Toolbar>
       </form>
 
+      <p className="text-xs text-ink-muted" data-testid="customers-legend">
+        {t("balancesLegend")}
+      </p>
+
       {page.items.length === 0 ? (
         <EmptyState testId="customers-empty" title={t("emptyTitle")} body={t("empty")} />
       ) : (
@@ -79,7 +83,9 @@ export default async function CustomersPage({
             <tr>
               <Th>{t("name")}</Th>
               <Th>{t("phone")}</Th>
+              <Th className="hidden sm:table-cell">{t("programs")}</Th>
               <Th>{t("stamps")}</Th>
+              <Th>{t("points")}</Th>
               <Th>{t("rewards")}</Th>
               <Th className="hidden sm:table-cell">{t("joined")}</Th>
               <Th className="text-end">{tc("actions")}</Th>
@@ -93,20 +99,21 @@ export default async function CustomersPage({
                   {/* A phone number is Latin digits in both locales; `dir="ltr"` keeps the + at the front. */}
                   <span dir="ltr">{item.phone}</span>
                 </Td>
+                <Td className="hidden tabular-nums text-ink-muted sm:table-cell">{item.cardCount}</Td>
                 <Td className="tabular-nums">{item.stampBalance}</Td>
+                <Td className="tabular-nums">{item.pointBalance}</Td>
                 <Td className="tabular-nums font-semibold text-success-ink">{item.rewardBalance}</Td>
                 <Td className="hidden tabular-nums text-ink-muted sm:table-cell">
                   {item.firstSeenAt.toISOString().slice(0, 10)}
                 </Td>
                 <Td className="text-end">
-                  {item.customerCardId !== null && (
-                    <Link
-                      href={`/${locale}/business/customers/${item.customerCardId}`}
-                      className="font-semibold text-accent-ink underline-offset-4 hover:underline"
-                    >
-                      {t("view")}
-                    </Link>
-                  )}
+                  {/* The customer, not one of their cards: a person with two programs is one record. */}
+                  <Link
+                    href={`/${locale}/business/customers/${item.customerBusinessProfileId}`}
+                    className="font-semibold text-accent-ink underline-offset-4 hover:underline"
+                  >
+                    {t("view")}
+                  </Link>
                 </Td>
               </tr>
             ))}

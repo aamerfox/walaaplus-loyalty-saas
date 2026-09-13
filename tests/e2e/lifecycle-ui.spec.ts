@@ -46,15 +46,22 @@ test.describe("counters", () => {
     await page.goto("/en/business/locations");
     await expect(page.getByTestId("location-list")).toBeVisible();
 
-    // ── open one ─────────────────────────────────────────────────────────────
-    await page.getByTestId("location-name").fill("Branch");
+    /*
+     * ── open one ────────────────────────────────────────────────────────────
+     *
+     * Named "Old town", not "Branch". Phase 2 renamed the entity in the UI copy, so the Main row now
+     * reads "Main branch only" — and Playwright's `hasText` is a case-insensitive SUBSTRING match,
+     * which made a row filter of "Branch" select both rows. A fixture name that appears in the
+     * product's own vocabulary is a fragile fixture name.
+     */
+    await page.getByTestId("location-name").fill("Old town");
     await page.getByTestId("location-address").fill("Old city");
     await page.getByTestId("location-submit").click();
     await expect(page.getByTestId("location-message")).toBeVisible();
-    await expect(page.getByText("Branch", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("Old town", { exact: true }).first()).toBeVisible();
 
     // ── rename it ────────────────────────────────────────────────────────────
-    const branchCard = page.locator('[data-testid="location-list"] > li', { hasText: "Branch" });
+    const branchCard = page.locator('[data-testid="location-list"] > li', { hasText: "Old town" });
     await branchCard.getByTestId("location-edit").click();
     await branchCard.getByTestId("location-edit-name").fill("Second counter");
     await branchCard.getByTestId("location-save").click();

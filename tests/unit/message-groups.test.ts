@@ -40,6 +40,10 @@ const GROUPS: { path: string; values: readonly string[] }[] = [
   { path: "Programs.form.cardTypeHint", values: Object.values(CardType) },
   { path: "Dashboard.cardType", values: Object.values(CardType) },
   { path: "Scanner.cardType", values: Object.values(CardType) },
+  // Added in Phase 2 with the customer record, which badges each card with its type. It was
+  // missing from both locales when the screen shipped, and the screenshot showed the key name.
+  { path: "Customers.cardType", values: Object.values(CardType) },
+  { path: "Segments.cardType", values: Object.values(CardType) },
   { path: "Programs.statuses", values: Object.values(TemplateStatus) },
   { path: "Staff.roles", values: Object.values(MembershipRole) },
   { path: "Programs.form.earnMode", values: ["MANUAL", "PER_VISIT", "SPEND_BLOCK"] },

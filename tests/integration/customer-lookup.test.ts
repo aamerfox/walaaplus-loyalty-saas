@@ -51,7 +51,7 @@ describe("customer lookup", () => {
   let rival: StampCafeFixture;
   /** One person who is a customer of BOTH businesses. */
   let sharedPhone: string;
-  let hereCard: { customerCardId: string; qrToken: string; shareToken: string; serialNumber: string };
+  let hereCard: { customerCardId: string; customerBusinessProfileId: string; qrToken: string; shareToken: string; serialNumber: string };
   let thereCard: { customerCardId: string; qrToken: string; serialNumber: string };
 
   beforeAll(async () => {
@@ -145,7 +145,13 @@ describe("customer lookup", () => {
     it("lists this business's customers only", async () => {
       const page = await listCustomers(cafe.ctx);
       expect(page.items.length).toBeGreaterThanOrEqual(1);
-      expect(page.items.some((i) => i.customerCardId === hereCard.customerCardId)).toBe(true);
+      /*
+       * Identified by PROFILE, not by card. Phase 2 made the directory one row per person: a
+       * customer holding a stamp card and a points card is one customer, and the row that used to
+       * carry `customerCardId` carried whichever card happened to be oldest.
+       */
+      expect(page.items.some((i) => i.customerBusinessProfileId === hereCard.customerBusinessProfileId)).toBe(true);
+      expect(page.items.every((i) => i.cardCount >= 1)).toBe(true);
       const ids = page.items.map((i) => i.customerBusinessProfileId);
       // Nothing from the rival business appears, though the same person is in both.
       const rivalProfiles = await prisma.customerBusinessProfile.findMany({
@@ -157,10 +163,10 @@ describe("customer lookup", () => {
 
     it("searches by name and by phone", async () => {
       const byName = await listCustomers(cafe.ctx, { search: "ليلى" });
-      expect(byName.items.some((i) => i.customerCardId === hereCard.customerCardId)).toBe(true);
+      expect(byName.items.some((i) => i.customerBusinessProfileId === hereCard.customerBusinessProfileId)).toBe(true);
 
       const byPhone = await listCustomers(cafe.ctx, { search: sharedPhone });
-      expect(byPhone.items.some((i) => i.customerCardId === hereCard.customerCardId)).toBe(true);
+      expect(byPhone.items.some((i) => i.customerBusinessProfileId === hereCard.customerBusinessProfileId)).toBe(true);
 
       const noMatch = await listCustomers(cafe.ctx, { search: "nobody-by-this-name" });
       expect(noMatch.items).toEqual([]);
