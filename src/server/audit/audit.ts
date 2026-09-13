@@ -127,6 +127,18 @@ export const AuditAction = {
   /** A card's invitation link was revoked. The link stops working; the row stays. */
   SHARE_LINK_REVOKED: "share_link.revoked",
 
+  // ── Phase 3A Prompt 2: referral attribution. Still no reward, anywhere. ───
+  /**
+   * A newly issued card was recorded as having arrived with an invitation.
+   *
+   * Carries the attribution id and the method. **Not the capability, not its digest, and not the
+   * referring card or link** — the referring side is exactly what staff are not shown, and an audit
+   * row is read by more people and kept far longer than the request that wrote it.
+   */
+  REFERRAL_ATTRIBUTED: "referral.attributed",
+  /** An attribution was withdrawn by an owner or a manager. Both rows stay. */
+  REFERRAL_VOIDED: "referral.voided",
+
   SEGMENT_CREATED: "segment.created",
   SEGMENT_UPDATED: "segment.updated",
   SEGMENT_ARCHIVED: "segment.archived",

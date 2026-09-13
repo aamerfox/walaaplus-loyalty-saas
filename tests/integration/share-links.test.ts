@@ -333,7 +333,15 @@ describe("revoking", () => {
 
     const owner = migratorPrisma();
     await expect(owner.$executeRawUnsafe(`DELETE FROM "CardShareLink"`)).rejects.toThrow(/never removed/);
-    await expect(owner.$executeRawUnsafe(`TRUNCATE "CardShareLink"`)).rejects.toThrow(/never removed/);
+    /*
+     * TRUNCATE is refused twice over since Phase 3A Prompt 2. PostgreSQL now stops it on the foreign
+     * key `ReferralAttribution` holds against this table, which fires before the no-truncate trigger
+     * gets a turn — so either message is a pass, and the FK is the stronger of the two: it cannot be
+     * disabled by anyone who cannot also drop a constraint.
+     */
+    await expect(owner.$executeRawUnsafe(`TRUNCATE "CardShareLink"`)).rejects.toThrow(
+      /never removed|cannot truncate a table referenced in a foreign key/,
+    );
     // And the owner is refused the same rewrite the app is.
     await expect(
       owner.$executeRawUnsafe(`UPDATE "CardShareLink" SET "tokenDigest" = 'x'`),
@@ -465,12 +473,29 @@ describe("the invitation grants nothing and enrols nobody", () => {
     });
   });
 
-  it("has no referral model to credit anybody in", async () => {
-    // Asserted structurally: if a referral table or column ever appears, this test is where the
-    // phase that adds it has to come and say so. D15 owns the policy.
+  it("has a referral model that can credit nobody", async () => {
+    /*
+     * This test used to require that NO referral table existed, so that the phase adding one had to
+     * come here and say so. Phase 3A Prompt 2 is that phase: `ReferralAttribution` now exists and
+     * records that a customer arrived with an invitation.
+     *
+     * So the assertion moved rather than being deleted. What it holds now is the part that still
+     * matters: the table can record an arrival and **cannot credit anybody**. No amount, no
+     * currency, no points, no reward, no eligibility flag and no expiry — because D15 still owns the
+     * policy, and a column added in anticipation of one would be that decision made by a schema.
+     */
     const tables = await migratorPrisma().$queryRaw<{ table_name: string }[]>`
       SELECT table_name FROM information_schema.tables
        WHERE table_schema = 'public' AND table_name ILIKE '%referral%'`;
-    expect(tables).toEqual([]);
+    expect(tables.map((t) => t.table_name)).toEqual(["ReferralAttribution"]);
+
+    const columns = await migratorPrisma().$queryRaw<{ column_name: string }[]>`
+      SELECT column_name FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'ReferralAttribution'`;
+    for (const { column_name } of columns) {
+      expect(column_name, `${column_name} looks like a reward`).not.toMatch(
+        /amount|value|minor|currency|point|stamp|reward|credit|bonus|payout|eligib|expir/i,
+      );
+    }
   });
 });

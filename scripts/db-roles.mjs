@@ -43,6 +43,7 @@ const APPEND_ONLY_TABLES = [
   "CampaignApproval",
   "CampaignAudienceSnapshot",
   "CampaignAudienceMember",
+  "ReferralAttribution",
 ];
 /**
  * Tables whose rows may be updated but must never be removed.

@@ -119,6 +119,14 @@ export default function ScannerClient({
   const [enrollFirstName, setEnrollFirstName] = useState("");
   const [enrollLastName, setEnrollLastName] = useState("");
   const [enrollConsent, setEnrollConsent] = useState(false);
+  /**
+   * The invitation the customer is showing, if any.
+   *
+   * Held as whatever staff typed, scanned or pasted — a full `https://…/share#<capability>`, or
+   * just the value after the `#` if their scanner is configured that way. It is normalised to the
+   * fragment at send time, never here, so the field keeps showing what they actually entered.
+   */
+  const [referralInput, setReferralInput] = useState("");
   /** The customer's own card link, shown after enrolling or after a staff restore. */
   const [cardLink, setCardLink] = useState<{ url: string; qr: string } | null>(null);
   const [linkCopied, setLinkCopied] = useState(false);
@@ -373,6 +381,20 @@ export default function ScannerClient({
    */
   const enrollAtCounter = useCallback(async () => {
     if (!enrollPhone || busy) return;
+    /*
+     * The fragment, extracted HERE — in the browser, before anything is sent.
+     *
+     * A capability in a path or a query string is written into every access log, proxy log and
+     * error report between this device and the server. Taking everything after the `#` and sending
+     * only that, in a POST body, is what keeps the one authenticated route allowed to see an
+     * invitation from also being the one that records it somewhere nobody meant.
+     *
+     * A bare token with no `#` is accepted too: a hardware scanner can be configured to emit one,
+     * and refusing it would push staff towards pasting the whole URL somewhere else to trim it.
+     */
+    const referralToken = referralInput.includes("#")
+      ? referralInput.slice(referralInput.indexOf("#") + 1).trim()
+      : referralInput.trim();
     setBusy(true);
     setFeedback(null);
     try {
@@ -385,6 +407,7 @@ export default function ScannerClient({
           firstName: enrollFirstName.trim() || undefined,
           lastName: enrollLastName.trim() || undefined,
           marketingConsent: enrollConsent,
+          referralToken: referralToken || undefined,
         }),
       });
       if (!response.ok) {
@@ -395,10 +418,12 @@ export default function ScannerClient({
         created: boolean;
         cardUrl: string;
         cardQrSvg: string;
+        referral?: "RECORDED" | "NOT_ACCEPTED";
       };
       setEnrollFirstName("");
       setEnrollLastName("");
       setEnrollConsent(false);
+      setReferralInput("");
 
       /*
        * Load the card itself, so the cashier can award a stamp without searching again. This runs
@@ -408,13 +433,29 @@ export default function ScannerClient({
        */
       await lookup({ phone: enrollPhone });
       setCardLink({ url: result.cardUrl, qr: result.cardQrSvg });
-      setFeedback({ tone: "ok", text: result.created ? t("enrolled") : t("enrolledAlready") });
+
+      /*
+       * The enrolment is what succeeded, so it is what the message leads with. An invitation that
+       * could not be used is a second sentence, not a failure — and it says only that, because the
+       * referring customer is never named, shown or implied to a member of staff.
+       */
+      const enrolled = result.created ? t("enrolled") : t("enrolledAlready");
+      const referralNote =
+        result.referral === "RECORDED"
+          ? ` ${t("referralRecorded")}`
+          : result.referral === "NOT_ACCEPTED"
+            ? ` ${t("referralNotAccepted")}`
+            : "";
+      setFeedback({
+        tone: result.referral === "NOT_ACCEPTED" ? "warn" : "ok",
+        text: `${enrolled}${referralNote}`,
+      });
     } catch {
       setFeedback({ tone: "error", text: tc("genericError") });
     } finally {
       setBusy(false);
     }
-  }, [businessId, busy, describeFailure, enrollConsent, enrollFirstName, enrollLastName, enrollPhone, lookup, t, tc]);
+  }, [businessId, busy, describeFailure, enrollConsent, enrollFirstName, enrollLastName, enrollPhone, lookup, referralInput, t, tc]);
 
   /**
    * Show a customer their own card link again — the only restore path Phase 1a has, and the reason
@@ -669,6 +710,30 @@ export default function ScannerClient({
             </label>
             <p className="text-xs text-white/55">{tConsent("privacyNote")}</p>
             <p className="text-xs text-white/55">{t("enrollReadAloud")}</p>
+
+            {/*
+              * Optional, and last, because it is the only field that is not about the person in
+              * front of you. Staff paste or scan whatever the customer is showing; the fragment is
+              * taken from it on this device and the rest never leaves the browser.
+              */}
+            <div className="space-y-1">
+              <label htmlFor="scanner-referral" className="block text-xs uppercase tracking-wide text-white/55">
+                {t("referralLabel")}
+              </label>
+              <input
+                id="scanner-referral"
+                value={referralInput}
+                onChange={(e) => setReferralInput(e.target.value)}
+                placeholder={t("referralPlaceholder")}
+                maxLength={400}
+                dir="ltr"
+                autoComplete="off"
+                spellCheck={false}
+                data-testid="scanner-referral-input"
+                className="w-full rounded-xl bg-navy-950/60 px-4 py-3 text-sm ring-1 ring-white/10 outline-none focus:ring-turquoise-500"
+              />
+              <p className="text-xs text-white/55">{t("referralHint")}</p>
+            </div>
 
             <button
               type="button"

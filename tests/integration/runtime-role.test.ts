@@ -154,6 +154,7 @@ describe("restricted runtime database role", () => {
       `"CampaignApproval"`,
       `"CampaignAudienceSnapshot"`,
       `"CampaignAudienceMember"`,
+      `"ReferralAttribution"`,
     ])(
       "has exactly SELECT and INSERT on %s, the other append-only histories",
       async (table) => {
@@ -252,6 +253,10 @@ describe("restricted runtime database role", () => {
       ["UPDATE an audience member", `UPDATE "CampaignAudienceMember" SET "consentState" = 'GRANTED'`],
       ["DELETE audience members", `DELETE FROM "CampaignAudienceMember"`],
       ["TRUNCATE audience members", `TRUNCATE "CampaignAudienceMember"`],
+      ["UPDATE a referral attribution", `UPDATE "ReferralAttribution" SET "reason" = 'edited'`],
+      ["DELETE referral attributions", `DELETE FROM "ReferralAttribution"`],
+      ["TRUNCATE referral attributions", `TRUNCATE "ReferralAttribution"`],
+      ["disable the referral append-only trigger", `ALTER TABLE "ReferralAttribution" DISABLE TRIGGER USER`],
       ["DELETE an invitation capability", `DELETE FROM "CardShareLink"`],
       ["TRUNCATE invitation capabilities", `TRUNCATE "CardShareLink"`],
       ["disable the share-link triggers", `ALTER TABLE "CardShareLink" DISABLE TRIGGER USER`],

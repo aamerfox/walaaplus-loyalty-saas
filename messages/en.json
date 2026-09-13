@@ -698,6 +698,31 @@
     "welcomePoints": "{count} points",
     "welcomeStamps": "{count} stamps"
   },
+  "Referral": {
+    "attributed": "Recorded as arriving with an invitation",
+    "countsAggregate": "A count only. This product keeps no list of who invited whom, and awards nothing for an invitation.",
+    "countsBody": "{count, plural, =0 {No customers have been recorded as arriving with an invitation} one {1 customer has been recorded as arriving with an invitation} other {# customers have been recorded as arriving with an invitation}}.",
+    "countsTitle": "Referral records",
+    "countsWithdrawn": "{count, plural, =0 {} one {1 record has since been withdrawn} other {# records have since been withdrawn}}.",
+    "error": "That did not work. Try again.",
+    "method": {
+      "COUNTER_PRESENTED_INVITATION": "Shown at the counter"
+    },
+    "noReferrer": "Who sent the invitation is not shown here, and is not part of this record.",
+    "noReward": "Nothing is awarded for this. It records how the customer arrived, and no more.",
+    "none": "No invitation was recorded when this card was issued.",
+    "recordedBy": "By",
+    "recordedOn": "Recorded",
+    "title": "How they arrived",
+    "void": "Withdraw this record",
+    "voidConfirm": "Withdraw it? The original record stays in the history and a withdrawal is written beside it. The card cannot be attributed again afterwards.",
+    "voidForbidden": "Only an owner or a manager may withdraw a referral record.",
+    "voidReason": "Reason",
+    "voidReasonHint": "Optional, for your colleagues. Never write a customer name or a phone number here.",
+    "voidYes": "Yes, withdraw it",
+    "voided": "This record was withdrawn",
+    "voidedOn": "Withdrawn"
+  },
   "Register": {
     "back": "Back",
     "businessName": "Business name",
@@ -781,6 +806,11 @@
     "redeem": "Redeem reward",
     "redeemTitle": "Spend points",
     "redeemed": "Reward redeemed",
+    "referralHint": "Only if the customer is showing one. Nothing is given for it yet.",
+    "referralLabel": "Invitation (optional)",
+    "referralNotAccepted": "That invitation could not be used, so nothing was recorded for it.",
+    "referralPlaceholder": "Paste or scan the invitation link",
+    "referralRecorded": "Invitation recorded.",
     "revealCardLink": "Show the card link",
     "reverse": "Undo last operation",
     "reverseHint": "Reverses the most recent operation on this card",

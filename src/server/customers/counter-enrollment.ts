@@ -52,6 +52,8 @@ export interface CounterEnrollmentResult {
   /** True when this call issued the card; false when the customer already had one. */
   created: boolean;
   customerCardId: string;
+  /** The profile behind the card. Needed by referral attribution, which links by internal id only. */
+  customerBusinessProfileId: string;
   serialNumber: string;
   /** Which program the card belongs to, so the counter screen knows which balance to show. */
   cardType: CardType;
@@ -133,6 +135,7 @@ export async function enrollAtCounter(
   return {
     created: result.created,
     customerCardId: result.customerCardId,
+    customerBusinessProfileId: result.customerBusinessProfileId,
     serialNumber: result.serialNumber,
     cardType: result.cardType,
     templateId: result.templateId,

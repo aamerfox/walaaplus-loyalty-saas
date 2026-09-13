@@ -81,6 +81,11 @@ describe("the invitation page promises nothing it cannot keep", () => {
   const FORBIDDEN_EN = /\breward|\bearn\b|\bbonus\b|\bfree\b|\bdiscount\b|\bcashback\b|\bpoints? for\b|\bcredit\b/i;
   const FORBIDDEN_AR = /مكافأ|مكافآ|اربح|تربح|خصم|مجان|رصيد مجاني|نقاط مقابل/;
 
+  /** Only the scanner strings this phase added; the rest of that screen is not about referrals. */
+  function pickReferral(group: Record<string, unknown>): Record<string, unknown> {
+    return Object.fromEntries(Object.entries(group).filter(([key]) => key.startsWith("referral")));
+  }
+
   function leaves(node: unknown, path: string[] = []): [string, string][] {
     if (typeof node === "string") return [[path.join("."), node]];
     if (node && typeof node === "object") {
@@ -90,12 +95,23 @@ describe("the invitation page promises nothing it cannot keep", () => {
   }
 
   it("says invite and share, never earn", () => {
+    /*
+     * Widened in Phase 3A Prompt 2 to cover the two groups that describe an attribution. Recording
+     * that a customer arrived with an invitation is the closest this product comes to a referral
+     * programme, which makes it exactly where a reward would first be implied by accident — on a
+     * counter screen a cashier reads aloud, or on a customer record a merchant draws conclusions
+     * from. D15 owns the policy; until it exists, neither may hint at one.
+     */
     for (const [locale, messages, forbidden] of [
       ["en", en.Share, FORBIDDEN_EN],
       ["ar", ar.Share, FORBIDDEN_AR],
+      ["en", en.Referral, FORBIDDEN_EN],
+      ["ar", ar.Referral, FORBIDDEN_AR],
+      ["en", pickReferral(en.Scanner), FORBIDDEN_EN],
+      ["ar", pickReferral(ar.Scanner), FORBIDDEN_AR],
     ] as const) {
       for (const [key, value] of leaves(messages)) {
-        expect(value, `${locale} Share.${key} promises a reward: "${value}"`).not.toMatch(forbidden);
+        expect(value, `${locale} ${key} promises a reward: "${value}"`).not.toMatch(forbidden);
       }
     }
   });

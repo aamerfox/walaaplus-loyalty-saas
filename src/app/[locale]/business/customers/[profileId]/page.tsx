@@ -8,7 +8,9 @@ import { getConsentHistory, getConsentStatus } from "@/server/consent/consent";
 import { getCustomerProfile, listProfileActivity } from "@/server/customers/customer-360";
 import { isAppError } from "@/server/errors";
 import { resolveScannerContext } from "@/server/tenant/scanner-context";
+import { countReferralAttributions, getCardAttribution } from "@/server/share/referrals";
 import ConsentControls from "./ConsentControls";
+import ReferralPanel from "./ReferralPanel";
 import WalletPassPanel from "./WalletPassPanel";
 
 /**
@@ -65,6 +67,7 @@ export default async function CustomerProfilePage({
   if (!userId) redirect(`/${locale}/auth/login`);
 
   const t = await getTranslations("Customers");
+  const tReferral = await getTranslations("Referral");
   const kinds = await getTranslations("OperationKinds");
   const tConsent = await getTranslations("Consent");
   const resolved = await resolveScannerContext(userId, b ?? null);
@@ -89,6 +92,21 @@ export default async function CustomerProfilePage({
     throw e;
   }
   const mayEditConsent = ctx.permissions.has(Permission.EDIT_CUSTOMERS) && ctx.role !== "CASHIER";
+  // Withdrawing a referral record is a correction to the business's own history, not counter work.
+  const mayVoidReferral = mayEditConsent && (ctx.role === "OWNER" || ctx.role === "MANAGER");
+
+  /*
+   * How each card arrived, and the business-wide count.
+   *
+   * Per card, because an attribution belongs to the card it was recorded against. The count is an
+   * aggregate and stays one: nothing here lists attributions, names a referrer or ranks anybody.
+   */
+  const [attributions, referralCounts] = await Promise.all([
+    Promise.all(
+      profile.cards.map(async (card) => [card.customerCardId, await getCardAttribution(ctx, card.customerCardId)] as const),
+    ).then((entries) => new Map(entries)),
+    countReferralAttributions(ctx),
+  ]);
 
   const numbers = new Intl.NumberFormat(locale === "ar" ? "ar-SY-u-nu-latn" : "en");
   const name = [profile.firstName, profile.lastName].filter(Boolean).join(" ");
@@ -213,10 +231,47 @@ export default async function CustomerProfilePage({
                 {mayEditConsent && card.cardType === CardType.STAMP ? (
                   <WalletPassPanel businessId={ctx.businessId} customerCardId={card.customerCardId} />
                 ) : null}
+
+                {mayEditConsent ? (
+                  <ReferralPanel
+                    businessId={ctx.businessId}
+                    mayVoid={mayVoidReferral}
+                    attribution={(() => {
+                      const found = attributions.get(card.customerCardId) ?? null;
+                      if (!found) return null;
+                      // Serialised for the client boundary. Dates as ISO strings, and still nothing
+                      // about the referring side — there is nothing here to leave out.
+                      return {
+                        id: found.id,
+                        recordedAt: found.recordedAt.toISOString(),
+                        method: found.method,
+                        voided: found.voided,
+                        voidedAt: found.voidedAt?.toISOString() ?? null,
+                        voidReason: found.voidReason,
+                        recordedByName: found.recordedByName,
+                      };
+                    })()}
+                  />
+                ) : null}
               </Card>
             ))}
           </div>
         )}
+
+        {/*
+         * An aggregate, and only an aggregate. There is deliberately no list behind it: a table of
+         * attributions ordered by referrer is a reward programme's report, for a reward programme
+         * that does not exist (D15).
+         */}
+        {mayEditConsent ? (
+          <Notice tone="info" testId="referral-counts">
+            {/* The heading on its own line: run together with the sentence it read as one garbled one. */}
+            <span className="block font-semibold">{tReferral("countsTitle")}</span>
+            {tReferral("countsBody", { count: referralCounts.standing })}{" "}
+            {referralCounts.voided > 0 ? `${tReferral("countsWithdrawn", { count: referralCounts.voided })} ` : ""}
+            {tReferral("countsAggregate")}
+          </Notice>
+        ) : null}
       </Section>
 
       <Section title={tConsent("title")} description={tConsent("subtitle")} testId="customer-consent">

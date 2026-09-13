@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { enrollAtCounter } from "@/server/customers/counter-enrollment";
+import { recordCounterReferral } from "@/server/share/referrals";
 import { ValidationError } from "@/server/errors";
 import { errorResponse, readJsonObject } from "@/server/http";
 import { enforceStaffLimit } from "@/server/security/staff-limit";
@@ -31,6 +32,23 @@ const enrollSchema = z.strictObject({
   lastName: z.string().trim().max(80).optional(),
   /** Ticked at the counter, by the customer, on the staff member's device. */
   marketingConsent: z.boolean().optional(),
+  /**
+   * The invitation the customer showed, if they showed one.
+   *
+   * **In the body, and the fragment only.** The scanner strips everything before the `#` before
+   * sending, so a capability never reaches a path, a query string, an access log or a `Referer`
+   * header — the same property the public page relies on, held on the one authenticated route that
+   * is allowed to see one at all.
+   *
+   * Resolved once, server-side, and discarded. It is never stored, never audited, never logged and
+   * never returned.
+   *
+   * Bounded but **not shape-checked here**, deliberately. A malformed invitation must not turn a
+   * successful enrolment into a 400: the customer is standing at the till and has earned their card
+   * whatever they scanned. The service applies the real shape rule and answers `NOT_ACCEPTED`, the
+   * same as every other refusal.
+   */
+  referralToken: z.string().trim().min(1).max(400).optional(),
 });
 
 export async function POST(req: Request) {
@@ -52,9 +70,28 @@ export async function POST(req: Request) {
       marketingConsent: input.marketingConsent === true,
     });
 
+    /*
+     * Attribution, and only for a card this call actually issued.
+     *
+     * A customer who already had a card was not referred by anybody today, so a repeat lookup
+     * records nothing — attributing one would be retrospective attribution wearing a counter's
+     * clothes. The outcome is one of two values, and an unusable invitation never turns a
+     * successful enrolment into an error: the customer is standing at the till and has their card.
+     */
+    const referral =
+      input.referralToken && result.created
+        ? await recordCounterReferral(ctx, {
+            rawToken: input.referralToken,
+            enrolledCustomerCardId: result.customerCardId,
+            enrolledProfileId: result.customerBusinessProfileId,
+          })
+        : input.referralToken
+          ? ("NOT_ACCEPTED" as const)
+          : undefined;
+
     // 201 when this call issued the card, 200 when the customer already had one. Staff are
     // authorized to know the difference; the public route never was, which is why it is gone.
-    return NextResponse.json(result, { status: result.created ? 201 : 200 });
+    return NextResponse.json({ ...result, referral }, { status: result.created ? 201 : 200 });
   } catch (e) {
     return errorResponse(e);
   }

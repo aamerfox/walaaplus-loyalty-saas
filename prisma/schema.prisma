@@ -229,6 +229,7 @@ model User {
   campaignRevisions CampaignRevision[]         @relation("RevisionAuthor")
   campaignApprovals CampaignApproval[]         @relation("ApprovalDecider")
   shareLinks        CardShareLink[]            @relation("ShareLinkIssuer")
+  referralsRecorded ReferralAttribution[]      @relation("ReferralRecorder")
   audienceSnapshots CampaignAudienceSnapshot[] @relation("SnapshotAuthor")
 }
 
@@ -261,6 +262,7 @@ model Business {
   campaignApprovals  CampaignApproval[]
   audienceSnapshots  CampaignAudienceSnapshot[]
   cardShareLinks     CardShareLink[]
+  referrals          ReferralAttribution[]
   pushMessages       PushMessage[]
   pushSubscriptions  PushSubscription[]
 }
@@ -354,12 +356,13 @@ model CustomerBusinessProfile {
   createdAt              DateTime  @default(now())
   updatedAt              DateTime  @updatedAt
 
-  business            Business                 @relation(fields: [businessId], references: [id])
-  customer            Customer                 @relation(fields: [customerId], references: [id])
-  cards               CustomerCard[]
-  operations          LoyaltyOperation[]
-  consentRecords      ConsentRecord[]
-  audienceMemberships CampaignAudienceMember[]
+  business             Business                 @relation(fields: [businessId], references: [id])
+  customer             Customer                 @relation(fields: [customerId], references: [id])
+  cards                CustomerCard[]
+  operations           LoyaltyOperation[]
+  consentRecords       ConsentRecord[]
+  audienceMemberships  CampaignAudienceMember[]
+  referralAttributions ReferralAttribution[]
 
   @@unique([businessId, customerId])
   @@index([businessId, lastSeenAt])
@@ -515,6 +518,8 @@ model CustomerCard {
   pushSubscriptions PushSubscription[]
   pushDeliveries    PushDelivery[]
   shareLinks        CardShareLink[]
+  referredBy        ReferralAttribution[]   @relation("EnrolledCard")
+  referralsGiven    ReferralAttribution[]   @relation("ReferringCard")
 
   @@unique([customerBusinessProfileId, templateId])
   @@index([businessId, status])
@@ -545,11 +550,68 @@ model CardShareLink {
   revokedAt      DateTime?
   createdAt      DateTime  @default(now())
 
-  business Business     @relation(fields: [businessId], references: [id], onDelete: Restrict)
-  card     CustomerCard @relation(fields: [customerCardId], references: [id], onDelete: Restrict)
-  issuedBy User?        @relation("ShareLinkIssuer", fields: [issuedByUserId], references: [id])
+  business             Business              @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  card                 CustomerCard          @relation(fields: [customerCardId], references: [id], onDelete: Restrict)
+  issuedBy             User?                 @relation("ShareLinkIssuer", fields: [issuedByUserId], references: [id])
+  referralAttributions ReferralAttribution[]
 
   @@index([businessId, issuedAt(sort: Desc)])
+}
+
+/// How an invitation reached the counter. One value, because one flow exists.
+enum ReferralMethod {
+  COUNTER_PRESENTED_INVITATION
+}
+
+/// What a row asserts: the record, or a later row withdrawing one.
+enum ReferralEntry {
+  ATTRIBUTED
+  VOIDED
+}
+
+/// APPEND-ONLY. "This newly issued card was enrolled at a counter where a staff member saw a valid
+/// invitation from that link."
+///
+/// An attribution, not a reward. There is no amount, no points, no expiry, no eligibility flag and
+/// no campaign reference, because no referral reward policy exists (D15) and a column added in
+/// anticipation of one would be a policy nobody decided, written into a schema.
+///
+/// Internal ids only. The referring side is a `CardShareLink` id — never the capability that was
+/// presented and never its digest. No name, phone, serial, balance, URL or money is copied here.
+///
+/// Voiding writes a VOIDED row pointing at the attribution, exactly as a campaign withdrawal does.
+/// Nothing is ever updated or deleted; `referral_attribution_append_only` refuses both.
+model ReferralAttribution {
+  id                      String         @id @default(uuid())
+  businessId              String
+  entry                   ReferralEntry
+  /// The invitation presented, by row id. Never the capability, never its digest.
+  referringShareLinkId    String
+  /// The card that invitation belongs to, denormalised so a later revocation cannot change what
+  /// this row says happened.
+  referringCustomerCardId String
+  enrolledCustomerCardId  String
+  enrolledProfileId       String
+  method                  ReferralMethod
+  /// Set on a VOIDED row: which attribution it withdraws.
+  voidsAttributionId      String?
+  /// Free text from whoever voided one. Never a phone number, never a name.
+  reason                  String?
+  recordedAt              DateTime
+  recordedByUserId        String?
+  createdAt               DateTime       @default(now())
+
+  business        Business                @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  referringLink   CardShareLink           @relation(fields: [referringShareLinkId], references: [id], onDelete: Restrict)
+  referringCard   CustomerCard            @relation("ReferringCard", fields: [referringCustomerCardId], references: [id], onDelete: Restrict)
+  enrolledCard    CustomerCard            @relation("EnrolledCard", fields: [enrolledCustomerCardId], references: [id], onDelete: Restrict)
+  enrolledProfile CustomerBusinessProfile @relation(fields: [enrolledProfileId], references: [id], onDelete: Restrict)
+  voids           ReferralAttribution?    @relation("AttributionVoid", fields: [voidsAttributionId], references: [id], onDelete: Restrict)
+  voidedBy        ReferralAttribution[]   @relation("AttributionVoid")
+  recordedBy      User?                   @relation("ReferralRecorder", fields: [recordedByUserId], references: [id])
+
+  @@index([businessId, recordedAt(sort: Desc)])
+  @@index([referringShareLinkId])
 }
 
 /// APPEND-ONLY. UPDATE and DELETE are rejected by trigger `loyalty_operation_append_only`.
