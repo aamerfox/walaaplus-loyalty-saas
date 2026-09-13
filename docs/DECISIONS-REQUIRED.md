@@ -60,6 +60,8 @@ Service workers, installability and web push **refuse to run without TLS**, exce
 | D2 | **SMS provider for Syria.** Required before automated card delivery, OTP restore or SMS campaigns. Twilio may not serve the market. | ⏸ |
 | D3 | **Email provider.** Required for password reset in the MVP and campaigns later. | ⬜ needed for password reset |
 | D4 | **WhatsApp Business API access.** | ⏸ |
+| D5 | **Archiving a program.** Phase 1b Prompt 3 built pause and resume, and deliberately left `ARCHIVED` unreachable from the product: what should happen to the cards pinned to an archived program's versions — keep earning, freeze at their balance, or be redeemable only — is a merchant-facing decision, not an implementation detail. Nothing is blocked by it today; pausing covers every case a pilot merchant has. | ⬜ |
+| D6 | **Per-actor counter limits.** Prompt 3 bounds one staff account to 60 enrolments and 300 counter writes an hour (finding M-11). They are code constants, because a configurable limit needs environment-template changes that prompt could not make. If a real merchant's busiest hour approaches either number, the owner decides the new figure and whether it becomes per-business configuration. | ⬜ |
 
 ---
 

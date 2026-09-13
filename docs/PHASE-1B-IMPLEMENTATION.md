@@ -448,3 +448,94 @@ price to English readers. Two lessons are now encoded rather than remembered:
 
 Full record: `docs/evidence/phase-1b-prompt-2-visual-remediation.md`. The design rules themselves are
 in `docs/BRAND.md` §4A–§4C.
+
+---
+
+## 15. The operational lifecycle (Prompt 3)
+
+Prompt 2 finished the merchant interface and recorded three things it could not do, because the
+server had no contract for them: create a location, change a live program, and manage named sources.
+This is those three contracts, plus the four deferred findings that sit on the same paths.
+
+### 15.1 Locations: closed, never deleted
+
+`src/server/tenant/locations.ts` grew `createLocation`, `updateLocation` and `setLocationActive`.
+There is no delete and there will not be one: a location id is a column on every ledger row written
+at that counter, and the ledger is append-only by trigger precisely so that history cannot be
+rewritten. Deactivation means one thing — **no new value may be written here** — and it is enforced
+by code that already existed: `requireLocationAccess` filters on `active: true` inside the
+transaction of every scanner write, so a closure takes effect on requests already in flight.
+
+Three refusals, each of which protects a business from turning a tidy-up into an outage:
+
+| Refusal | Code | Why |
+|---|---|---|
+| Never the main counter | `LOCATION_IS_MAIN` | It is where enrolment writes its welcome bonus and where every version that names no locations operates |
+| Never the last active one | `LOCATION_LAST_ACTIVE` | A business with no open counter cannot take a stamp |
+| Never the last active counter of a live program | `LOCATION_STRANDS_PROGRAM` | A version pins its locations immutably; if all of them close it can never be transacted at again |
+
+Reactivation keeps the row, so a branch that reopens keeps its history rather than starting again
+under a new id. Every verb is audited (`location.created`, `location.updated`,
+`location.deactivated`, `location.reactivated`) with the counter's label and never its address.
+
+### 15.2 Versions: draft, review, publish
+
+`src/server/program/versions.ts`. The database already had everything this needed —
+`ProgramVersionStatus.DRAFT`, a trigger that freezes mechanics the moment a version leaves DRAFT,
+another that refuses to delete one that has, and a partial unique index permitting one ACTIVE
+version per template. What was missing was the services over them.
+
+```
+  v1 ACTIVE  ──create draft──▶  v2 DRAFT  ──edit──▶  v2 DRAFT  ──publish──▶  v2 ACTIVE
+      │                             │                                            │
+      │                          discard                                  v1 RETIRED
+      ▼                                                                          │
+  cards keep v1 forever ◀───────────────────────────────────────────────────────┘
+```
+
+**There is no `UPDATE` against `CustomerCard` anywhere in the file.** That is the whole guarantee:
+publishing changes which version new cards pin, and nothing about the cards already issued.
+
+Publishing is one transaction under the template's row lock: validate the draft again (a location it
+names may have closed since the last edit), retire the live version, activate the draft, write the
+audit row carrying the published mechanics in full. The order is forced by
+`ProgramVersion_one_active_per_template` — retire first, or the index rejects the second ACTIVE row.
+`expectedVersionNumber` is the draft the merchant reviewed, so a publish made stale by somebody
+else's publish is refused (`DRAFT_STALE`) rather than applied to a draft nobody read.
+
+One additive migration, `20260913120000_phase_1b_lifecycle`: `ProgramVersion.retiredAt` (not
+backfilled — a version retired before the column existed reads "not recorded" rather than borrowing
+its successor's date) and a partial unique index giving each template at most one DRAFT.
+
+Pausing is `TemplateStatus.PAUSED` and means **no new sign-ups**. Every issued card keeps earning,
+redeeming and being reversible; `resolveEnrollmentTarget` already excluded paused templates, so the
+verb needed no special case anywhere else.
+
+### 15.3 Sources stay internal
+
+`updateSourceLink` renames a source and corrects its campaign fields. `utmSource` and the welcome
+bonus are deliberately **not** editable: both are baked into cards already issued, and editing them
+would rewrite the meaning of history. The built-in counter source is protected from renaming and
+from deactivation, because it is what `enrollAtCounter` resolves.
+
+No token, URL, slug or QR is returned by any of it, and the owner screen offers no control that
+would produce one. B7 is unchanged.
+
+### 15.4 The four findings this closed
+
+| Finding | Fix |
+|---|---|
+| **M-10** attribution audit outside the enrolment transaction | `EnrollCustomerInput.counterActor` threads the actor in, so `CARD_ISSUED_AT_COUNTER` commits with the issuance. A repeat enrolment — which hands staff an existing card's link — is now recorded as `CARD_LINK_REVEALED` instead, which is what it is |
+| **M-11** no per-actor limit on counter writes | `consumeStaffActionLimit`, keyed on the **membership**: 60 enrolments and 300 writes per hour, per person, per business. Constants rather than environment variables, because a new variable would need an environment-template change this prompt may not make. Enforced at the route, after the membership is verified and before the service, and answered as 429 with `Retry-After` |
+| **L-15** dead public-enrolment limiter | `consumeEnrollmentLimit` and its two scopes are gone, and `env.ts` no longer parses the three `ENROLL_RATE_LIMIT_*` variables. The schema is `z.object`, so an environment that still sets them is unaffected |
+| **L-17** card-link reveal not location-scoped | `revealCardLink` now checks the card's **pinned** version against the member's assignment. Owners and managers are unrestricted; a cashier sees a card whose version runs at a counter they are assigned to; a cashier with no assignment sees nothing. The refusal is a 404, matching the tenant miss |
+
+### 15.5 What the counter screen had to learn
+
+A card is served under the version it was ISSUED with, not the version its program has since
+published. The scanner used to read the counters of the template's live version, which was right
+while a program had one version for its whole life. `CardSearchResult` now carries the card's own
+`pinnedLocations`, the scope carries `usableLocations` (open, and assigned to this member), and the
+picker is the intersection. When that intersection is empty — every counter the card's version names
+is closed, or none is assigned to this member — the screen says so and blocks the buttons, instead of
+enabling them and letting the server refuse with a customer waiting.

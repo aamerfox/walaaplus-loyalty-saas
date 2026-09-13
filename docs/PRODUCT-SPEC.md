@@ -81,6 +81,17 @@ Splitting these prevents the Boomerangme failure mode where a merchant changes a
 
 Issued cards keep `programVersionId` forever. The engine always reads mechanics from the card's pinned version, never the template's current active version. Retired versions stay readable.
 
+**How a merchant changes a live program (built in Phase 1b Prompt 3).** They do not edit it; they publish the next version of it:
+
+1. **Open a draft** from the live version. It starts as an exact copy, so "what changed" means what the merchant changed.
+2. **Edit the draft.** Mechanics and reward tiers are mutable only while a version is `DRAFT`; the `walaaplus_protect_program_version` and `reward_tier_protect` triggers enforce that, not the application.
+3. **Review the differences** against the live version, stated in the merchant's own language — thresholds, rewards, limits, counters — alongside how many cards will keep the old rules.
+4. **Publish.** One transaction under the template's row lock: the live version is `RETIRED` (with `retiredAt`), the draft becomes `ACTIVE`, and the change is audited with the published mechanics in full. A publish whose draft number no longer matches the server's is refused, so nobody publishes a version they did not read.
+
+At most one `DRAFT` and one `ACTIVE` version per template, both as partial unique indexes. **No issued card is written to at any point.** New cards issued after publication pin the new version; every existing card keeps the rules it was sold under, including its reward tiers, its limits and its counters.
+
+A version is never deleted once it has been active, and a program is never deleted at all. `PAUSED` stops new sign-ups while every issued card keeps working; `ARCHIVED` remains unreachable from the product until the consequences for cards pinned to its versions are designed.
+
 ### 2.6 Tenant isolation and authorization are server-side
 
 Every business-scoped query includes tenant scope. Never authorize because a record id exists.
@@ -203,7 +214,9 @@ createdAt, updatedAt
 id, businessId, name, address, latitude (nullable), longitude (nullable),
 isDefault, active, createdAt, updatedAt
 ```
-Latitude and longitude are reserved for geo-push in a later phase.
+Latitude and longitude are reserved for geo-push in a later phase; nothing sets them, and no screen collects them.
+
+**A location is closed, never deleted** (Phase 1b Prompt 3). `active: false` means no new value may be written at that counter; everything already written stays attributed to it, readable in the per-location breakdown forever. An owner or manager may open a counter, rename it, close it and open it again — the row keeps its id, so a branch that reopens keeps its history. Three closures are refused because each would break the business: the default `Main` counter (enrolment and every main-only version write there), the last active counter, and the only active counter of a live program. `address` is a note staff read: it is never published, geocoded or written to an audit row.
 
 ### Customer — global identity
 ```
@@ -226,7 +239,7 @@ id, businessId, name, status, cardType, defaultLocale,
 livePresentationJson, liveLegalJson, liveIssuerJson, livePlatformJson,
 createdAt, updatedAt
 ```
-`status`: `DRAFT`, `ACTIVE`, `PAUSED`, `ARCHIVED`. `PAUSED` blocks **new enrollment** while existing cards continue to scan and redeem normally.
+`status`: `DRAFT`, `ACTIVE`, `PAUSED`, `ARCHIVED`. `PAUSED` blocks **new enrollment** while existing cards continue to scan and redeem normally. Pausing and resuming are owner verbs in the product; `ARCHIVED` is not reachable from a screen.
 
 ### ProgramVersion — immutable mechanics
 ```
