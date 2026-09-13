@@ -57,12 +57,16 @@ Service workers, installability and web push **refuse to run without TLS**, exce
 | # | Decision | Status |
 |---|---|---|
 | D1 | **Cashback and discount pull-forward.** Build in Phase 2 only on confirmed pharmacy or retail demand. If built there, Phase 4 Prompt 1 becomes an audit only. | ⏸ |
-| D2 | **SMS provider for Syria.** Required before automated card delivery, OTP restore or SMS campaigns. Twilio may not serve the market. | ⏸ |
+| D2 | **SMS provider for Syria.** Required before automated card delivery, OTP restore or SMS campaigns. Phase 2 Prompt 2 built the drafts; nothing can leave the system until this is answered. Twilio may not serve the market. | ⏸ |
 | D3 | **Email provider.** Required for password reset in the MVP and campaigns later. | ⬜ needed for password reset |
 | D4 | **WhatsApp Business API access.** | ⏸ |
 | D5 | **Archiving a program.** Phase 1b Prompt 3 built pause and resume, and deliberately left `ARCHIVED` unreachable from the product: what should happen to the cards pinned to an archived program's versions — keep earning, freeze at their balance, or be redeemable only — is a merchant-facing decision, not an implementation detail. Nothing is blocked by it today; pausing covers every case a pilot merchant has. | ⬜ |
 | D6 | **Per-actor counter limits.** Prompt 3 bounds one staff account to 60 enrolments and 300 counter writes an hour (finding M-11). They are code constants, because a configurable limit needs environment-template changes that prompt could not make. If a real merchant's busiest hour approaches either number, the owner decides the new figure and whether it becomes per-business configuration. | ⬜ |
 | D7 | **Customer export.** Phase 2 Prompt 1 built the customer record and deliberately did not build an export: a downloadable customer list needs a retention period, a named authorization bar, an audit contract and a decision about what may leave the system at all. The owner decides those before it is built; nothing is blocked until a merchant asks for one. | ⬜ |
+| D8 | **Re-consent of the unknown records.** Every enrolment taken before the consent version was recorded reads as `UNKNOWN` and may not be contacted — the count is on each customer's record and in every audience preview. The owner decides whether staff go back and ask those customers again, and what wording they are asked with. Nothing is blocked; the product simply will not treat the gap as a yes. | ⬜ |
+| D9 | **Consent retention and erasure.** Nothing in this build deletes a consent record, by design: an editable consent history is not evidence. A retention period, and what happens to the history when a customer asks to be erased, are owner decisions with legal weight and are deliberately not guessed here. | ⬜ |
+| D10 | **Per-channel consent.** The record says "marketing", not "SMS but not email". Splitting it is cheap to add and impossible to backfill honestly, so it waits until a channel exists to consent to — blocked behind D2/D3/D4. | ⏸ |
+| D11 | **Who may mark a campaign READY, and what READY commits to.** Today it means only "we think the wording is finished" and any member with `EDIT_PUSHES` may set it. Once delivery exists, READY is the last human checkpoint before a message reaches customers, and the owner decides whether it needs a second pair of eyes. | ⬜ |
 
 ---
 

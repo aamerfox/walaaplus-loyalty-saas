@@ -341,6 +341,26 @@ PushDelivery      id, pushMessageId, pushSubscriptionId, customerCardId,
 ```
 One campaign row plus one delivery row per recipient. A broadcast to 5,000 cards is one `PushMessage` and 5,000 `PushDelivery` rows.
 
+**None of these three tables exists.** They describe delivery, and no delivery is built. What exists
+is the draft that would one day feed them:
+
+### Campaign (built, Phase 2 Prompt 2)
+```
+Campaign          id, businessId, name, normalizedName, channel, locale,
+                  segmentId (nullable), state, archivedAt,
+                  createdByUserId, createdAt, updatedAt
+
+CampaignRevision  id, campaignId, revisionNumber, subject, body,
+                  placeholders, createdByUserId, createdAt        APPEND-ONLY
+
+ConsentRecord     id, businessId, customerBusinessProfileId, scope, state,
+                  previousState, policyVersion, capturedVia, reason,
+                  recordedByUserId, recordedAt                    APPEND-ONLY
+```
+`Campaign.state` is `DRAFT | READY | ARCHIVED` — there is no sent, scheduled or queued value, and
+`channel` is a LABEL on the draft, not a route to anything. Both append-only tables are protected by
+trigger and by a runtime role that holds only `SELECT` and `INSERT` on them.
+
 ### UtmSourceLink
 ```
 id, templateId, name, publicToken (unique), utmSource, utmMedium,
@@ -582,7 +602,7 @@ cannot become a second copy of anybody's personal data.
 
 **`all` means one CARD satisfies every card-scoped rule**, not one card per rule. `any` is the union.
 Names are unique per business, case- and whitespace-insensitively. Segments are archived, never
-deleted, because a campaign in a later phase will reference one by id.
+deleted, because a campaign draft references one by id (§8A.5).
 
 `VIEW_SEGMENTS` reads, `EDIT_SEGMENTS` writes, and counting additionally requires a membership with
 no branch restriction — a count narrowed per viewer would be a different number on every screen.
@@ -598,6 +618,57 @@ Date presets and custom ranges are **business-timezone days** (§5.6), so the da
 award limit agree about which day a 01:00 sale belongs to. A range beyond the ceiling is refused
 rather than clamped. Segment dates are UTC instead, because a segment is a standing rule with no
 clock attached and must mean the same set to every reader.
+
+### 8A.4 Marketing permission is a history, and a gap in it is not a yes
+
+A customer's marketing preference is an append-only `ConsentRecord` history, not a column that gets
+overwritten. Each entry records the state, the state it replaced, the policy version in force, when
+it was recorded, how it was captured, which staff member recorded it, and an optional reason. The
+enrolment answer is the first entry in the history and is never rewritten by anything a staff member
+does.
+
+Three states, and only one of them is a permission:
+
+- `GRANTED` — agreed, on a known date, to a known version of the wording. The only state that may be
+  contacted.
+- `WITHDRAWN` — said no. Complete on its own; a refusal needs no timestamp to be unambiguous.
+- `UNKNOWN` — the record cannot say *when* they agreed or *to what wording*. Treated as no.
+
+`UNKNOWN` is a real state rather than a silent false because the two mean different things to a
+merchant: one person declined, the other was never properly asked, and only the second is worth
+going back to. Every enrolment taken before the consent version was recorded lands here.
+
+There is **no customer-facing preference page and no unsubscribe route.** Both would be public
+endpoints that identify a customer and change something about them, which is the unsolved problem of
+B7 (§7.1). Consent is recorded by a staff member with `EDIT_CUSTOMERS`, from what the customer told
+them, and is captured as exactly that — never as a customer action.
+
+The history is append-only in the database, by trigger, and the runtime role holds only `SELECT` and
+`INSERT` on the table. Consent that can be edited afterwards is not evidence of anything.
+
+### 8A.5 A campaign is a draft, and this phase gives it nothing to send with
+
+A campaign is a name, an intended channel label, a language, an optional saved segment as its
+audience, and content kept as numbered, append-only revisions. It has three states — `DRAFT`,
+`READY`, `ARCHIVED` — none of which is operational. `READY` means a merchant considers the wording
+finished; it does not schedule, queue or reserve anything.
+
+**No delivery exists anywhere in this phase**: no provider, credential, queue, worker, scheduler or
+send verb, and no state a draft can enter that implies one. Drafts archive and restore; they are
+never deleted, because a revision history that can be removed is not a history.
+
+The audience is **three integers** — matched, may be contacted, may not — recomputed live from the
+segment's stored definition each time they are asked for. No recipient list is built, stored,
+returned or logged; no name, phone, card, serial or token of any recipient reaches a preview, an
+audit row or a log line. A branch-scoped member cannot ask for the numbers at all, for the same
+reason they cannot count a segment.
+
+Content may use exactly two placeholders, `{{firstName}}` and `{{businessName}}`. The grammar has no
+paths, filters, fallbacks or expressions, and any `{{ … }}` that is not a well-formed known
+placeholder is refused by name. `programName`, `stampBalance`, `pointBalance` and `rewardName` are
+refused with their own reason: a customer may hold several cards, and the product does not guess
+which one was meant. Previews render from fixed sample values in the draft's own language and
+direction, so no customer is ever read to draw one.
 
 ---
 

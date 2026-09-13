@@ -159,3 +159,172 @@ Both were found by reading a rendered screenshot, and both are now guarded:
 - `Customers.cardType.STAMP` / `.POINTS` were missing, and the screen rendered the key names as
   badges. That call is a computed key, which the usage test deliberately does not resolve, so the
   enum-indexed guard in `message-groups.test.ts` gained the group instead.
+
+---
+
+# Prompt 2 — consent, and drafts that cannot be sent
+
+Prompt 1 ended with segments nothing acts on. Prompt 2 writes the thing that would act on them —
+and stops one step before it can. That step is the whole design: **the product must be able to say
+who may be contacted before it is able to contact anybody**, because the opposite order is how a
+loyalty database becomes a list somebody bought.
+
+Nothing in this prompt sends. There is no provider, no credential, no queue, no worker, no
+scheduler, no send verb, and no state a draft can reach that means any of those. The
+`CampaignState` enum has exactly three values and `tests/integration/consent-and-campaigns.test.ts`
+asserts that the API refuses anything outside them by name, so a future `SENT` cannot arrive by
+being merely plausible to a JSON body.
+
+---
+
+## 6. Marketing preference as a history, not a field
+
+`src/server/consent/consent.ts`, shown at `/business/customers/[profileId]`.
+
+### The field that was already there, and what it cannot say
+
+`CustomerBusinessProfile` carries three columns from enrolment: `marketingConsent`,
+`privacyConsentAt` and `consentTextVersion`. Read as a permission, they have a combination that is
+genuinely in the database and genuinely unreadable — `marketingConsent = true` with both others
+`NULL`, which is every enrolment taken before the consent version was wired up.
+
+That row cannot say **when** anybody agreed or **to what wording**. Reading it as consent is how a
+gap in a schema turns into a message nobody asked for, so it does not read as consent:
+
+| enrolment record | state | may be contacted |
+|---|---|---|
+| ticked, dated, versioned | `GRANTED` | yes |
+| ticked, no date | `UNKNOWN` (`MISSING_TIMESTAMP`) | no |
+| ticked, no policy version | `UNKNOWN` (`MISSING_POLICY_VERSION`) | no |
+| not ticked | `WITHDRAWN` | no |
+
+`UNKNOWN` is a first-class state rather than a default-to-false, because the two mean different
+things to a merchant: one person said no, the other was never properly asked, and only the second is
+worth going back and asking again. The rule is pure and lives in `originStatus`, so
+`tests/unit/consent-eligibility.test.ts` pins it without a database and it cannot drift quietly.
+
+### Append-only, in the database
+
+`ConsentRecord` is a tenant-scoped table with a PL/pgSQL trigger that raises `restrict_violation` on
+`UPDATE`, `DELETE` and `TRUNCATE` — the same mechanism the ledger uses. Each row carries the new
+state, the state it replaced, the policy version in force, when it was recorded, how it was
+captured, which staff member recorded it, and an optional free-text reason.
+
+**Nothing writes back to the profile.** A staff member recording a change adds a row; the enrolment
+columns keep saying exactly what enrolment said. The history the screen shows is the derived
+enrolment entry — marked `isOrigin` — followed by every recorded change, and a staff action can
+never manufacture the appearance of an opt-in at sign-up.
+
+Two defences, not one. `scripts/db-roles.mjs` now lists `ConsentRecord` and `CampaignRevision`
+alongside `LoyaltyOperation`, so the runtime role holds **only** `SELECT` and `INSERT` on them and
+the services are refused on privilege before any trigger runs. The trigger is the second line, for
+anyone connecting with more rights than the app has; `tests/integration/runtime-role.test.ts`
+asserts the privileges, and `consent-and-campaigns.test.ts` asserts both refusals.
+
+### What is deliberately absent
+
+There is **no customer-facing preference route and no unsubscribe link.** Both are public endpoints
+that take a customer identifier and change something about that customer, which is the unsolved
+problem of B7 wearing a different hat: nothing here can prove who is asking. A staff member records
+what a customer told them, and the record says that is what happened — `capturedVia` is
+`STAFF_UPDATE`, never `CUSTOMER`.
+
+`CASHIER` cannot record a consent change. Reading a customer needs `VIEW_CUSTOMERS`; recording needs
+`EDIT_CUSTOMERS`, and the role that stands at the till has neither by default.
+
+---
+
+## 7. Campaign drafts
+
+`src/server/campaigns/campaigns.ts`, at `/business/campaigns`.
+
+A campaign is a name, an intended channel, a language, an optional audience, and content. Content is
+the part that matters: every save writes a **new numbered revision** rather than editing the last
+one, on a table with the same append-only trigger. A merchant can read back what a draft said three
+edits ago, and nobody — including this codebase — can change what it said.
+
+**Three states, and none of them is operational.**
+
+| state | means |
+|---|---|
+| `DRAFT` | being written |
+| `READY` | "we think this is finished". Nothing more. Refused for a campaign with no content |
+| `ARCHIVED` | put away, and reversible. There is no delete |
+
+Archiving sets the state and the timestamp in one update so the two cannot disagree. There is no
+hard delete, because a revision history that can be removed is not a history.
+
+**The audience is three integers.** `previewAudience` re-evaluates the saved segment live, counts the
+matches with an aggregate, checks consent for those profiles, and returns `matched`,
+`marketingEligible` and `notEligible` plus the segment's name. Profile ids are read inside that
+function and discarded with the array; no name, phone, card, serial, token or id of any recipient is
+returned, rendered, stored or logged. There is no preview of *who*, and no materialised audience — so
+a draft can never carry a stale one.
+
+Showing both numbers is deliberate. "412 matched, 96 may be contacted" tells a merchant something
+true about their own records that neither number tells alone, and the gap is an argument for asking
+people properly rather than for sending anyway.
+
+A branch-scoped staff member cannot preview an audience at all. The same rule already governs segment
+counts: a number narrowed to the viewer's branch would be a different number on every screen.
+
+---
+
+## 8. Placeholders: an allowlist, not a template language
+
+`src/server/campaigns/placeholders.ts`.
+
+Two placeholders exist — `{{firstName}}` and `{{businessName}}` — and the grammar is `{{ name }}`
+with an optional space, nothing else. No property paths, no filters, no fallbacks, no expressions, no
+block helpers.
+
+The validator's important half is the second regex. A scanner that only looked for *known* names
+would find no match in `{{firstName || "friend"}}` and call the text placeholder-free, which is
+exactly how a template language reaches customer data. So every `{{ … }}` in a body must parse as a
+well-formed placeholder, and anything that does not is reported as `MALFORMED` with the text that
+caused it.
+
+Four names are refused with their own reason rather than treated as unknown: `programName`,
+`stampBalance`, `pointBalance` and `rewardName` are `AMBIGUOUS_ACROSS_CARDS`. A customer may hold
+several cards, and the product will not guess which one a merchant meant — the screen says so in
+those words. They become available when a draft can be tied to one programme, which is a later
+prompt's contract, not a missing feature.
+
+**The preview renders from constants.** `renderWithSamples` substitutes fixed sample values in the
+draft's own language (`Layla` / `ليلى`, `Your business` / `نشاطك التجاري`). No customer is read to
+draw a preview, and the browser test asserts that a real enrolled customer's name is absent from one
+rendered while that customer exists. An unknown placeholder is left visible rather than blanked:
+blanking it would hide the mistake behind a plausible-looking preview that the save then refuses.
+
+The preview wrapper carries the **draft's** direction and language, not the screen's, so an Arabic
+message composed on an English interface reads the way its recipients will read it.
+
+---
+
+## 9. Saying so on the screen
+
+Every campaign screen carries `Draft only — nothing will be sent. This product has no way to send a
+message yet: no provider, no schedule, no queue.` — once per screen, and a badge beside the save
+button where a merchant might otherwise forget.
+
+`tests/e2e/campaigns-ui.spec.ts` asserts that **no button or link** on those screens is named
+anything like send, schedule, queue or dispatch, in either language, and that none is disabled — a
+greyed-out Send promises the same thing a working one does. The assertion is on control names rather
+than page prose on purpose: the copy has to be free to say the words in order to explain that the
+capability does not exist.
+
+---
+
+## 10. Two defects this prompt's screenshots found
+
+Both were caught by reading a rendered page rather than by a failing test:
+
+- The audience preview labelled **zero contactable customers with a success badge.** "None have
+  agreed to hear from you" is not an achievement; the badge is neutral below one.
+- The English remainder line read *"# have declined, or were never asked in a way we can date"*,
+  which is not a sentence a merchant can parse. Both locales now say that those customers declined,
+  or have no clear record of agreeing.
+
+A third, smaller one: the draft-only banner rendered twice on the drafts screen, once from the page
+and once from the editor mounted below it. A warning repeated twice on one screen is read once. The
+editor no longer carries its own.
