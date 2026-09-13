@@ -168,7 +168,7 @@ implemented.
 | 5 | Localised pass bundles | 1 and 2 |
 | 6 | Pass messages / notifications | D18, and the existing consent contract |
 | 7 | Location relevance | D17 |
-| 8 | Referral attribution and reward policy | D15 — a separate phase, not a wallet capability |
+| 8 | Referral **rewards** | D15. The attribution half shipped in Phase 3A Prompt 2 and grants nothing; crediting anybody is still an owner decision, and not a wallet capability either way |
 | 9 | Smart Tap / Apple VAS | approval, terminals, POS. No date. |
 
 ---

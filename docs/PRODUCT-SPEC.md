@@ -381,6 +381,18 @@ CardShareLink  id, businessId, customerCardId, tokenDigest (unique),
 `tokenDigest` is SHA-256 of a 32-byte random capability. **The raw value is never stored.** One live
 row per card, enforced by a partial unique index.
 
+### ReferralAttribution (built, Phase 3A Prompt 2)
+```
+ReferralAttribution  id, businessId, entry, referringShareLinkId,
+                     referringCustomerCardId, enrolledCustomerCardId,
+                     enrolledProfileId, method, voidsAttributionId,
+                     reason, recordedAt, recordedByUserId        APPEND-ONLY
+```
+Internal ids only. **No amount, currency, points, reward reference, eligibility flag, expiry or
+campaign** — an attribution is not a reward, and D15 owns the policy that would make one. One
+`ATTRIBUTED` row per enrolled card, ever, by partial unique index; voiding writes a `VOIDED` row and
+does not free the slot.
+
 `Campaign.state` is `DRAFT | IN_REVIEW | APPROVED | WITHDRAWN | ARCHIVED` — there is no sent,
 scheduled or queued value, and `channel` is a LABEL on the draft, not a route to anything. `APPROVED`
 and `WITHDRAWN` are written only by the approval service, never by a state-setting request.
@@ -823,6 +835,36 @@ the pass is issued again and saved again. The owner UI says this rather than imp
 Everything each platform offers, what Zademi uses and what it does not, is audited in
 `docs/WALLET-CAPABILITY-MATRIX.md`, including the manual device gate (§6 there) that must be
 completed before any production claim about wallet passes.
+
+### 8A.11 Referral attribution (Phase 3A Prompt 2)
+
+A member of staff enrolling a customer at the counter may record that the customer **presented a
+valid invitation**. That is the whole feature: it records an arrival and grants nothing.
+
+**The capability reaches the server in one place only** — the body of the authenticated counter
+enrolment route. The scanner strips everything before the `#` on the device, so it never enters a
+path, a query string or a log. It is hashed, resolved to a row id, and discarded; neither it nor its
+digest reaches the row, an audit entry, a response or a screen.
+
+**One generic refusal.** Invalid, revoked, malformed, another business's, the customer's own, and a
+card that already carries an attribution all answer the same way. Staff are never told who referred
+whom, and an unusable invitation never turns a successful enrolment into an error.
+
+**Integrity.** One attribution per enrolled card, ever. Only for a card the call actually issued —
+a customer who already had one was not referred today. Self-referral is refused where identity the
+system already holds makes it safe to determine (the same profile, or the same underlying customer);
+nothing beyond that is guessed, and §D19 is not answered here.
+
+**Voiding** is owner or manager only, additive, and permanent in both directions: the original row
+stays, a `VOIDED` row is written beside it, and the card cannot be attributed again — re-attributing
+later would be retrospective attribution.
+
+**What an owner sees** is a per-card fact on the enrolled customer's own record, and a business-wide
+**count**. Nothing lists attributions, names a referrer or ranks anybody: that report is a list of
+customers ordered by how many friends they brought, which belongs to a reward programme that does not
+exist (§D15).
+
+**Nothing is awarded.** No balance, ledger row, campaign or money changes, and both screens say so.
 
 ---
 

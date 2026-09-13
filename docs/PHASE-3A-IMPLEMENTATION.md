@@ -247,3 +247,128 @@ Both are existing tests that fired correctly and needed an argued exception rath
 - **`message-parity`** flags a string identical in both locales as a probable untranslated copy.
   `Wallet.applePass` and `Wallet.googlePass` name a file format and an API object rather than saying
   anything, so they are listed alongside the product name and the phone placeholders.
+
+---
+
+# Prompt 2 — recording that somebody arrived with an invitation
+
+Prompt 1 built a link a customer can share and made sure nothing could be learned from it. Prompt 2
+adds the only thing that can honestly be done with one next: **record that a customer presented it**.
+
+It records. It does not reward, promise, calculate, send or schedule, and the schema cannot be read
+as though it did.
+
+---
+
+## 6. An attribution is not a reward, and the schema says so
+
+`ReferralAttribution` holds one fact: this newly issued card was enrolled at a counter where a member
+of staff saw a valid invitation from that link.
+
+What it deliberately has no column for: an amount, a currency, points, stamps, a reward reference, an
+eligibility flag, an expiry, a campaign, or a conversion. Each would be a policy nobody decided,
+written into a schema — and **D15** owns that policy. `tests/integration/share-links.test.ts` walks
+the table's columns and fails on any name that looks like money.
+
+Nothing in the module touches a balance, a ledger row or a campaign. The integration suite records an
+attribution and then asserts every one of the referrer's five balances is exactly where it was.
+
+### Internal ids only
+
+The referring side is a `CardShareLink` id and the card behind it. No name, phone, serial, balance,
+URL or capability is copied. The card id is denormalised from the link on purpose: a later revocation
+must not change what the row says happened.
+
+### Append-only, with voiding as a second row
+
+The same shape `CampaignApproval` uses. An `ATTRIBUTED` row is never modified; voiding writes a
+`VOIDED` row pointing at it, and the effective status is derived from the pair.
+
+That differs from `CardShareLink`, which permits one narrow UPDATE — and the difference is the point.
+Revoking a capability has to change the thing that is looked up. Voiding an attribution changes only
+what a reader concludes, so nothing needs to be mutable.
+
+---
+
+## 7. The capability is seen once and discarded
+
+It reaches the server in exactly one place: the body of `POST /api/scanner/enroll`, behind a
+verified staff session. The scanner strips everything before the `#` **on the device**, so a
+capability never enters a path, a query string, an access log, a proxy log or a `Referer` header —
+the same property the public page relies on, held on the one authenticated route allowed to see one.
+
+Then it is hashed, looked up, and the **row id** is kept. The raw value is not stored, not returned,
+not logged, and not written to an audit row. Neither is its digest: a digest in an audit log is still
+a way to confirm a guess.
+
+A source-level test asserts that exactly two route files in the whole application mention a share
+token at all — the public resolver, which writes nothing, and the counter enrolment. A third would be
+a new way for a capability to reach the server, and the phase that adds one has to come and say so.
+
+### One generic refusal
+
+Invalid, revoked, malformed, another business's, the customer's own, and a card that already carries
+an attribution all answer `NOT_ACCEPTED`. A member of staff who could tell "revoked" from "never
+existed" would be holding a probe, and the referring customer is never named, shown or implied.
+
+An unusable invitation never turns a successful enrolment into an error. The customer is standing at
+the till and has their card; the invitation is a second sentence in the feedback, not a failure. That
+is also why the route's schema bounds the field but does not shape-check it — a malformed value must
+not produce a 400 for the enrolment.
+
+---
+
+## 8. Integrity rules, and the ones deliberately not invented
+
+**One attribution per card, ever**, by a partial unique index on `ATTRIBUTED` rows. Voiding does
+**not** free the slot: the withdrawn row is still there, and re-attributing afterwards would be
+retrospective attribution.
+
+**Only a card this call issued.** A customer who already had a card was not referred by anybody
+today, so a repeat lookup records nothing.
+
+**Self-referral is refused where identity already held makes it safe to determine** — the same
+profile in this business, or the same underlying customer. Nothing beyond that is guessed. Household
+matching would wrongly refuse two flatmates sharing an address, name similarity would refuse two
+brothers, and shared-device detection would refuse a phone handed across a counter. **D19** asks
+whether a card is a person or a household, and it is not answered by an implementation here.
+
+**Not invented at all**: reward eligibility, expiry, monetary value, campaign attribution, and
+retrospective attribution. None has a column, a code path or a placeholder.
+
+---
+
+## 9. Who may do what
+
+| action | bar | why |
+|---|---|---|
+| record an attribution | `EDIT_CUSTOMERS` — **a cashier may** | it happens at a till, in the same request that issues the card, and enrolling a customer is already a cashier's job |
+| read a card's attribution | `VIEW_CUSTOMERS`, **not a cashier** | reading a customer's record is not serving them — the same bar as the consent history |
+| void one | `EDIT_CUSTOMERS` **and owner or manager** | deciding that a record of what happened was wrong is a correction to the business's own history, not counter work |
+
+Every read and write resolves through the caller's own `businessId` in the `WHERE`, so a cross-tenant
+id answers 404 rather than 403.
+
+---
+
+## 10. What an owner may see
+
+A card's own record says the customer arrived with an invitation, when, how, and which member of
+staff recorded it. It says **nothing about the referring side** — not a name, a card, a link id or a
+count — because that is somebody else's record and this screen is not an introduction service.
+
+The business-wide figure is a **count**. There is deliberately no function anywhere that lists
+attributions, ranks referrers or counts them per customer; a test asserts that nothing exported from
+the module is named like a listing. That report is a list of customers ordered by how many friends
+they brought, which belongs to a reward programme that does not exist.
+
+Both screens state, every time, that nothing is awarded for it. A merchant looking at a record like
+this would otherwise reasonably assume it must be worth something.
+
+---
+
+## 11. What the screenshot found
+
+The aggregate notice rendered its heading and its sentence as one run-on line — *"Referral records 1
+customer has been recorded as arriving with an invitation."* The heading is now its own block. Small,
+and the kind of thing only reading the rendered page catches.
