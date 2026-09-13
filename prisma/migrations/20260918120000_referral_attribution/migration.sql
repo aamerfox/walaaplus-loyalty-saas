@@ -1,6 +1,6 @@
 -- Phase 3A Prompt 2 — recording that a customer arrived with an invitation, and nothing else.
 --
--- ONE additive migration. Two enums, one table, two triggers. No existing column is changed, no
+-- ONE additive migration. Two enums, one table, three triggers. No existing column is changed, no
 -- existing row is written, nothing is dropped and nothing is backfilled — every customer enrolled
 -- before this migration has no attribution and never will, because inventing one retrospectively is
 -- exactly the thing this table exists to refuse.
@@ -23,6 +23,18 @@
 -- either. Everything a reader could legitimately need is reachable by joining, under the
 -- authorization that governs those tables — which is the point of storing a reference rather than a
 -- copy.
+--
+-- ## Every row has to make sense before it is written
+--
+-- Append-only protects history from being rewritten. It does nothing about a row that was wrong the
+-- moment it was inserted — a void pointing at another void, an attribution carrying a withdrawal
+-- reason, or a link, card and profile that belong to three different businesses. Foreign keys check
+-- that each id EXISTS; nothing in a foreign key checks that they AGREE.
+--
+-- So `referral_attribution_validate` runs BEFORE INSERT and refuses a row whose parts contradict
+-- each other. The service already declines to build such a row, and that is exactly why the trigger
+-- matters: a guarantee that lives only in one service is a guarantee that ends the first time
+-- somebody writes a second one, a backfill script, or a console session.
 --
 -- ## Append-only, with voiding as a second row
 --
@@ -125,3 +137,125 @@ CREATE TRIGGER referral_attribution_append_only
 CREATE TRIGGER referral_attribution_no_truncate
   BEFORE TRUNCATE ON "ReferralAttribution"
   FOR EACH STATEMENT EXECUTE FUNCTION walaaplus_reject_referral_mutation();
+
+-- ── Row-level validation ─────────────────────────────────────────────────────
+--
+-- BEFORE INSERT only. UPDATE and DELETE are already refused outright, so an inserted row is the only
+-- row there will ever be and validating it once is validating it forever.
+--
+-- Every failure raises `check_violation` (23514) with a message naming the rule, because a
+-- constraint that fires with "new row violates constraint" tells whoever hits it nothing about what
+-- they got wrong.
+
+CREATE OR REPLACE FUNCTION walaaplus_validate_referral_attribution() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+  link_business   TEXT;
+  link_card       TEXT;
+  ref_business    TEXT;
+  enr_business    TEXT;
+  enr_profile     TEXT;
+  profile_business TEXT;
+  target          "ReferralAttribution"%ROWTYPE;
+BEGIN
+  -- 1. The referring side agrees with itself: the link belongs to this business AND to the card
+  --    this row names, and that card belongs to this business too.
+  SELECT "businessId", "customerCardId" INTO link_business, link_card
+    FROM "CardShareLink" WHERE "id" = NEW."referringShareLinkId";
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'ReferralAttribution: referring share link does not exist'
+      USING ERRCODE = 'check_violation';
+  END IF;
+  IF link_business IS DISTINCT FROM NEW."businessId" THEN
+    RAISE EXCEPTION 'ReferralAttribution: the share link belongs to a different business'
+      USING ERRCODE = 'check_violation';
+  END IF;
+  IF link_card IS DISTINCT FROM NEW."referringCustomerCardId" THEN
+    RAISE EXCEPTION 'ReferralAttribution: the share link belongs to a different card'
+      USING ERRCODE = 'check_violation';
+  END IF;
+
+  SELECT "businessId" INTO ref_business FROM "CustomerCard" WHERE "id" = NEW."referringCustomerCardId";
+  IF ref_business IS DISTINCT FROM NEW."businessId" THEN
+    RAISE EXCEPTION 'ReferralAttribution: the referring card belongs to a different business'
+      USING ERRCODE = 'check_violation';
+  END IF;
+
+  -- 2. The enrolled side agrees with itself: the card belongs to this business AND to the profile
+  --    this row names, and that profile belongs to this business too.
+  SELECT "businessId", "customerBusinessProfileId" INTO enr_business, enr_profile
+    FROM "CustomerCard" WHERE "id" = NEW."enrolledCustomerCardId";
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'ReferralAttribution: enrolled card does not exist'
+      USING ERRCODE = 'check_violation';
+  END IF;
+  IF enr_business IS DISTINCT FROM NEW."businessId" THEN
+    RAISE EXCEPTION 'ReferralAttribution: the enrolled card belongs to a different business'
+      USING ERRCODE = 'check_violation';
+  END IF;
+  IF enr_profile IS DISTINCT FROM NEW."enrolledProfileId" THEN
+    RAISE EXCEPTION 'ReferralAttribution: the enrolled card belongs to a different profile'
+      USING ERRCODE = 'check_violation';
+  END IF;
+
+  SELECT "businessId" INTO profile_business
+    FROM "CustomerBusinessProfile" WHERE "id" = NEW."enrolledProfileId";
+  IF profile_business IS DISTINCT FROM NEW."businessId" THEN
+    RAISE EXCEPTION 'ReferralAttribution: the enrolled profile belongs to a different business'
+      USING ERRCODE = 'check_violation';
+  END IF;
+
+  -- 3. An ATTRIBUTED row is a record of an arrival. It withdraws nothing, so it points at nothing
+  --    and explains nothing: a reason on one would be a withdrawal note attached to a record that
+  --    was never withdrawn.
+  IF NEW."entry" = 'ATTRIBUTED' THEN
+    IF NEW."voidsAttributionId" IS NOT NULL THEN
+      RAISE EXCEPTION 'ReferralAttribution: an ATTRIBUTED row voids nothing'
+        USING ERRCODE = 'check_violation';
+    END IF;
+    IF NEW."reason" IS NOT NULL THEN
+      RAISE EXCEPTION 'ReferralAttribution: an ATTRIBUTED row carries no void reason'
+        USING ERRCODE = 'check_violation';
+    END IF;
+  END IF;
+
+  -- 4. A VOIDED row is a withdrawal OF something, and it has to be a complete, faithful account of
+  --    the row it withdraws. Copying the fields rather than joining for them is what lets one row be
+  --    read on its own; this is what makes the copy true.
+  IF NEW."entry" = 'VOIDED' THEN
+    IF NEW."voidsAttributionId" IS NULL THEN
+      RAISE EXCEPTION 'ReferralAttribution: a VOIDED row must name the attribution it withdraws'
+        USING ERRCODE = 'check_violation';
+    END IF;
+
+    SELECT * INTO target FROM "ReferralAttribution" WHERE "id" = NEW."voidsAttributionId";
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'ReferralAttribution: the attribution being withdrawn does not exist'
+        USING ERRCODE = 'check_violation';
+    END IF;
+    IF target."entry" <> 'ATTRIBUTED' THEN
+      RAISE EXCEPTION 'ReferralAttribution: only an ATTRIBUTED row can be withdrawn'
+        USING ERRCODE = 'check_violation';
+    END IF;
+    IF target."businessId" IS DISTINCT FROM NEW."businessId" THEN
+      RAISE EXCEPTION 'ReferralAttribution: cannot withdraw another business''s attribution'
+        USING ERRCODE = 'check_violation';
+    END IF;
+    IF target."referringShareLinkId" IS DISTINCT FROM NEW."referringShareLinkId"
+       OR target."referringCustomerCardId" IS DISTINCT FROM NEW."referringCustomerCardId"
+       OR target."enrolledCustomerCardId" IS DISTINCT FROM NEW."enrolledCustomerCardId"
+       OR target."enrolledProfileId" IS DISTINCT FROM NEW."enrolledProfileId"
+       OR target."method" IS DISTINCT FROM NEW."method"
+    THEN
+      RAISE EXCEPTION 'ReferralAttribution: a VOIDED row must repeat the attribution it withdraws, exactly'
+        USING ERRCODE = 'check_violation';
+    END IF;
+  END IF;
+
+  RETURN NEW;
+END
+$$;
+
+CREATE TRIGGER referral_attribution_validate
+  BEFORE INSERT ON "ReferralAttribution"
+  FOR EACH ROW EXECUTE FUNCTION walaaplus_validate_referral_attribution();
