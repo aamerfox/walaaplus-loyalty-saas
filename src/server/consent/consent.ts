@@ -207,6 +207,79 @@ export async function marketingEligibleProfileIds(
   return eligible;
 }
 
+/** One customer's marketing state, and the record that decided it. */
+export interface ConsentObservation {
+  state: ConsentState;
+  /** The `ConsentRecord` the state came from, or null when it came from the enrolment answer. */
+  consentRecordId: string | null;
+  marketingEligible: boolean;
+}
+
+/**
+ * The same question as `marketingEligibleProfileIds`, answered in full rather than as a yes/no.
+ *
+ * An audience snapshot has to record not just *that* somebody could be contacted but *what was
+ * observed* — the state, and which record decided it — because a snapshot is read back months later
+ * to answer "on what basis did you think you could message this person". A boolean cannot answer
+ * that, and reconstructing it afterwards from a history that has moved on is exactly the kind of
+ * after-the-fact inference this module exists to refuse.
+ *
+ * Two queries, no N+1, same rule as everywhere else: only an explicit, dated, versioned GRANTED is
+ * eligible.
+ */
+export async function observeMarketingConsent(
+  ctx: TenantContext,
+  profileIds: readonly string[],
+): Promise<Map<string, ConsentObservation>> {
+  const observations = new Map<string, ConsentObservation>();
+  if (profileIds.length === 0) return observations;
+
+  const [profiles, records] = await Promise.all([
+    prisma.customerBusinessProfile.findMany({
+      where: { id: { in: [...profileIds] }, businessId: ctx.businessId },
+      select: { id: true, marketingConsent: true, privacyConsentAt: true, consentTextVersion: true },
+    }),
+    prisma.consentRecord.findMany({
+      where: {
+        customerBusinessProfileId: { in: [...profileIds] },
+        businessId: ctx.businessId,
+        scope: ConsentScope.MARKETING,
+      },
+      orderBy: [{ recordedAt: "desc" }, { createdAt: "desc" }],
+      select: { id: true, customerBusinessProfileId: true, state: true },
+    }),
+  ]);
+
+  // The first row per profile wins: the query is already ordered newest-first.
+  const latest = new Map<string, { id: string; state: ConsentState }>();
+  for (const record of records) {
+    if (!latest.has(record.customerBusinessProfileId)) {
+      latest.set(record.customerBusinessProfileId, { id: record.id, state: record.state });
+    }
+  }
+
+  for (const profile of profiles) {
+    const record = latest.get(profile.id);
+    if (record) {
+      observations.set(profile.id, {
+        state: record.state,
+        consentRecordId: record.id,
+        marketingEligible: record.state === ConsentState.GRANTED,
+      });
+    } else {
+      const origin = originStatus(profile);
+      observations.set(profile.id, {
+        state: origin.state,
+        // The enrolment answer is not a row, so there is nothing to point at. Null says that
+        // truthfully rather than inventing a reference.
+        consentRecordId: null,
+        marketingEligible: origin.marketingEligible,
+      });
+    }
+  }
+  return observations;
+}
+
 /**
  * Everything recorded about one customer's marketing preference, newest first.
  *

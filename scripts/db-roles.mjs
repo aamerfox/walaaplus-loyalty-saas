@@ -35,7 +35,14 @@ import { decideMembershipAction } from "./lib/db-role-membership.mjs";
 
 loadDotenv({ quiet: true });
 
-const APPEND_ONLY_TABLES = ["LoyaltyOperation", "ConsentRecord", "CampaignRevision"];
+const APPEND_ONLY_TABLES = [
+  "LoyaltyOperation",
+  "ConsentRecord",
+  "CampaignRevision",
+  "CampaignApproval",
+  "CampaignAudienceSnapshot",
+  "CampaignAudienceMember",
+];
 const MIGRATOR_ONLY_TABLES = ["_prisma_migrations"];
 const WORKER_SCHEMA = "pgboss";
 

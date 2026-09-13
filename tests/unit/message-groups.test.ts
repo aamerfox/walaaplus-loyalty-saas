@@ -1,6 +1,15 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { CampaignChannel, CampaignState, CardType, ConsentCapture, ConsentState, MembershipRole, TemplateStatus } from "@prisma/client";
+import {
+  CampaignChannel,
+  CampaignDecision,
+  CampaignState,
+  CardType,
+  ConsentCapture,
+  ConsentState,
+  MembershipRole,
+  TemplateStatus,
+} from "@prisma/client";
 import { describe, expect, it } from "vitest";
 
 /**
@@ -49,6 +58,14 @@ const GROUPS: { path: string; values: readonly string[] }[] = [
   { path: "Consent.capture", values: Object.values(ConsentCapture) },
   { path: "Campaigns.state", values: Object.values(CampaignState) },
   { path: "Campaigns.channel", values: Object.values(CampaignChannel) },
+  // Phase 2 Prompt 3. The approval screen indexes both of these by a runtime value, and the
+  // blocker list is the one a merchant reads to understand why nothing can be delivered — a key
+  // name rendered there would be the product failing to explain its own boundary.
+  { path: "Campaigns.decision", values: Object.values(CampaignDecision) },
+  {
+    path: "Campaigns.blocker",
+    values: ["NOT_APPROVED", "WITHDRAWN", "ARCHIVED", "EMPTY_AUDIENCE", "NO_DELIVERY_CHANNEL_EXISTS"],
+  },
   { path: "Programs.statuses", values: Object.values(TemplateStatus) },
   { path: "Staff.roles", values: Object.values(MembershipRole) },
   { path: "Programs.form.earnMode", values: ["MANUAL", "PER_VISIT", "SPEND_BLOCK"] },

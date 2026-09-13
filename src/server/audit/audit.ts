@@ -102,6 +102,19 @@ export const AuditAction = {
   CAMPAIGN_STATE_CHANGED: "campaign.state_changed",
   CAMPAIGN_AUDIENCE_SET: "campaign.audience_set",
 
+  // ── Phase 2 Prompt 3: approval. Still nothing here sends anything. ────────
+  /**
+   * A person approved one exact revision for one declared channel.
+   *
+   * Carries the revision number, the channel and the snapshot's COUNTS. It never carries a
+   * recipient id, and the snapshot id it references leads to a table with no contact data in it.
+   */
+  CAMPAIGN_APPROVED: "campaign.approved",
+  /** An approval was explicitly taken back. Both rows stay in the decision history. */
+  CAMPAIGN_WITHDRAWN: "campaign.withdrawn",
+  /** An edit invalidated a standing approval. Recorded because it happens as a side effect. */
+  CAMPAIGN_APPROVAL_INVALIDATED: "campaign.approval_invalidated",
+
   SEGMENT_CREATED: "segment.created",
   SEGMENT_UPDATED: "segment.updated",
   SEGMENT_ARCHIVED: "segment.archived",

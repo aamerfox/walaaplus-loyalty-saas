@@ -161,12 +161,23 @@ enum CampaignChannel {
   EMAIL
 }
 
-/// Three states, none of which sends. There is deliberately no SENT, SCHEDULED or QUEUED here:
+/// Five states, none of which sends. There is deliberately no SENT, SCHEDULED or QUEUED here:
 /// `PushMessageStatus` is the reserved delivery model and is separate and untouched.
+///
+/// APPROVED means a person decided about one exact revision and a snapshot was taken. It is not
+/// permission to contact anybody — see `src/server/campaigns/delivery.ts`.
 enum CampaignState {
   DRAFT
-  READY
+  IN_REVIEW
+  APPROVED
+  WITHDRAWN
   ARCHIVED
+}
+
+/// A decision is one of two verbs. There is no REJECT: an unwanted campaign goes back to draft.
+enum CampaignDecision {
+  APPROVED
+  WITHDRAWN
 }
 
 enum PushMessageKind {
@@ -209,13 +220,15 @@ model User {
   updatedAt    DateTime @updatedAt
 
   memberships       BusinessMembership[]
-  operations        LoyaltyOperation[]   @relation("OperationActor")
-  auditLogs         AuditLog[]           @relation("AuditActor")
-  pushMessages      PushMessage[]        @relation("PushAuthor")
-  segments          CustomerSegment[]    @relation("SegmentAuthor")
-  consentRecords    ConsentRecord[]      @relation("ConsentActor")
-  campaigns         Campaign[]           @relation("CampaignAuthor")
-  campaignRevisions CampaignRevision[]   @relation("RevisionAuthor")
+  operations        LoyaltyOperation[]         @relation("OperationActor")
+  auditLogs         AuditLog[]                 @relation("AuditActor")
+  pushMessages      PushMessage[]              @relation("PushAuthor")
+  segments          CustomerSegment[]          @relation("SegmentAuthor")
+  consentRecords    ConsentRecord[]            @relation("ConsentActor")
+  campaigns         Campaign[]                 @relation("CampaignAuthor")
+  campaignRevisions CampaignRevision[]         @relation("RevisionAuthor")
+  campaignApprovals CampaignApproval[]         @relation("ApprovalDecider")
+  audienceSnapshots CampaignAudienceSnapshot[] @relation("SnapshotAuthor")
 }
 
 model Business {
@@ -244,6 +257,8 @@ model Business {
   segments           CustomerSegment[]
   consentRecords     ConsentRecord[]
   campaigns          Campaign[]
+  campaignApprovals  CampaignApproval[]
+  audienceSnapshots  CampaignAudienceSnapshot[]
   pushMessages       PushMessage[]
   pushSubscriptions  PushSubscription[]
 }
@@ -337,11 +352,12 @@ model CustomerBusinessProfile {
   createdAt              DateTime  @default(now())
   updatedAt              DateTime  @updatedAt
 
-  business       Business           @relation(fields: [businessId], references: [id])
-  customer       Customer           @relation(fields: [customerId], references: [id])
-  cards          CustomerCard[]
-  operations     LoyaltyOperation[]
-  consentRecords ConsentRecord[]
+  business            Business                 @relation(fields: [businessId], references: [id])
+  customer            Customer                 @relation(fields: [customerId], references: [id])
+  cards               CustomerCard[]
+  operations          LoyaltyOperation[]
+  consentRecords      ConsentRecord[]
+  audienceMemberships CampaignAudienceMember[]
 
   @@unique([businessId, customerId])
   @@index([businessId, lastSeenAt])
@@ -592,9 +608,10 @@ model CustomerSegment {
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 
-  business  Business   @relation(fields: [businessId], references: [id])
-  createdBy User?      @relation("SegmentAuthor", fields: [createdByUserId], references: [id])
-  campaigns Campaign[]
+  business          Business                   @relation(fields: [businessId], references: [id])
+  createdBy         User?                      @relation("SegmentAuthor", fields: [createdByUserId], references: [id])
+  campaigns         Campaign[]
+  audienceSnapshots CampaignAudienceSnapshot[]
 
   @@unique([businessId, normalizedName])
   @@index([businessId, archivedAt])
@@ -629,6 +646,8 @@ model ConsentRecord {
   profile  CustomerBusinessProfile @relation(fields: [customerBusinessProfileId], references: [id])
   actor    User?                   @relation("ConsentActor", fields: [actorUserId], references: [id])
 
+  audienceMemberships CampaignAudienceMember[]
+
   @@index([customerBusinessProfileId, scope, recordedAt(sort: Desc)])
   @@index([businessId, recordedAt])
 }
@@ -651,10 +670,20 @@ model Campaign {
   createdAt       DateTime        @default(now())
   updatedAt       DateTime        @updatedAt
 
-  business  Business           @relation(fields: [businessId], references: [id])
-  segment   CustomerSegment?   @relation(fields: [segmentId], references: [id])
-  createdBy User?              @relation("CampaignAuthor", fields: [createdByUserId], references: [id])
-  revisions CampaignRevision[]
+  /// Which revision the current approval covers, or null. Derivable from CampaignApproval; kept
+  /// here so the drafts list answers "is what I am looking at what was approved" without a
+  /// correlated subquery per row. Cleared in the same transaction that invalidates an approval.
+  approvedRevisionNumber Int?
+  approvedSnapshotId     String?
+  approvedAt             DateTime?
+
+  business         Business                   @relation(fields: [businessId], references: [id])
+  segment          CustomerSegment?           @relation(fields: [segmentId], references: [id], onDelete: Restrict)
+  createdBy        User?                      @relation("CampaignAuthor", fields: [createdByUserId], references: [id])
+  revisions        CampaignRevision[]
+  approvals        CampaignApproval[]
+  snapshots        CampaignAudienceSnapshot[]
+  approvedSnapshot CampaignAudienceSnapshot?  @relation("CampaignApprovedSnapshot", fields: [approvedSnapshotId], references: [id], onDelete: Restrict)
 
   @@unique([businessId, normalizedName])
   @@index([businessId, archivedAt])
@@ -671,10 +700,107 @@ model CampaignRevision {
   createdByUserId String?
   createdAt       DateTime @default(now())
 
-  campaign  Campaign @relation(fields: [campaignId], references: [id])
-  createdBy User?    @relation("RevisionAuthor", fields: [createdByUserId], references: [id])
+  campaign  Campaign                   @relation(fields: [campaignId], references: [id])
+  createdBy User?                      @relation("RevisionAuthor", fields: [createdByUserId], references: [id])
+  approvals CampaignApproval[]
+  snapshots CampaignAudienceSnapshot[]
 
   @@unique([campaignId, revisionNumber])
+}
+
+/// APPEND-ONLY. The record that a person decided something about one exact revision.
+///
+/// An approval that can be edited afterwards is a label, not a decision, so
+/// `campaign_approval_append_only` rejects UPDATE, DELETE and TRUNCATE and the runtime role holds
+/// only SELECT and INSERT.
+model CampaignApproval {
+  id                  String           @id @default(uuid())
+  businessId          String
+  campaignId          String
+  /// The exact revision decided about. Approval never covers "the campaign".
+  campaignRevisionId  String
+  revisionNumber      Int
+  decision            CampaignDecision
+  /// The channel the approver was told this was for, declared at the decision rather than read
+  /// from the draft afterwards.
+  intendedChannel     CampaignChannel
+  audienceSnapshotId  String?
+  /// Which approval a withdrawal takes back. Null on an approval.
+  withdrawsApprovalId String?
+  decidedByUserId     String?
+  decidedAt           DateTime
+  /// Free text from the approver. Never a phone number, a customer name or a token.
+  note                String?
+  createdAt           DateTime         @default(now())
+
+  business    Business                  @relation(fields: [businessId], references: [id])
+  campaign    Campaign                  @relation(fields: [campaignId], references: [id])
+  revision    CampaignRevision          @relation(fields: [campaignRevisionId], references: [id])
+  snapshot    CampaignAudienceSnapshot? @relation(fields: [audienceSnapshotId], references: [id], onDelete: Restrict)
+  withdraws   CampaignApproval?         @relation("ApprovalWithdrawal", fields: [withdrawsApprovalId], references: [id], onDelete: Restrict)
+  withdrawnBy CampaignApproval[]        @relation("ApprovalWithdrawal")
+  decidedBy   User?                     @relation("ApprovalDecider", fields: [decidedByUserId], references: [id])
+
+  @@index([campaignId, decidedAt(sort: Desc)])
+  @@index([businessId, decidedAt(sort: Desc)])
+}
+
+/// APPEND-ONLY. The audience as it was at the instant of a decision.
+///
+/// A segment is a live definition and its membership moves; a decision has to keep meaning what it
+/// meant. This is the only place in the product where audience membership is stored at all.
+model CampaignAudienceSnapshot {
+  id                 String   @id @default(uuid())
+  businessId         String
+  campaignId         String
+  campaignRevisionId String
+  segmentId          String
+  /// The segment's name at the moment of the snapshot: a business's own label, not customer data.
+  segmentName        String
+  takenAt            DateTime
+  matchedCount       Int
+  /// The number of CampaignAudienceMember rows, stored so the header alone is a complete answer.
+  eligibleCount      Int
+  /// Exclusions as COUNTS ONLY. No row is written for an excluded customer.
+  unknownCount       Int
+  withdrawnCount     Int
+  takenByUserId      String?
+  createdAt          DateTime @default(now())
+
+  business         Business                 @relation(fields: [businessId], references: [id])
+  campaign         Campaign                 @relation(fields: [campaignId], references: [id])
+  revision         CampaignRevision         @relation(fields: [campaignRevisionId], references: [id])
+  segment          CustomerSegment          @relation(fields: [segmentId], references: [id])
+  takenBy          User?                    @relation("SnapshotAuthor", fields: [takenByUserId], references: [id])
+  members          CampaignAudienceMember[]
+  approvals        CampaignApproval[]
+  approvedCampaign Campaign[]               @relation("CampaignApprovedSnapshot")
+
+  @@index([campaignId, takenAt(sort: Desc)])
+  @@index([businessId])
+}
+
+/// APPEND-ONLY. One row per customer who MAY be contacted, and the smallest row that can be.
+///
+/// Deliberately absent: phone, name, email, card id, serial, card URL, QR token, share token,
+/// source token, and any rendered message. A future delivery phase resolves a contact detail from
+/// the profile reference under its own authorization; it does not inherit a contact list.
+model CampaignAudienceMember {
+  id                        String       @id @default(uuid())
+  snapshotId                String
+  customerBusinessProfileId String
+  /// Observed at the instant of the snapshot, so a later rule change cannot reinterpret it.
+  consentState              ConsentState
+  /// The record that decided it. Null means the permission came from the enrolment answer itself.
+  consentRecordId           String?
+  createdAt                 DateTime     @default(now())
+
+  snapshot      CampaignAudienceSnapshot @relation(fields: [snapshotId], references: [id])
+  profile       CustomerBusinessProfile  @relation(fields: [customerBusinessProfileId], references: [id])
+  consentRecord ConsentRecord?           @relation(fields: [consentRecordId], references: [id], onDelete: Restrict)
+
+  @@unique([snapshotId, customerBusinessProfileId])
+  @@index([snapshotId])
 }
 
 /// Non-ledger security and business events: registration, membership changes, template activation,

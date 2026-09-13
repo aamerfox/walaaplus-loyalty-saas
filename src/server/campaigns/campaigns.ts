@@ -2,6 +2,8 @@ import { CampaignChannel, CampaignState, Permission, Prisma } from "@prisma/clie
 import { z } from "zod";
 import { AuditAction, recordAudit } from "../audit/audit";
 import { marketingEligibleProfileIds } from "../consent/consent";
+import { invalidateApprovalForEdit } from "./approvals";
+import { readinessOf, type DeliveryReadiness } from "./delivery";
 import { prisma } from "../db";
 import { ConflictCode, ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../errors";
 import { readDefinition, toProfileWhere } from "../segments/definition";
@@ -13,11 +15,17 @@ import { assertPlaceholdersValid, type PlaceholderName } from "./placeholders";
  *
  * ## What "cannot send" means structurally, not as a promise
  *
- * `CampaignState` has three values — `DRAFT`, `READY`, `ARCHIVED` — and there is no `SENT`,
- * `SCHEDULED`, `QUEUED` or `SENDING` for a service to move a row into. There is no provider client,
- * no queue, no worker job and no outbound HTTP call anywhere in this module or reachable from it.
- * `READY` means "the merchant considers this finished"; it is a label on a draft and nothing
- * watches for it.
+ * `CampaignState` has five values — `DRAFT`, `IN_REVIEW`, `APPROVED`, `WITHDRAWN`, `ARCHIVED` — and
+ * there is no `SENT`, `SCHEDULED`, `QUEUED` or `SENDING` for a service to move a row into. There is
+ * no provider client, no queue, no worker job and no outbound HTTP call anywhere in this module or
+ * reachable from it. `src/server/campaigns/delivery.ts` is the only thing shaped like a delivery
+ * port, and its sole implementation throws on its first line.
+ *
+ * ## Who writes which state
+ *
+ * This module owns the three a merchant drives: `DRAFT`, `IN_REVIEW` and `ARCHIVED`. `APPROVED` and
+ * `WITHDRAWN` are written **only** by `approvals.ts`, as a consequence of an append-only decision
+ * row existing. That split is the point: an approval is a record, not a label somebody can set.
  *
  * The reserved delivery model from Phase 0 — `PushMessage` and `PushMessageStatus`, which does have
  * a `SENT` — is untouched and separate. A later phase joins the two; this one does not.
@@ -83,6 +91,16 @@ export interface CampaignSummary {
   /** The newest revision, which is what the editor opens. */
   latestRevision: CampaignRevisionView | null;
   revisionCount: number;
+  /** The revision a standing approval covers, or null. Never assume it is the latest one. */
+  approvedRevisionNumber: number | null;
+  approvedAt: Date | null;
+  /** How many people the snapshot behind that approval recorded as contactable. */
+  approvedAudienceSize: number | null;
+  /**
+   * Why this still cannot be delivered. Always present, always `deliverable: false`, so a screen
+   * cannot render an approved campaign without also rendering what approval did not buy.
+   */
+  readiness: DeliveryReadiness;
 }
 
 const CAMPAIGN_SELECT = {
@@ -95,7 +113,12 @@ const CAMPAIGN_SELECT = {
   archivedAt: true,
   createdAt: true,
   updatedAt: true,
+  approvedRevisionNumber: true,
+  approvedAt: true,
   segment: { select: { name: true } },
+  // The COUNT behind a standing approval, never its membership. There is no select anywhere in
+  // this codebase that reads CampaignAudienceMember rows out to a caller.
+  approvedSnapshot: { select: { eligibleCount: true } },
   _count: { select: { revisions: true } },
   revisions: {
     orderBy: { revisionNumber: "desc" as const },
@@ -136,6 +159,14 @@ function toSummary(row: CampaignRow): CampaignSummary {
         }
       : null,
     revisionCount: row._count.revisions,
+    approvedRevisionNumber: row.approvedRevisionNumber,
+    approvedAt: row.approvedAt,
+    approvedAudienceSize: row.approvedSnapshot?.eligibleCount ?? null,
+    readiness: readinessOf({
+      state: row.state,
+      approvedRevisionNumber: row.approvedRevisionNumber,
+      approvedAudienceSize: row.approvedSnapshot?.eligibleCount ?? null,
+    }),
   };
 }
 
@@ -311,6 +342,13 @@ export async function reviseCampaign(
 
   return prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT id FROM "Campaign" WHERE id = ${existing.id} FOR UPDATE`;
+    /*
+     * An approved campaign is editable — refusing the edit would be worse, because a merchant who
+     * spots a typo after approval needs a way to fix it that is not "make a second campaign". What
+     * an edit must never do is carry the approval along with it, so the new revision is written and
+     * the campaign drops back to DRAFT in the same transaction. The approval row is untouched: it
+     * remains a true statement about the revision it named.
+     */
     const last = await tx.campaignRevision.findFirst({
       where: { campaignId: existing.id },
       orderBy: { revisionNumber: "desc" },
@@ -327,6 +365,8 @@ export async function reviseCampaign(
         createdByUserId: ctx.userId,
       },
     });
+    await invalidateApprovalForEdit(tx, ctx, existing, revisionNumber);
+
     // Touches `updatedAt` so the list orders by recent work. The content is not on this row.
     const campaign = await tx.campaign.update({
       where: { id: existing.id },
@@ -356,6 +396,15 @@ export async function setCampaignAudience(
   requirePermission(ctx, Permission.EDIT_PUSHES);
   const existing = await requireOwnCampaign(ctx, campaignId);
   if (existing.archivedAt !== null) throw new ConflictError("This campaign is archived; restore it before editing");
+  if (existing.state === CampaignState.APPROVED) {
+    /*
+     * Refused rather than silently invalidated, unlike a content edit. The snapshot behind an
+     * approval was taken over THIS segment; swapping the segment underneath it would leave an
+     * approval whose audience came from a group nobody approved. Withdrawing first makes that a
+     * decision somebody takes, with a row to show for it.
+     */
+    throw new ConflictError("Withdraw the approval before changing who this campaign is for");
+  }
   const resolved = await resolveSegment(ctx, segmentId);
 
   return prisma.$transaction(async (tx) => {
@@ -378,12 +427,29 @@ export async function setCampaignAudience(
 }
 
 /**
- * Move a draft between the three states that exist.
+ * The states a MERCHANT drives, and the moves between them.
  *
- * `DRAFT` ↔ `READY` is a label the merchant controls; `ARCHIVED` hides it and keeps the row,
- * because a later phase's delivery record will reference a campaign by id. There is no fourth
- * state, and this function is the only thing that writes `state`.
+ * `APPROVED` and `WITHDRAWN` are deliberately absent from every value of this table: they are
+ * written only by `approvals.ts`, as the consequence of a decision row. A product where somebody
+ * can set a campaign to "approved" has a label, not an approval.
+ *
+ *   DRAFT     → IN_REVIEW   submit for a decision
+ *   DRAFT     → ARCHIVED    put away
+ *   IN_REVIEW → DRAFT       pull it back to keep writing
+ *   IN_REVIEW → ARCHIVED    put away
+ *   APPROVED  → ARCHIVED    refused: withdraw first, so the decision is taken back on the record
+ *   WITHDRAWN → DRAFT       start again; approving again writes a new decision and a new snapshot
+ *   WITHDRAWN → ARCHIVED    put away
+ *   ARCHIVED  → DRAFT       restore
  */
+const MERCHANT_TRANSITIONS: Readonly<Record<CampaignState, readonly CampaignState[]>> = {
+  [CampaignState.DRAFT]: [CampaignState.IN_REVIEW, CampaignState.ARCHIVED],
+  [CampaignState.IN_REVIEW]: [CampaignState.DRAFT, CampaignState.ARCHIVED],
+  [CampaignState.APPROVED]: [],
+  [CampaignState.WITHDRAWN]: [CampaignState.DRAFT, CampaignState.ARCHIVED],
+  [CampaignState.ARCHIVED]: [CampaignState.DRAFT],
+};
+
 export async function setCampaignState(
   ctx: TenantContext,
   campaignId: string,
@@ -393,8 +459,15 @@ export async function setCampaignState(
   const existing = await requireOwnCampaign(ctx, campaignId);
   if (existing.state === state) return toSummary(existing);
 
-  if (state === CampaignState.READY && existing.revisions.length === 0) {
-    throw new ConflictError("A campaign needs content before it can be marked ready");
+  if (!MERCHANT_TRANSITIONS[existing.state].includes(state)) {
+    if (existing.state === CampaignState.APPROVED) {
+      throw new ConflictError("Withdraw the approval before changing this campaign");
+    }
+    throw new ConflictError(`A campaign cannot go from ${existing.state} to ${state}`);
+  }
+
+  if (state === CampaignState.IN_REVIEW && existing.revisions.length === 0) {
+    throw new ConflictError("A campaign needs content before it can go for review");
   }
 
   try {

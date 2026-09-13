@@ -148,7 +148,13 @@ describe("restricted runtime database role", () => {
       expect(p[0]).toEqual({ s: true, i: true, u: false, d: false, t: false, c: false });
     });
 
-    it.each([`"ConsentRecord"`, `"CampaignRevision"`])(
+    it.each([
+      `"ConsentRecord"`,
+      `"CampaignRevision"`,
+      `"CampaignApproval"`,
+      `"CampaignAudienceSnapshot"`,
+      `"CampaignAudienceMember"`,
+    ])(
       "has exactly SELECT and INSERT on %s, the other append-only histories",
       async (table) => {
         /*
@@ -220,6 +226,15 @@ describe("restricted runtime database role", () => {
       ["DELETE campaign revisions", `DELETE FROM "CampaignRevision"`],
       ["TRUNCATE campaign revisions", `TRUNCATE "CampaignRevision"`],
       ["disable the revision append-only trigger", `ALTER TABLE "CampaignRevision" DISABLE TRIGGER USER`],
+      ["UPDATE an approval", `UPDATE "CampaignApproval" SET note = 'edited'`],
+      ["DELETE approvals", `DELETE FROM "CampaignApproval"`],
+      ["TRUNCATE approvals", `TRUNCATE "CampaignApproval"`],
+      ["disable the approval append-only trigger", `ALTER TABLE "CampaignApproval" DISABLE TRIGGER USER`],
+      ["UPDATE an audience snapshot", `UPDATE "CampaignAudienceSnapshot" SET "eligibleCount" = 9999`],
+      ["DELETE audience snapshots", `DELETE FROM "CampaignAudienceSnapshot"`],
+      ["UPDATE an audience member", `UPDATE "CampaignAudienceMember" SET "consentState" = 'GRANTED'`],
+      ["DELETE audience members", `DELETE FROM "CampaignAudienceMember"`],
+      ["TRUNCATE audience members", `TRUNCATE "CampaignAudienceMember"`],
       ["delete migration history", `DELETE FROM "_prisma_migrations"`],
       ["read migration history", `SELECT count(*) FROM "_prisma_migrations"`],
     ];

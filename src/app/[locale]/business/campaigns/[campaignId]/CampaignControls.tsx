@@ -5,16 +5,22 @@ import { useTranslations } from "next-intl";
 import { useRouter } from "@/i18n/routing";
 import { Badge, Button, Notice, SelectInput } from "@/components/ui";
 
+/** The five states a campaign can be in. Mirrors `CampaignState`; the server is the authority. */
+export type CampaignStateName = "DRAFT" | "IN_REVIEW" | "APPROVED" | "WITHDRAWN" | "ARCHIVED";
+
 /**
- * The three things a merchant can do to a draft besides rewrite it.
+ * What a merchant can do to a campaign besides rewrite it or decide about it.
  *
- * Choose an audience, mark it ready or back to draft, archive it — and ask how many people it would
- * reach. **There is no send control here, and no disabled one**: a greyed-out "Send" would be a
- * promise the product has not made, and the phase that builds delivery will add the button along
- * with the provider, the audit trail and the consent enforcement that have to come with it.
+ * Choose an audience, send it for review or pull it back, archive or restore it — and ask how many
+ * people it would reach right now. **There is no send control here, and no disabled one**: a
+ * greyed-out "Send" would be a promise the product has not made.
  *
- * The audience preview returns three integers from the server. No recipient name, phone or id is
- * returned by the route or rendered here.
+ * Approving and withdrawing are deliberately NOT here. They live in `ApprovalPanel`, because they
+ * write append-only history and they need a confirmation step that the ordinary controls do not.
+ *
+ * Two things this component does not decide: whether a transition is allowed, and who may make one.
+ * It renders the buttons that make sense for the state it was given, and the server refuses
+ * anything else — `MERCHANT_TRANSITIONS` in `src/server/campaigns/campaigns.ts` is the real table.
  */
 export default function CampaignControls({
   businessId,
@@ -26,7 +32,7 @@ export default function CampaignControls({
 }: {
   businessId: string;
   campaignId: string;
-  state: "DRAFT" | "READY" | "ARCHIVED";
+  state: CampaignStateName;
   segmentId: string | null;
   segments: { id: string; name: string }[];
   /** False when this member is branch-scoped: a per-viewer audience number would mislead. */
@@ -55,9 +61,11 @@ export default function CampaignControls({
       setError(
         data?.error?.code === "FORBIDDEN"
           ? t("errorForbidden")
-          : data?.error?.code === "VALIDATION_ERROR"
-            ? t("errorNoAudience")
-            : tc("genericError"),
+          : data?.error?.code === "CONFLICT"
+            ? t("errorApproveStale")
+            : data?.error?.code === "VALIDATION_ERROR"
+              ? t("errorNoAudience")
+              : tc("genericError"),
       );
       return { ok: false, code: data?.error?.code };
     } catch {
@@ -67,6 +75,17 @@ export default function CampaignControls({
       setBusy(false);
     }
   }
+
+  function move(next: CampaignStateName) {
+    void post({ action: "setState", state: next }).then((r) => {
+      if (r.ok) router.refresh();
+    });
+  }
+
+  // An approved campaign is frozen for these controls on purpose: the audience it was approved
+  // against is part of the decision, so changing it means withdrawing first.
+  const frozen = state === "APPROVED";
+  const archived = state === "ARCHIVED";
 
   return (
     <div className="space-y-4" data-testid="campaign-controls">
@@ -80,7 +99,7 @@ export default function CampaignControls({
         <span className="mb-1 block font-semibold text-ink">{t("audienceLabel")}</span>
         <SelectInput
           value={segmentId ?? ""}
-          disabled={busy || state === "ARCHIVED"}
+          disabled={busy || archived || frozen}
           data-testid="campaign-audience"
           onChange={(e) => {
             const next = e.target.value || null;
@@ -117,51 +136,25 @@ export default function CampaignControls({
           </Button>
         ) : null}
 
-        {state !== "ARCHIVED" ? (
-          <>
-            <Button
-              type="button"
-              size="sm"
-              variant={state === "READY" ? "ghost" : "primary"}
-              disabled={busy}
-              testId="campaign-toggle-ready"
-              onClick={() =>
-                void post({ action: "setState", state: state === "READY" ? "DRAFT" : "READY" }).then((r) => {
-                  if (r.ok) router.refresh();
-                })
-              }
-            >
-              {state === "READY" ? t("backToDraft") : t("markReady")}
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant="ghost"
-              disabled={busy}
-              testId="campaign-archive"
-              onClick={() =>
-                void post({ action: "setState", state: "ARCHIVED" }).then((r) => {
-                  if (r.ok) router.refresh();
-                })
-              }
-            >
-              {t("archive")}
-            </Button>
-          </>
-        ) : (
-          <Button
-            type="button"
-            size="sm"
-            variant="secondary"
-            disabled={busy}
-            testId="campaign-restore"
-            onClick={() =>
-              void post({ action: "setState", state: "DRAFT" }).then((r) => {
-                if (r.ok) router.refresh();
-              })
-            }
-          >
+        {state === "DRAFT" || state === "WITHDRAWN" ? (
+          <Button type="button" size="sm" variant="primary" disabled={busy} testId="campaign-submit-review" onClick={() => move("IN_REVIEW")}>
+            {t("submitReview")}
+          </Button>
+        ) : null}
+
+        {state === "IN_REVIEW" ? (
+          <Button type="button" size="sm" variant="ghost" disabled={busy} testId="campaign-back-to-draft" onClick={() => move("DRAFT")}>
+            {t("backToDraft")}
+          </Button>
+        ) : null}
+
+        {archived ? (
+          <Button type="button" size="sm" variant="secondary" disabled={busy} testId="campaign-restore" onClick={() => move("DRAFT")}>
             {t("restore")}
+          </Button>
+        ) : frozen ? null : (
+          <Button type="button" size="sm" variant="ghost" disabled={busy} testId="campaign-archive" onClick={() => move("ARCHIVED")}>
+            {t("archive")}
           </Button>
         )}
       </div>

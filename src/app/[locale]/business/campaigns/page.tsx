@@ -78,7 +78,19 @@ export default async function CampaignsPage({ params }: { params: Promise<{ loca
                     </p>
                   </div>
                   <div className="flex shrink-0 flex-wrap gap-2">
-                    <Badge tone={campaign.state === "READY" ? "accent" : "neutral"}>{t(`state.${campaign.state}`)}</Badge>
+                    <Badge
+                      tone={
+                        campaign.state === "APPROVED"
+                          ? "success"
+                          : campaign.state === "IN_REVIEW"
+                            ? "accent"
+                            : campaign.state === "WITHDRAWN"
+                              ? "warn"
+                              : "neutral"
+                      }
+                    >
+                      {t(`state.${campaign.state}`)}
+                    </Badge>
                     <Badge tone="neutral">{t(`channel.${campaign.channel}`)}</Badge>
                   </div>
                 </div>

@@ -19,6 +19,9 @@ import { createStampProgram, type StampProgramSummary } from "@/server/program/s
 
 const APP_TABLES = [
   "AuthRateLimit",
+  "CampaignAudienceMember",
+  "CampaignAudienceSnapshot",
+  "CampaignApproval",
   "CampaignRevision",
   "Campaign",
   "ConsentRecord",
@@ -64,7 +67,14 @@ export function migratorPrisma(): PrismaClient {
  * extra rows. Each has to be disabled for the wipe, and only the table OWNER may do that: the
  * runtime role the services use cannot (tests/integration/runtime-role.test.ts proves it).
  */
-const APPEND_ONLY_TABLES = ["LoyaltyOperation", "ConsentRecord", "CampaignRevision"];
+const APPEND_ONLY_TABLES = [
+  "LoyaltyOperation",
+  "ConsentRecord",
+  "CampaignRevision",
+  "CampaignApproval",
+  "CampaignAudienceSnapshot",
+  "CampaignAudienceMember",
+];
 
 /** Wipe every application table, with the append-only triggers off for the duration. */
 export async function resetDatabase(): Promise<void> {
