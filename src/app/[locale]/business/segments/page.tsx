@@ -166,7 +166,7 @@ export default async function SegmentsPage({ params }: { params: Promise<{ local
       ) : null}
 
       <Notice tone="info" testId="segments-foundation">
-        {t("foundationNote")}
+        {t("foundationNote")} {t("campaignNote")}
       </Notice>
     </>
   );

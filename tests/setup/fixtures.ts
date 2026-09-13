@@ -19,6 +19,10 @@ import { createStampProgram, type StampProgramSummary } from "@/server/program/s
 
 const APP_TABLES = [
   "AuthRateLimit",
+  "CampaignRevision",
+  "Campaign",
+  "ConsentRecord",
+  "CustomerSegment",
   "PushDelivery",
   "PushSubscription",
   "PushMessage",
@@ -53,18 +57,28 @@ export function migratorPrisma(): PrismaClient {
 }
 
 /**
- * Wipe every application table. The ledger blocks TRUNCATE by trigger, so the user trigger is
- * disabled for the duration — something only the table OWNER can do. The runtime role the
- * services use cannot (tests/integration/runtime-role.test.ts proves it).
+ * Every table whose append-only trigger refuses TRUNCATE.
+ *
+ * The ledger was the first; Phase 2 added consent records and campaign revisions, which are
+ * append-only for the same reason — a history the application can rewrite is a current value with
+ * extra rows. Each has to be disabled for the wipe, and only the table OWNER may do that: the
+ * runtime role the services use cannot (tests/integration/runtime-role.test.ts proves it).
  */
+const APPEND_ONLY_TABLES = ["LoyaltyOperation", "ConsentRecord", "CampaignRevision"];
+
+/** Wipe every application table, with the append-only triggers off for the duration. */
 export async function resetDatabase(): Promise<void> {
   const db = migratorPrisma();
   const list = APP_TABLES.map((t) => `"${t}"`).join(", ");
-  await db.$executeRawUnsafe(`ALTER TABLE "LoyaltyOperation" DISABLE TRIGGER USER`);
+  for (const table of APPEND_ONLY_TABLES) {
+    await db.$executeRawUnsafe(`ALTER TABLE "${table}" DISABLE TRIGGER USER`);
+  }
   try {
     await db.$executeRawUnsafe(`TRUNCATE TABLE ${list} RESTART IDENTITY CASCADE`);
   } finally {
-    await db.$executeRawUnsafe(`ALTER TABLE "LoyaltyOperation" ENABLE TRIGGER USER`);
+    for (const table of APPEND_ONLY_TABLES) {
+      await db.$executeRawUnsafe(`ALTER TABLE "${table}" ENABLE TRIGGER USER`);
+    }
   }
 }
 

@@ -147,6 +147,26 @@ describe("restricted runtime database role", () => {
                has_schema_privilege('public', 'CREATE')              AS c`;
       expect(p[0]).toEqual({ s: true, i: true, u: false, d: false, t: false, c: false });
     });
+
+    it.each([`"ConsentRecord"`, `"CampaignRevision"`])(
+      "has exactly SELECT and INSERT on %s, the other append-only histories",
+      async (table) => {
+        /*
+         * Consent history and campaign revisions are append-only for the same reason the ledger is:
+         * what they record is WHAT HAPPENED, and an edit to that is indistinguishable from a lie.
+         * The triggers already refuse a mutation, but a trigger is defeated by whoever may ALTER the
+         * table, so the runtime role must not hold the privilege in the first place. Any table added
+         * to APPEND_ONLY_TABLES in scripts/db-roles.mjs belongs in this list.
+         */
+        const p = await prisma.$queryRaw<{ s: boolean; i: boolean; u: boolean; d: boolean; t: boolean }[]>`
+          SELECT has_table_privilege(${table}::text, 'SELECT')   AS s,
+                 has_table_privilege(${table}::text, 'INSERT')   AS i,
+                 has_table_privilege(${table}::text, 'UPDATE')   AS u,
+                 has_table_privilege(${table}::text, 'DELETE')   AS d,
+                 has_table_privilege(${table}::text, 'TRUNCATE') AS t`;
+        expect(p[0]).toEqual({ s: true, i: true, u: false, d: false, t: false });
+      },
+    );
   });
 
   describe("the legitimate path works as the runtime role", () => {
@@ -192,6 +212,14 @@ describe("restricted runtime database role", () => {
       ["bypass triggers via LOCAL session_replication_role", `SET LOCAL session_replication_role = 'replica'`],
       ["create a table in public", `CREATE TABLE public."Rogue" (id int)`],
       ["create a function in public", `CREATE FUNCTION public.rogue() RETURNS int LANGUAGE sql AS 'SELECT 1'`],
+      ["UPDATE a consent record", `UPDATE "ConsentRecord" SET reason = 'edited'`],
+      ["DELETE consent records", `DELETE FROM "ConsentRecord"`],
+      ["TRUNCATE consent history", `TRUNCATE "ConsentRecord"`],
+      ["disable the consent append-only trigger", `ALTER TABLE "ConsentRecord" DISABLE TRIGGER USER`],
+      ["UPDATE a campaign revision", `UPDATE "CampaignRevision" SET body = 'edited'`],
+      ["DELETE campaign revisions", `DELETE FROM "CampaignRevision"`],
+      ["TRUNCATE campaign revisions", `TRUNCATE "CampaignRevision"`],
+      ["disable the revision append-only trigger", `ALTER TABLE "CampaignRevision" DISABLE TRIGGER USER`],
       ["delete migration history", `DELETE FROM "_prisma_migrations"`],
       ["read migration history", `SELECT count(*) FROM "_prisma_migrations"`],
     ];

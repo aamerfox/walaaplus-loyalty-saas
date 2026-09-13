@@ -27,6 +27,101 @@
     "points": "Points",
     "status": "Status"
   },
+  "Campaigns": {
+    "appendOnlyNote": "Revisions cannot be edited or deleted. A message you intend to send to your customers is worth being able to read back.",
+    "archive": "Archive",
+    "archivedSubtitle": "Kept, not deleted.",
+    "archivedTitle": "Archived",
+    "audienceEligible": "{count, plural, =0 {none have agreed to hear from you} one {1 has agreed to hear from you} other {# have agreed to hear from you}}",
+    "audienceHint": "One of your saved segments. You can choose one later.",
+    "audienceIs": "Audience: {name}",
+    "audienceLabel": "Audience",
+    "audienceMatched": "{count, plural, =0 {No customers match this segment} one {1 customer matches this segment} other {# customers match this segment}}",
+    "audienceNoList": "Counts only. This product never builds or stores a list of who a campaign would reach.",
+    "audienceNotEligible": "{count, plural, =0 {} one {1 declined, or has no clear record of agreeing} other {# declined, or have no clear record of agreeing}}",
+    "audienceSubtitle": "A saved segment, re-checked against live data whenever you ask.",
+    "audienceTitle": "Who it is for",
+    "backToDraft": "Back to draft",
+    "backToList": "Back to drafts",
+    "bodyHint": "Up to 1000 characters.",
+    "bodyLabel": "Message",
+    "channel": {
+      "PUSH": "App notification",
+      "SMS": "SMS",
+      "WHATSAPP": "WhatsApp",
+      "EMAIL": "Email"
+    },
+    "channelHint": "A label on the draft. Nothing reads it to send anything.",
+    "channelLabel": "Intended for",
+    "contentSubtitle": "Saving writes a new revision. The old one stays readable.",
+    "contentTitle": "Message",
+    "create": "Save draft",
+    "created": "Draft saved.",
+    "detailSubtitle": "Intended for {channel}. Nothing is sent.",
+    "draftOnlyBadge": "Draft only",
+    "draftOnlyBanner": "Draft only — nothing will be sent. This product has no way to send a message yet: no provider, no schedule, no queue. Drafts are kept so they are ready when it does.",
+    "draftsTitle": "Drafts",
+    "emptyBody": "Write one below. You can pick an audience from your saved segments, and see how many of them have agreed to hear from you.",
+    "emptyTitle": "No drafts yet",
+    "errorForbidden": "You do not have permission to change campaign drafts.",
+    "errorInvalid": "That draft could not be saved. Check the message and any inserted values.",
+    "errorNameTaken": "You already have a draft with that name.",
+    "errorNoAudience": "Choose an audience before asking how many people it reaches.",
+    "field": {
+      "subject": "title",
+      "body": "message"
+    },
+    "forbidden": "Campaigns are visible to the owner and managers.",
+    "foundationNote": "Drafts are a foundation. Sending, scheduling, unsubscribe links and delivery reports are a later step, and none of them exists yet.",
+    "localeAr": "Arabic",
+    "localeEn": "English",
+    "localeHint": "One draft, one language. A half-translated message is worse than an untranslated one.",
+    "localeLabel": "Language",
+    "markReady": "Mark as ready",
+    "nameLabel": "Draft name",
+    "newSubtitle": "Content is saved as a revision each time, so you can always read back what it said.",
+    "newTitle": "Write a draft",
+    "noAudience": "No audience yet",
+    "noAudienceYet": "No audience chosen",
+    "noBusinessBody": "This account is not a member of any business.",
+    "noBusinessTitle": "No business yet",
+    "open": "Open",
+    "placeholder": {
+      "firstName": "Customer first name",
+      "businessName": "Your business name"
+    },
+    "placeholdersTitle": "Insert a value",
+    "previewAudience": "How many people?",
+    "previewEmpty": "Your message will appear here.",
+    "previewNote": "Sample values, not a real customer. No customer is read to draw this.",
+    "previewTitle": "Preview",
+    "problem": {
+      "UNKNOWN": "“{token}” in the {field} is not a value this product can fill in.",
+      "WITHHELD": "“{token}” in the {field} is not available: a customer may hold several cards and we will not guess which one you meant.",
+      "MALFORMED": "“{token}” in the {field} is not a valid inserted value. Use only the buttons above."
+    },
+    "restore": "Restore",
+    "revised": "Revision saved.",
+    "revision": "No.",
+    "revisionBody": "Message",
+    "revisionCount": "{count, plural, one {1 revision} other {# revisions}}",
+    "revisionWhen": "Saved",
+    "revisionWho": "By",
+    "revisionsSubtitle": "Every version of this draft, newest first.",
+    "revisionsTitle": "Revisions",
+    "saveRevision": "Save a new revision",
+    "saving": "Saving…",
+    "state": {
+      "DRAFT": "Draft",
+      "READY": "Ready",
+      "ARCHIVED": "Archived"
+    },
+    "subjectHint": "Optional.",
+    "subjectLabel": "Title",
+    "subtitle": "Write a message and see how it would look. Choosing who it is for comes from your saved segments.",
+    "title": "Campaign drafts",
+    "withheldNote": "Programme name, stamp balance and reward name are not available: a customer may hold several cards, and this product will not guess which one you meant. They become available when a draft can be tied to one programme."
+  },
   "Card": {
     "stampsTitle": "Your stamps",
     "progress": "{current} of {required}",
@@ -74,8 +169,37 @@
     "search": "Search"
   },
   "Consent": {
+    "ambiguity": {
+      "MISSING_TIMESTAMP": "This customer's sign-up says they agreed, but no date was recorded with it. Without a date we cannot say what they agreed to or when, so they are not treated as having agreed. Ask again at the counter and record the answer below.",
+      "MISSING_POLICY_VERSION": "This customer's sign-up says they agreed, but the wording they saw was not recorded. Without it we cannot say what they agreed to, so they are not treated as having agreed. Ask again at the counter and record the answer below."
+    },
+    "appendOnlyNote": "Every change adds a line. Nothing in this history can be edited or removed, including by us — which is what makes it worth reading.",
+    "atSignUp": "Sign-up",
+    "capture": {
+      "ENROLMENT": "At sign-up",
+      "STAFF_UPDATE": "Told a staff member"
+    },
     "consentLabel": "I agree to receive offers from this business",
-    "privacyNote": "We use your number only to recognise your card."
+    "errorForbidden": "You do not have permission to change a customer's marketing preference.",
+    "how": "How",
+    "notEligible": "Not counted as permission",
+    "notRecorded": "Not recorded",
+    "privacyNote": "We use your number only to recognise your card.",
+    "reasonHint": "Optional, for your own records. Do not write anything you would not want another member of staff to read.",
+    "reasonLabel": "What the customer said",
+    "recordGranted": "Record: agreed",
+    "recordWithdrawn": "Record: declined",
+    "recorded": "Recorded.",
+    "state": {
+      "GRANTED": "Agreed",
+      "WITHDRAWN": "Declined",
+      "UNKNOWN": "Not known"
+    },
+    "subtitle": "What this customer has agreed to, and every change since. Nothing here is ever overwritten.",
+    "title": "Marketing preference",
+    "what": "Preference",
+    "when": "Date",
+    "who": "Recorded by"
   },
   "Customers": {
     "backToList": "Back to customers",
@@ -310,6 +434,7 @@
   "Navigation": {
     "billing": "Billing & SaaS",
     "businessLabel": "Business",
+    "campaigns": "Campaigns",
     "cards": "Card Loyalty Engine",
     "closeMenu": "Close the menu",
     "customers": "Customers",
@@ -625,6 +750,7 @@
     "archivedTitle": "Archived",
     "atLeast": "At least",
     "atMost": "At most",
+    "campaignNote": "A saved segment can be chosen as the audience of a campaign draft. Choosing one changes nothing about the segment, and it still sends nothing.",
     "cardType": {
       "STAMP": "Stamp card",
       "POINTS": "Points card"

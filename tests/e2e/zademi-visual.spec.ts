@@ -53,7 +53,7 @@ const PUBLIC_ROUTES = ["", "/pricing", "/auth/login", "/auth/register"];
  * Retyping them is how the previous check passed while the Arabic rail said "geofencing": a test
  * that carries its own copy of a label agrees with itself, not with the product.
  */
-const NAV_KEYS = ["dashboard", "programs", "scanner", "customers", "segments", "locations", "team"] as const;
+const NAV_KEYS = ["dashboard", "programs", "scanner", "customers", "segments", "campaigns", "locations", "team"] as const;
 const NAV = { en: en.Navigation, ar: ar.Navigation } as const;
 
 async function signIn(page: Page, email: string, locale: "en" | "ar") {

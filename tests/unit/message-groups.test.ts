@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { CardType, MembershipRole, TemplateStatus } from "@prisma/client";
+import { CampaignChannel, CampaignState, CardType, ConsentCapture, ConsentState, MembershipRole, TemplateStatus } from "@prisma/client";
 import { describe, expect, it } from "vitest";
 
 /**
@@ -44,6 +44,11 @@ const GROUPS: { path: string; values: readonly string[] }[] = [
   // missing from both locales when the screen shipped, and the screenshot showed the key name.
   { path: "Customers.cardType", values: Object.values(CardType) },
   { path: "Segments.cardType", values: Object.values(CardType) },
+  // Phase 2 Prompt 2. Every enum the consent and campaign screens index a message group by.
+  { path: "Consent.state", values: Object.values(ConsentState) },
+  { path: "Consent.capture", values: Object.values(ConsentCapture) },
+  { path: "Campaigns.state", values: Object.values(CampaignState) },
+  { path: "Campaigns.channel", values: Object.values(CampaignChannel) },
   { path: "Programs.statuses", values: Object.values(TemplateStatus) },
   { path: "Staff.roles", values: Object.values(MembershipRole) },
   { path: "Programs.form.earnMode", values: ["MANUAL", "PER_VISIT", "SPEND_BLOCK"] },

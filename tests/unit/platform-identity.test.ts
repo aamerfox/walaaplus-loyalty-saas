@@ -159,7 +159,7 @@ describe("the logo is one lockup, drawn once", () => {
 
 describe("the merchant navigation is one structure in both locales", () => {
   /** The rail, in the order a merchant meets it. Adding a screen means adding it here. */
-  const NAV_KEYS = ["dashboard", "programs", "scanner", "customers", "segments", "locations", "team"];
+  const NAV_KEYS = ["dashboard", "programs", "scanner", "customers", "segments", "campaigns", "locations", "team"];
 
   it("names every destination in every locale", () => {
     for (const locale of ["en", "ar"]) {

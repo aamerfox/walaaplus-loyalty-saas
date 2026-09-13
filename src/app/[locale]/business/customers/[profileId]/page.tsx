@@ -1,12 +1,14 @@
-import { CardType } from "@prisma/client";
+import { CardType, Permission } from "@prisma/client";
 import { getTranslations } from "next-intl/server";
 import { notFound, redirect } from "next/navigation";
 import { Link } from "@/i18n/routing";
 import { Badge, Card, DetailRow, EmptyState, Notice, PageHeader, Section, StatTile, Table, Td, Th } from "@/components/ui";
 import { getCurrentUserId } from "@/server/auth/session";
+import { getConsentHistory, getConsentStatus } from "@/server/consent/consent";
 import { getCustomerProfile, listProfileActivity } from "@/server/customers/customer-360";
 import { isAppError } from "@/server/errors";
 import { resolveScannerContext } from "@/server/tenant/scanner-context";
+import ConsentControls from "./ConsentControls";
 
 /**
  * One customer, and everything this business knows about them.
@@ -63,20 +65,29 @@ export default async function CustomerProfilePage({
 
   const t = await getTranslations("Customers");
   const kinds = await getTranslations("OperationKinds");
+  const tConsent = await getTranslations("Consent");
   const resolved = await resolveScannerContext(userId, b ?? null);
   if (resolved.kind !== "ready") notFound();
   const { ctx } = resolved.context;
 
   let profile;
   let activity;
+  let consent;
+  let consentHistory;
   try {
-    // Two reads, both tenant-scoped. A profile id from another business, and one this member may
+    // Four reads, all tenant-scoped. A profile id from another business, and one this member may
     // not read, both end here as the same 404.
-    [profile, activity] = await Promise.all([getCustomerProfile(ctx, profileId), listProfileActivity(ctx, profileId)]);
+    [profile, activity, consent, consentHistory] = await Promise.all([
+      getCustomerProfile(ctx, profileId),
+      listProfileActivity(ctx, profileId),
+      getConsentStatus(ctx, profileId),
+      getConsentHistory(ctx, profileId),
+    ]);
   } catch (e) {
     if (isAppError(e)) notFound();
     throw e;
   }
+  const mayEditConsent = ctx.permissions.has(Permission.EDIT_CUSTOMERS) && ctx.role !== "CASHIER";
 
   const numbers = new Intl.NumberFormat(locale === "ar" ? "ar-SY-u-nu-latn" : "en");
   const name = [profile.firstName, profile.lastName].filter(Boolean).join(" ");
@@ -110,7 +121,21 @@ export default async function CustomerProfilePage({
             {profile.lastSeenAt ? profile.lastSeenAt.toISOString().slice(0, 10) : t("neverSeen")}
           </DetailRow>
           <DetailRow label={t("marketingConsent")}>
-            {profile.marketingConsent ? t("consentGiven") : t("consentNotGiven")}
+            <span className="inline-flex items-center gap-2">
+              <Badge
+                tone={consent.state === "GRANTED" ? "success" : consent.state === "WITHDRAWN" ? "neutral" : "warn"}
+                testId="consent-state"
+              >
+                {tConsent(`state.${consent.state}`)}
+              </Badge>
+              {/*
+               * "Ticked a box, but we cannot say when or to what" is not a permission, and the
+               * screen says so rather than showing a green tick over a gap in the record.
+               */}
+              {consent.marketingEligible ? null : (
+                <span className="text-xs text-ink-muted">{tConsent("notEligible")}</span>
+              )}
+            </span>
           </DetailRow>
         </dl>
       </Card>
@@ -183,6 +208,57 @@ export default async function CustomerProfilePage({
             ))}
           </div>
         )}
+      </Section>
+
+      <Section title={tConsent("title")} description={tConsent("subtitle")} testId="customer-consent">
+        <Card className="space-y-4">
+          {consent.ambiguity !== null ? (
+            <Notice tone="warn" testId="consent-ambiguity">
+              {tConsent(`ambiguity.${consent.ambiguity}`)}
+            </Notice>
+          ) : null}
+
+          <Table testId="consent-history">
+            <thead>
+              <tr>
+                <Th>{tConsent("when")}</Th>
+                <Th>{tConsent("what")}</Th>
+                <Th className="hidden sm:table-cell">{tConsent("how")}</Th>
+                <Th className="hidden sm:table-cell">{tConsent("who")}</Th>
+              </tr>
+            </thead>
+            <tbody>
+              {consentHistory.map((entry) => (
+                <tr key={entry.id}>
+                  <Td className="whitespace-nowrap tabular-nums text-ink-muted">
+                    {/* "Not recorded" is the truth for an enrolment taken before the consent
+                        version was wired up. Nothing invents a date to fill the column. */}
+                    {entry.recordedAt ? entry.recordedAt.toISOString().slice(0, 10) : tConsent("notRecorded")}
+                  </Td>
+                  <Td>
+                    <span className="font-semibold">{tConsent(`state.${entry.state}`)}</span>
+                    {entry.isOrigin ? (
+                      <Badge tone="neutral" className="ms-2">
+                        {tConsent("atSignUp")}
+                      </Badge>
+                    ) : null}
+                    {entry.reason ? <p className="text-xs text-ink-muted">{entry.reason}</p> : null}
+                  </Td>
+                  <Td className="hidden text-ink-muted sm:table-cell">{tConsent(`capture.${entry.capturedVia}`)}</Td>
+                  <Td className="hidden text-ink-muted sm:table-cell">{entry.actorName ?? "—"}</Td>
+                </tr>
+              ))}
+            </tbody>
+          </Table>
+
+          {mayEditConsent ? (
+            <ConsentControls businessId={ctx.businessId} profileId={profileId} state={consent.state} />
+          ) : null}
+
+          <Notice tone="info" testId="consent-append-only">
+            {tConsent("appendOnlyNote")}
+          </Notice>
+        </Card>
       </Section>
 
       <Section title={t("historySection")} description={t("historySubtitle")} testId="customer-activity">

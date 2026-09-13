@@ -133,6 +133,42 @@ enum OperationSource {
   SYSTEM
 }
 
+/// The only consent scope the product's data supports. The enrolment question is "I agree to
+/// receive offers from this business" — a general marketing permission with no channel attached.
+enum ConsentScope {
+  MARKETING
+}
+
+/// UNKNOWN is a state, not a missing value: a profile claiming consent with no timestamp and no
+/// text version answers neither "when" nor "to what", and is never eligible for marketing.
+enum ConsentState {
+  GRANTED
+  WITHDRAWN
+  UNKNOWN
+}
+
+/// How a consent record came to exist. No IMPORT and no API: every change has a person behind it.
+enum ConsentCapture {
+  ENROLMENT
+  STAFF_UPDATE
+}
+
+/// The channel a campaign draft is INTENDED for. Nothing reads it to deliver anything.
+enum CampaignChannel {
+  PUSH
+  SMS
+  WHATSAPP
+  EMAIL
+}
+
+/// Three states, none of which sends. There is deliberately no SENT, SCHEDULED or QUEUED here:
+/// `PushMessageStatus` is the reserved delivery model and is separate and untouched.
+enum CampaignState {
+  DRAFT
+  READY
+  ARCHIVED
+}
+
 enum PushMessageKind {
   MANUAL
   TRANSACTIONAL
@@ -172,11 +208,14 @@ model User {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  memberships  BusinessMembership[]
-  operations   LoyaltyOperation[]   @relation("OperationActor")
-  auditLogs    AuditLog[]           @relation("AuditActor")
-  pushMessages PushMessage[]        @relation("PushAuthor")
-  segments     CustomerSegment[]    @relation("SegmentAuthor")
+  memberships       BusinessMembership[]
+  operations        LoyaltyOperation[]   @relation("OperationActor")
+  auditLogs         AuditLog[]           @relation("AuditActor")
+  pushMessages      PushMessage[]        @relation("PushAuthor")
+  segments          CustomerSegment[]    @relation("SegmentAuthor")
+  consentRecords    ConsentRecord[]      @relation("ConsentActor")
+  campaigns         Campaign[]           @relation("CampaignAuthor")
+  campaignRevisions CampaignRevision[]   @relation("RevisionAuthor")
 }
 
 model Business {
@@ -203,6 +242,8 @@ model Business {
   idempotencyRecords IdempotencyRecord[]
   auditLogs          AuditLog[]
   segments           CustomerSegment[]
+  consentRecords     ConsentRecord[]
+  campaigns          Campaign[]
   pushMessages       PushMessage[]
   pushSubscriptions  PushSubscription[]
 }
@@ -296,10 +337,11 @@ model CustomerBusinessProfile {
   createdAt              DateTime  @default(now())
   updatedAt              DateTime  @updatedAt
 
-  business   Business           @relation(fields: [businessId], references: [id])
-  customer   Customer           @relation(fields: [customerId], references: [id])
-  cards      CustomerCard[]
-  operations LoyaltyOperation[]
+  business       Business           @relation(fields: [businessId], references: [id])
+  customer       Customer           @relation(fields: [customerId], references: [id])
+  cards          CustomerCard[]
+  operations     LoyaltyOperation[]
+  consentRecords ConsentRecord[]
 
   @@unique([businessId, customerId])
   @@index([businessId, lastSeenAt])
@@ -550,11 +592,89 @@ model CustomerSegment {
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 
-  business  Business @relation(fields: [businessId], references: [id])
-  createdBy User?    @relation("SegmentAuthor", fields: [createdByUserId], references: [id])
+  business  Business   @relation(fields: [businessId], references: [id])
+  createdBy User?      @relation("SegmentAuthor", fields: [createdByUserId], references: [id])
+  campaigns Campaign[]
 
   @@unique([businessId, normalizedName])
   @@index([businessId, archivedAt])
+}
+
+/// APPEND-ONLY consent history. UPDATE, DELETE and TRUNCATE are rejected by trigger
+/// `consent_record_append_only`, exactly as they are on the ledger.
+///
+/// The enrolment consent on `CustomerBusinessProfile` is the ORIGIN record and is never rewritten;
+/// this table holds every change after it. Nothing was backfilled, because an enrolment taken
+/// before the consent version was wired up has no timestamp, and inventing one is worse than an
+/// honest gap. See `src/server/consent/consent.ts`.
+model ConsentRecord {
+  id                        String         @id @default(uuid())
+  businessId                String
+  customerBusinessProfileId String
+  scope                     ConsentScope
+  state                     ConsentState
+  /// What the state was immediately before this row, so one row is a complete account of one change.
+  previousState             ConsentState
+  capturedVia               ConsentCapture
+  /// The consent-text revision this refers to, when one applies. Null for a recorded withdrawal.
+  policyVersion             String?
+  /// When it happened, which is not always when the row was written.
+  recordedAt                DateTime
+  actorUserId               String?
+  /// Free text from the merchant. Never a phone number, never a token.
+  reason                    String?
+  createdAt                 DateTime       @default(now())
+
+  business Business                @relation(fields: [businessId], references: [id])
+  profile  CustomerBusinessProfile @relation(fields: [customerBusinessProfileId], references: [id])
+  actor    User?                   @relation("ConsentActor", fields: [actorUserId], references: [id])
+
+  @@index([customerBusinessProfileId, scope, recordedAt(sort: Desc)])
+  @@index([businessId, recordedAt])
+}
+
+/// A campaign DRAFT. It cannot send, schedule or queue anything: `CampaignState` has no such value,
+/// and no provider, worker or queue exists in this build.
+model Campaign {
+  id              String          @id @default(uuid())
+  businessId      String
+  name            String
+  /// Lower-cased, whitespace-collapsed. Unique per business, enforced in SQL.
+  normalizedName  String
+  locale          String
+  channel         CampaignChannel
+  state           CampaignState   @default(DRAFT)
+  /// A REFERENCE to a live segment definition, never a copy of whom it matched.
+  segmentId       String?
+  createdByUserId String?
+  archivedAt      DateTime?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  business  Business           @relation(fields: [businessId], references: [id])
+  segment   CustomerSegment?   @relation(fields: [segmentId], references: [id])
+  createdBy User?              @relation("CampaignAuthor", fields: [createdByUserId], references: [id])
+  revisions CampaignRevision[]
+
+  @@unique([businessId, normalizedName])
+  @@index([businessId, archivedAt])
+}
+
+/// APPEND-ONLY. Every edit to a draft writes a new revision; `campaign_revision_append_only`
+/// rejects UPDATE, DELETE and TRUNCATE.
+model CampaignRevision {
+  id              String   @id @default(uuid())
+  campaignId      String
+  revisionNumber  Int
+  subject         String?
+  body            String
+  createdByUserId String?
+  createdAt       DateTime @default(now())
+
+  campaign  Campaign @relation(fields: [campaignId], references: [id])
+  createdBy User?    @relation("RevisionAuthor", fields: [createdByUserId], references: [id])
+
+  @@unique([campaignId, revisionNumber])
 }
 
 /// Non-ledger security and business events: registration, membership changes, template activation,

@@ -86,6 +86,22 @@ export const AuditAction = {
    * the customers it matches. An audit row is read by more people and kept far longer than the
    * screen that legitimately shows a count.
    */
+  /**
+   * A customer's marketing preference was changed by a member of staff.
+   *
+   * Carries the scope and the two states, and never the customer's name, phone or the free-text
+   * reason: an audit row is read by more people and kept far longer than the screen that reason was
+   * typed into. The entity id is the PROFILE, so the change is findable from the customer.
+   */
+  CONSENT_RECORDED: "consent.recorded",
+
+  // ── Phase 2 Prompt 2: campaign drafts. Nothing here sends anything. ───────
+  CAMPAIGN_CREATED: "campaign.created",
+  /** A new revision was written. The content is NOT copied here; the revision row holds it. */
+  CAMPAIGN_REVISED: "campaign.revised",
+  CAMPAIGN_STATE_CHANGED: "campaign.state_changed",
+  CAMPAIGN_AUDIENCE_SET: "campaign.audience_set",
+
   SEGMENT_CREATED: "segment.created",
   SEGMENT_UPDATED: "segment.updated",
   SEGMENT_ARCHIVED: "segment.archived",
