@@ -1,6 +1,8 @@
 # Phase 3A, Prompt 2 — staff-assisted referral attribution
 
 Baseline `015b5fcbf69d3a77c386ce573f62e570f2cbcc2f`. Branch `rebuild/phase-0-foundation`.
+**Amended after a read-only review** — see §12. The verification figures below are from the
+re-run after the hardening, not from the original pass.
 Local work only: nothing contacted OCI, staging, Freebuff, Caddy, DNS, Docker infrastructure, a real
 customer, or any external service. No provider, wallet signing, Apple/Google credential, email, SMS,
 WhatsApp, payment, queue, webhook, schedule, public registration or deployment configuration was
@@ -94,6 +96,9 @@ the runtime role holds only `SELECT` and `INSERT`, and `referral_attribution_app
 `UPDATE`, `DELETE` and `TRUNCATE` for anyone with more rights. `tests/integration/runtime-role.test.ts`
 asserts the privilege set and adds four bypass attempts.
 
+A third trigger, `referral_attribution_validate`, checks that each inserted row **means something
+coherent** — added after review, see §12.
+
 ---
 
 ## 5. Authorization
@@ -142,10 +147,10 @@ would otherwise reasonably assume it must be worth something.
 
 | check | result |
 |---|---|
-| `node scripts/gate.mjs` | **PASS 15/15**, 518.5 s |
-| `npx playwright test` (run 1) | **80 passed**, 2.4 m |
-| `npx playwright test` (run 2) | **80 passed**, 2.4 m |
-| `npx vitest run` | **82 files, 1074 tests, all passed**, 378 s |
+| `node scripts/gate.mjs` | **PASS 15/15**, 502.6 s |
+| `npx playwright test` (run 1) | **80 passed**, 2.5 m |
+| `npx playwright test` (run 2) | **80 passed**, 2.5 m |
+| `npx vitest run` | **83 files, 1093 tests, all passed**, 394 s |
 | `npm audit` | 0 vulnerabilities |
 | `npm audit --omit=dev` | 0 vulnerabilities |
 | `node scripts/db-migrate.mjs status` | **12 migrations**, schema up to date |
@@ -155,8 +160,9 @@ would otherwise reasonably assume it must be worth something.
 | raw-capability scan | see below |
 | `public/` | 0 changed files |
 
-Tests added: 23 integration, 10 browser, plus 4 bypass attempts and 1 privilege assertion in the
-runtime-role suite, and the wording guard widened to cover both new message groups.
+Tests added: **42 integration** (23 behaviour, 19 database integrity), 10 browser, plus 4 bypass
+attempts and 1 privilege assertion in the runtime-role suite, and the wording guard widened to cover
+both new message groups.
 
 ### The raw-capability scan, honestly
 
@@ -236,3 +242,106 @@ own block. Small, and the kind of thing only reading a rendered page catches.
 | **D19** | Whether a card is a person or a household — which is also what would let self-referral detection go further |
 | **D20** (new) | How long an attribution is kept, and what happens when either customer asks to be erased |
 | **D21** (new) | Whether a repeat visit can ever be attributed, and on what evidence |
+
+---
+
+## 12. Hardening after review — the database now checks what each row means
+
+A read-only review found one integrity gap in `21ade43`, and it was real.
+
+### What was wrong
+
+`ReferralAttribution` was append-only from the start, which protects history from being **rewritten**.
+It does nothing about a row that was wrong the moment it was written.
+
+Foreign keys check that each id **exists**; nothing in a foreign key checks that they **agree**. So
+every constraint on the table was satisfied by a row that named this business, a share link from
+another one, a card belonging to a third and a profile belonging to nobody in particular. So was a
+void pointing at another void, and an attribution carrying a withdrawal reason for a withdrawal that
+never happened.
+
+The service declines to build any of those, and that is precisely why it was not enough: **a
+guarantee that lives in one service ends the first time somebody writes a second one**, a backfill
+script, or a console session.
+
+### What changed
+
+`referral_attribution_validate`, a `BEFORE INSERT` trigger, added to the **existing** migration
+rather than a new one, because `20260918120000_referral_attribution` had not reached staging. The
+count remains **12**.
+
+| rule | what it stops |
+|---|---|
+| the share link belongs to this business **and** to the stated referring card | an attribution pointing at a customer the invitation did not come from |
+| the referring card belongs to this business | a cross-tenant referrer |
+| the enrolled card belongs to this business **and** to the stated profile | an attribution recorded against the wrong person |
+| the enrolled profile belongs to this business | a cross-tenant enrolment |
+| an `ATTRIBUTED` row voids nothing and carries no reason | a record of an arrival dressed as a withdrawal |
+| a `VOIDED` row names one existing `ATTRIBUTED` row, in the same business | withdrawing another business's record, or a void of a void |
+| a `VOIDED` row repeats the link, card, profile and method **exactly** | a decision history that says two different things about one event |
+
+`BEFORE INSERT` only, and that is sufficient rather than a shortcut: `UPDATE` and `DELETE` are already
+refused outright, so an inserted row is the only row there will ever be. Each failure raises
+`check_violation` with a message naming the rule, because "new row violates constraint" tells whoever
+hits it nothing about what they got wrong.
+
+### Proven against the database, not the service
+
+`tests/integration/referral-integrity.test.ts` — 19 tests, every insert made through `prisma`, the
+**restricted runtime client**, with no service in the way, exactly as a second service or a console
+session would:
+
+- `VOIDED` with no target, targeting a non-existent row, and targeting another void;
+- `VOIDED` from another business, and `VOIDED` with a changed referring link or enrolled card;
+- `ATTRIBUTED` carrying a void target, and `ATTRIBUTED` carrying a reason;
+- a share link from another business, a share link belonging to a different card, a referring card
+  from another business, an enrolled card from another business, an enrolled card belonging to a
+  different profile, an enrolled profile from another business, and a row mixing two businesses;
+- **and both valid shapes**, so the rules are known to refuse the wrong rows without refusing the
+  right ones.
+
+**The suite was confirmed to depend on the trigger.** Dropping `referral_attribution_validate` and
+re-running turns **13 of the 19 red**. The six that stay green are the two positive controls, the case
+a foreign key already covered, the one-void-per-attribution index, and the two append-only privilege
+checks — none of which the new trigger is responsible for. A regression test that has never been red
+is a test nobody has checked.
+
+### What did not change
+
+No column, no permission, no route, no screen, no string, no asset, no dependency. No raw capability,
+digest, customer PII, reward, points, money, campaign or public endpoint was added. The runtime role
+still holds `SELECT` and `INSERT` on the table and nothing else, the table is still append-only, valid
+counter attribution and valid owner/manager voiding both still work, and `prisma migrate diff` still
+reports only the two pre-existing `ConsentRecord` name differences.
+
+### Verification after the hardening
+
+| check | result |
+|---|---|
+| `node scripts/gate.mjs` | **PASS 15/15**, 502.6 s |
+| `npx playwright test` (run 1) | **80 passed**, 2.5 m |
+| `npx playwright test` (run 2) | **80 passed**, 2.5 m |
+| `npx vitest run` | **83 files, 1093 tests, all passed**, 394 s |
+| `npm audit` / `--omit=dev` | 0 vulnerabilities |
+| `node scripts/db-migrate.mjs status` | **12 migrations**, schema up to date |
+| `prisma migrate diff` | only the two pre-existing `ConsentRecord` name differences |
+| `git diff --check` | clean |
+| secret scan | only the committed `.env.production.example` placeholders |
+| `public/` | 0 changed files |
+
+### A note on how the migration was amended
+
+`20260918120000_referral_attribution` was already applied to both local databases, so editing it
+would have left a checksum Prisma refuses. Both databases were rolled back through a local-only
+script (drop the table, the two enums and the functions, remove the `_prisma_migrations` row), the
+file was amended, and `migrate deploy` reapplied it. Both then carried all three triggers, verified by
+querying `pg_trigger` on each. No staging or production database was touched, and nothing was reset,
+seeded or backfilled.
+
+### Which SHA to deploy
+
+**Replace `21ade43`.** Nothing in it is broken in a way that loses data — the service writes correct
+rows and nothing else writes to the table today — but it ships a migration whose guarantees rest on a
+single service being the only writer, and a migration is the hardest thing to correct after it has
+been applied. The amended one has not reached staging, which is the only window in which this is a
+one-line change rather than a second migration against live rows.

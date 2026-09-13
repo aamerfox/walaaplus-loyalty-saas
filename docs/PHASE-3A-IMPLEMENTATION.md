@@ -367,6 +367,60 @@ this would otherwise reasonably assume it must be worth something.
 
 ---
 
+## 10a. The database checks what each row means, not only that it cannot be edited
+
+A read-only review found the gap, and it was a real one. `ReferralAttribution` was append-only from
+the start, and append-only protects history from being **rewritten**. It does nothing about a row
+that was wrong the moment it was written.
+
+Foreign keys check that each id **exists**. Nothing in a foreign key checks that they **agree** — so
+a row naming this business, a share link from another one, a card belonging to a third and a profile
+belonging to nobody in particular satisfied every constraint on the table. So did a void pointing at
+another void, and an attribution carrying a withdrawal reason for a withdrawal that never happened.
+
+The service declines to build any of those, and that is exactly why it was not enough: **a guarantee
+that lives in one service ends the first time somebody writes a second one**, a backfill script, or a
+console session.
+
+`referral_attribution_validate` now runs `BEFORE INSERT` and refuses a row whose parts contradict
+each other:
+
+| rule | what it stops |
+|---|---|
+| the share link belongs to this business **and** to the stated referring card | an attribution pointing at a customer the invitation did not come from |
+| the referring card belongs to this business | a cross-tenant referrer |
+| the enrolled card belongs to this business **and** to the stated profile | an attribution recorded against the wrong person |
+| the enrolled profile belongs to this business | a cross-tenant enrolment |
+| an `ATTRIBUTED` row voids nothing and carries no reason | a record of an arrival dressed as a withdrawal |
+| a `VOIDED` row names one existing `ATTRIBUTED` row, in the same business | withdrawing another business's record, or a void of a void |
+| a `VOIDED` row repeats the link, card, profile and method **exactly** | a decision history that says two different things about one event |
+
+`BEFORE INSERT` only, and that is sufficient rather than a shortcut: `UPDATE` and `DELETE` are
+already refused outright, so an inserted row is the only row there will ever be, and validating it
+once validates it forever.
+
+Each failure raises `check_violation` with a message naming the rule. A constraint that fires with
+"new row violates constraint" tells whoever hits it nothing about what they got wrong.
+
+### Proven against the database, not the service
+
+`tests/integration/referral-integrity.test.ts` inserts every invalid shape through `prisma` — the
+**restricted runtime client**, with no service in the way — exactly as a second service would. It
+also inserts the two valid shapes, so the rules are known to refuse the wrong rows without refusing
+the right ones.
+
+The suite was confirmed to depend on the trigger: dropping
+`referral_attribution_validate` and re-running turns **13 of its 19 tests red**. The six that stay
+green are the two positive controls, the case a foreign key already covered, the one-void-per-attribution
+index, and the two checks on append-only privileges — none of which the new trigger is responsible
+for. A test that has never been red is a test nobody has checked.
+
+Nothing else moved. The migration was amended rather than followed by a second one, because it had
+not reached staging; the count stays at **12**. No column, permission, route, screen, string or asset
+changed, and the runtime role still holds `SELECT` and `INSERT` and nothing else.
+
+---
+
 ## 11. What the screenshot found
 
 The aggregate notice rendered its heading and its sentence as one run-on line — *"Referral records 1
