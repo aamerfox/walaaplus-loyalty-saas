@@ -554,6 +554,53 @@ Kiosk mode, scanner sound preferences, offline operation queue, promotion redemp
 
 ---
 
+## 8A. Customer records, segments and analytics (Phase 2)
+
+### 8A.1 A customer is a person
+
+`CustomerBusinessProfile` is one person per business, and the merchant-facing record is scoped to it
+rather than to a card. A customer holding a stamp card and a points card is ONE customer with two
+cards; each card is read through the contract its own `cardType` owns, and each keeps the version it
+was issued under.
+
+The record shows identity, every card with its balances and pinned version, the branches that card's
+version runs at, the display name of the source it came from, and the ledger activity across all of
+them. It shows **no card token, no card URL, no QR and no source token** — none is selected by any
+query behind it — and there is no export: downloading customer data needs its own privacy,
+retention, authorization and audit contract.
+
+Reading the record requires `VIEW_CUSTOMERS` and is refused for a CASHIER, whose permission is to
+serve whoever is at the counter. Activity is narrowed to the member's assigned branches.
+
+### 8A.2 A segment is a definition, not a list
+
+A saved segment is a validated, versioned object over an allowlist of fields the domain can prove —
+program, card type, pinned version, the three balances, source name, "served at a branch", joined
+date, last activity. It is never a SQL fragment, never a Prisma `where`, and never a stored list of
+customers: membership is derived on every read from live data, so a segment cannot go stale and
+cannot become a second copy of anybody's personal data.
+
+**`all` means one CARD satisfies every card-scoped rule**, not one card per rule. `any` is the union.
+Names are unique per business, case- and whitespace-insensitively. Segments are archived, never
+deleted, because a campaign in a later phase will reference one by id.
+
+`VIEW_SEGMENTS` reads, `EDIT_SEGMENTS` writes, and counting additionally requires a membership with
+no branch restriction — a count narrowed per viewer would be a different number on every screen.
+
+### 8A.3 Analytics say only what the ledger proves
+
+Every figure is derived from `LoyaltyOperation` and `CustomerCard` by aggregate query. There is no
+stored counter, no cached total, and no metric called revenue, ROI, lifetime value or campaign
+performance, because the data to compute one honestly does not exist. `redemptionValueMinor` is what
+a reward cost the merchant and is labelled as that.
+
+Date presets and custom ranges are **business-timezone days** (§5.6), so the dashboard and the daily
+award limit agree about which day a 01:00 sale belongs to. A range beyond the ceiling is refused
+rather than clamped. Segment dates are UTC instead, because a segment is a standing rule with no
+clock attached and must mean the same set to every reader.
+
+---
+
 ## 9. Deferred by design
 
 Not in the MVP, sequenced in [PHASE-PLAN.md](PHASE-PLAN.md):

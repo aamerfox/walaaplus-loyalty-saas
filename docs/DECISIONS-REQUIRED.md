@@ -62,6 +62,7 @@ Service workers, installability and web push **refuse to run without TLS**, exce
 | D4 | **WhatsApp Business API access.** | ⏸ |
 | D5 | **Archiving a program.** Phase 1b Prompt 3 built pause and resume, and deliberately left `ARCHIVED` unreachable from the product: what should happen to the cards pinned to an archived program's versions — keep earning, freeze at their balance, or be redeemable only — is a merchant-facing decision, not an implementation detail. Nothing is blocked by it today; pausing covers every case a pilot merchant has. | ⬜ |
 | D6 | **Per-actor counter limits.** Prompt 3 bounds one staff account to 60 enrolments and 300 counter writes an hour (finding M-11). They are code constants, because a configurable limit needs environment-template changes that prompt could not make. If a real merchant's busiest hour approaches either number, the owner decides the new figure and whether it becomes per-business configuration. | ⬜ |
+| D7 | **Customer export.** Phase 2 Prompt 1 built the customer record and deliberately did not build an export: a downloadable customer list needs a retention period, a named authorization bar, an audit contract and a decision about what may leave the system at all. The owner decides those before it is built; nothing is blocked until a merchant asks for one. | ⬜ |
 
 ---
 
