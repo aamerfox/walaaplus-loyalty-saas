@@ -19,6 +19,7 @@ import { createStampProgram, type StampProgramSummary } from "@/server/program/s
 
 const APP_TABLES = [
   "AuthRateLimit",
+  "CardShareLink",
   "CampaignAudienceMember",
   "CampaignAudienceSnapshot",
   "CampaignApproval",
@@ -67,7 +68,13 @@ export function migratorPrisma(): PrismaClient {
  * extra rows. Each has to be disabled for the wipe, and only the table OWNER may do that: the
  * runtime role the services use cannot (tests/integration/runtime-role.test.ts proves it).
  */
+/**
+ * Tables whose triggers refuse a TRUNCATE, and which therefore have to be disabled around the
+ * harness's own reset. `CardShareLink` is here for the same reason the append-only tables are: it
+ * refuses DELETE and TRUNCATE outright, even though it permits one narrow UPDATE.
+ */
 const APPEND_ONLY_TABLES = [
+  "CardShareLink",
   "LoyaltyOperation",
   "ConsentRecord",
   "CampaignRevision",

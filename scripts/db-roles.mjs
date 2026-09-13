@@ -18,6 +18,7 @@
  *   2. grants CONNECT, USAGE on schema public (never CREATE), SELECT/INSERT/UPDATE/DELETE on all
  *      current tables and the same as DEFAULT PRIVILEGES for tables the migrator creates later;
  *   3. REVOKES everything on append-only tables and re-grants SELECT, INSERT only;
+ *   3b. REVOKES everything on no-delete tables and re-grants SELECT, INSERT, UPDATE only;
  *   4. revokes everything on `_prisma_migrations` (bookkeeping belongs to the migrator);
  *   5. creates the `pgboss` schema owned by the runtime role, so the worker can manage its own
  *      queue tables without any privilege in `public`;
@@ -26,8 +27,8 @@
  * Idempotent: run it after EVERY `prisma migrate deploy` (new tables need grants). Prints role
  * and table names only — never the password, never the URLs.
  *
- * Any table added to APPEND_ONLY_TABLES is protected the moment this script runs; add a new
- * append-only table to this list in the same commit as its migration.
+ * Any table added to APPEND_ONLY_TABLES or NO_DELETE_TABLES is protected the moment this script
+ * runs; add a new protected table to the right list in the same commit as its migration.
  */
 import { config as loadDotenv } from "dotenv";
 import pg from "pg";
@@ -43,6 +44,21 @@ const APPEND_ONLY_TABLES = [
   "CampaignAudienceSnapshot",
   "CampaignAudienceMember",
 ];
+/**
+ * Tables whose rows may be updated but must never be removed.
+ *
+ * `CardShareLink` is the first of these, and it needed a third category rather than a place in the
+ * list above. Revoking an invitation capability IS a state change, so the table cannot refuse UPDATE
+ * the way the ledger and the consent history do — but an issued capability is a fact about what was
+ * handed out, and a revocation that erased the row would leave nothing to audit.
+ *
+ * So the privilege here is SELECT, INSERT and UPDATE, and never DELETE or TRUNCATE. The narrower
+ * rule — that an UPDATE may change `revokedAt` and nothing else, once, from NULL — is enforced by
+ * trigger, because a grant cannot express it. Two layers, same as everywhere else: the role stops
+ * the app, the trigger stops anyone with more rights than the app.
+ */
+const NO_DELETE_TABLES = ["CardShareLink"];
+
 const MIGRATOR_ONLY_TABLES = ["_prisma_migrations"];
 const WORKER_SCHEMA = "pgboss";
 
@@ -136,7 +152,7 @@ async function main() {
   const database = who.rows[0].db;
   process.stdout.write(`db-roles: connected as migrator "${owner}" to database "${database}"\n`);
 
-  for (const t of APPEND_ONLY_TABLES) {
+  for (const t of [...APPEND_ONLY_TABLES, ...NO_DELETE_TABLES]) {
     if (!(await tableExists(t))) fail(`table "${t}" does not exist. Run \`npm run db:migrate\` first.`);
   }
 
@@ -175,6 +191,12 @@ async function main() {
     for (const t of APPEND_ONLY_TABLES) {
       await run(`REVOKE ALL PRIVILEGES ON TABLE public.${ident(t)} FROM ${role}`);
       await run(`GRANT SELECT, INSERT ON TABLE public.${ident(t)} TO ${role}`);
+    }
+
+    // 3b. No-delete tables: one more verb than the list above, and two fewer than the default.
+    for (const t of NO_DELETE_TABLES) {
+      await run(`REVOKE ALL PRIVILEGES ON TABLE public.${ident(t)} FROM ${role}`);
+      await run(`GRANT SELECT, INSERT, UPDATE ON TABLE public.${ident(t)} TO ${role}`);
     }
 
     // 4. Migration bookkeeping is not the runtime's business.
@@ -279,6 +301,17 @@ async function main() {
     if (!r.s || !r.i) problems.push(`${t}: SELECT/INSERT missing`);
     if (r.u || r.d || r.t) problems.push(`${t}: UPDATE/DELETE/TRUNCATE still granted`);
   }
+  for (const t of NO_DELETE_TABLES) {
+    const p = await client.query(
+      "SELECT has_table_privilege($1, $2, 'SELECT') AS s, has_table_privilege($1, $2, 'INSERT') AS i, " +
+        "has_table_privilege($1, $2, 'UPDATE') AS u, has_table_privilege($1, $2, 'DELETE') AS d, " +
+        "has_table_privilege($1, $2, 'TRUNCATE') AS t",
+      [runtime.user, `public.${ident(t)}`],
+    );
+    const r = p.rows[0];
+    if (!r.s || !r.i || !r.u) problems.push(`${t}: SELECT/INSERT/UPDATE missing`);
+    if (r.d || r.t) problems.push(`${t}: DELETE/TRUNCATE still granted`);
+  }
   const schemaCreate = await client.query("SELECT has_schema_privilege($1, 'public', 'CREATE') AS c", [runtime.user]);
   if (schemaCreate.rows[0].c) problems.push("role can CREATE in schema public");
 
@@ -311,7 +344,8 @@ async function main() {
   }
   process.stdout.write(
     `db-roles: OK role "${runtime.user}" — read/write on ${tables.rows[0].n} public tables, ` +
-      `append-only on [${APPEND_ONLY_TABLES.join(", ")}], no access to [${MIGRATOR_ONLY_TABLES.join(", ")}], ` +
+      `append-only on [${APPEND_ONLY_TABLES.join(", ")}], no-delete on [${NO_DELETE_TABLES.join(", ")}], ` +
+      `no access to [${MIGRATOR_ONLY_TABLES.join(", ")}], ` +
       `owns schema "${WORKER_SCHEMA}", cannot CREATE in public, ` +
       `members: [${memberNames.join(", ") || "none"}]\n`,
   );

@@ -173,6 +173,23 @@ describe("restricted runtime database role", () => {
         expect(p[0]).toEqual({ s: true, i: true, u: false, d: false, t: false });
       },
     );
+
+    it("has SELECT, INSERT and UPDATE on CardShareLink, and never DELETE or TRUNCATE", async () => {
+      /*
+       * The third privilege category, and the one that needed arguing for. Revoking an invitation
+       * capability IS a state change, so this table cannot refuse UPDATE the way the ledger does —
+       * but an issued capability is a fact about what was handed out, and a revocation that erased
+       * the row would leave nothing to audit. The narrower rule, that an UPDATE may touch only
+       * `revokedAt` and only once, is a trigger's job: a grant cannot express it.
+       */
+      const p = await prisma.$queryRaw<{ s: boolean; i: boolean; u: boolean; d: boolean; t: boolean }[]>`
+        SELECT has_table_privilege('"CardShareLink"', 'SELECT')   AS s,
+               has_table_privilege('"CardShareLink"', 'INSERT')   AS i,
+               has_table_privilege('"CardShareLink"', 'UPDATE')   AS u,
+               has_table_privilege('"CardShareLink"', 'DELETE')   AS d,
+               has_table_privilege('"CardShareLink"', 'TRUNCATE') AS t`;
+      expect(p[0]).toEqual({ s: true, i: true, u: true, d: false, t: false });
+    });
   });
 
   describe("the legitimate path works as the runtime role", () => {
@@ -235,6 +252,9 @@ describe("restricted runtime database role", () => {
       ["UPDATE an audience member", `UPDATE "CampaignAudienceMember" SET "consentState" = 'GRANTED'`],
       ["DELETE audience members", `DELETE FROM "CampaignAudienceMember"`],
       ["TRUNCATE audience members", `TRUNCATE "CampaignAudienceMember"`],
+      ["DELETE an invitation capability", `DELETE FROM "CardShareLink"`],
+      ["TRUNCATE invitation capabilities", `TRUNCATE "CardShareLink"`],
+      ["disable the share-link triggers", `ALTER TABLE "CardShareLink" DISABLE TRIGGER USER`],
       ["delete migration history", `DELETE FROM "_prisma_migrations"`],
       ["read migration history", `SELECT count(*) FROM "_prisma_migrations"`],
     ];

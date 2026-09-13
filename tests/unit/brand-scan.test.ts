@@ -142,13 +142,15 @@ describe("the official brand assets", () => {
      * component that will still be the old colour after the next brand change - which is exactly
      * what happened to the forty `indigo-600` call sites this design system replaced.
      *
-     * The installed card's `theme_color` is the one legitimate exception: a manifest is JSON served
-     * to a phone's launcher, and it cannot read a CSS variable.
+     * `theme_color` is the legitimate exception, and it is the same exception three times: a
+     * manifest is JSON served to a phone's launcher, and a `viewport.themeColor` is a value handed
+     * to browser chrome. Neither can read a CSS variable.
      */
     const brandHex = /#(0B2D5B|00B3A4|2ED47A|F4F6F8|1F2937)/i;
     const allowed = new Set([
       "src/app/[locale]/card/[shareToken]/manifest.webmanifest/route.ts",
       "src/app/[locale]/card/[shareToken]/page.tsx",
+      "src/app/[locale]/share/page.tsx",
     ]);
     const offenders: string[] = [];
     for (const file of [...walk(path.join(ROOT, "src/app")), ...walk(path.join(ROOT, "src/components"))]) {

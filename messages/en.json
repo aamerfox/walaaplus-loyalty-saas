@@ -863,6 +863,30 @@
     "unreadable": "Unreadable",
     "unreadableBody": "This segment was saved in a form this version cannot read. It is shown so it is not lost, and it is not being evaluated."
   },
+  "Share": {
+    "copied": "Link copied",
+    "copyButton": "Copy link",
+    "howToJoin": "To get a card of your own, ask a member of staff at {business} next time you visit.",
+    "loading": "Opening your invitation…",
+    "qrLabel": "QR code for this invitation link",
+    "shareButton": "Share",
+    "shareText": "Have a look at {business}'s loyalty card",
+    "subtitle": "Share {business}'s loyalty card with people you know.",
+    "target": {
+      "whatsapp": "WhatsApp",
+      "telegram": "Telegram",
+      "facebook": "Facebook",
+      "x": "X",
+      "reddit": "Reddit",
+      "bluesky": "Bluesky",
+      "threads": "Threads",
+      "email": "Email"
+    },
+    "targetsTitle": "Or send it directly",
+    "title": "Invite your friends",
+    "unavailableBody": "It may have been replaced by a newer one, or it may never have been valid. Ask the business for a fresh link.",
+    "unavailableTitle": "This link is not available"
+  },
   "Sources": {
     "activate": "Use again",
     "active": "In use",
@@ -1016,5 +1040,29 @@
     "welcomeStamps": "Welcome stamps",
     "whereItRuns": "Which branches this version runs at",
     "whereItRunsHint": "Leave all unticked for the main branch only."
+  },
+  "Wallet": {
+    "appleNote": "The link is a back field. Apple renders no button on the front of a pass, and a capability does not belong on a lock screen.",
+    "applePass": "Apple Wallet — pass.json",
+    "barcodeNote": "Neither barcode carries the invitation link. The barcode is the card's scanner code and is unchanged.",
+    "deviceGate": "Not verified on a real iPhone or Android device yet. That check is a manual gate before production.",
+    "error": "That did not work. Try again.",
+    "googleNote": "The link is a linksModuleData URI, which is the official place for a tappable web link on a Google pass.",
+    "googlePass": "Google Wallet — loyaltyObject",
+    "linkEverIssued": "{count, plural, =0 {None issued} one {1 issued in total} other {# issued in total}}",
+    "linkIssued": "Issued",
+    "linkLive": "This card has a live invitation link.",
+    "linkNone": "This card has no invitation link yet. One is created when a wallet pass is issued.",
+    "notSigned": "Not signed. This build has no Apple Pass Type certificate and no Google service-account key, so no pass can be issued yet.",
+    "notStampCard": "Wallet passes are built for stamp cards only in this phase.",
+    "reinstallNote": "A pass already saved in a customer's wallet does not gain the link on its own. It appears when the pass is issued again and saved again. Nothing in this build pushes an update to a saved pass.",
+    "revoke": "Revoke the invitation link",
+    "revokeConfirm": "Revoke it? The link in the customer's wallet stops working, and the pass has to be issued again for a new one.",
+    "revokeNothing": "There was no live link to revoke.",
+    "revokeYes": "Yes, revoke it",
+    "revoked": "Revoked.",
+    "subtitle": "What this card would look like in Apple Wallet and Google Wallet, and where the invitation link sits.",
+    "title": "Wallet pass",
+    "tokenHidden": "The link itself is never shown here. It belongs to the customer, in their wallet."
   }
 }

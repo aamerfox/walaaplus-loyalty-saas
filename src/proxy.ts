@@ -33,6 +33,10 @@ const PUBLIC_ROUTES: readonly RegExp[] = [
   /^\/auth\/(login|register|forgot-password|reset-password)(\/.*)?$/,
   /^\/join(\/.*)?$/, // withdrawn enrolment links: a static notice, public so old printed links still explain themselves
   /^\/card(\/.*)?$/, // Phase 1a: public customer PWA card, manifest, service worker
+  // Phase 3a: the invitation page a wallet pass opens. Public by necessity — it is reached from a
+  // link a customer forwarded — and it carries no capability in its PATH, so the proxy sees only
+  // "/share". The token is in the fragment, which never leaves the browser.
+  /^\/share\/?$/,
   /^\/scanner\/login\/?$/, // scanner login is public; the scanner itself is protected
 ];
 

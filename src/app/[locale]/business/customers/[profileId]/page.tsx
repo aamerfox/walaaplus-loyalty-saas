@@ -9,6 +9,7 @@ import { getCustomerProfile, listProfileActivity } from "@/server/customers/cust
 import { isAppError } from "@/server/errors";
 import { resolveScannerContext } from "@/server/tenant/scanner-context";
 import ConsentControls from "./ConsentControls";
+import WalletPassPanel from "./WalletPassPanel";
 
 /**
  * One customer, and everything this business knows about them.
@@ -204,6 +205,14 @@ export default async function CustomerProfilePage({
                   <DetailRow label={t("source")}>{card.sourceName ?? t("noSource")}</DetailRow>
                   <DetailRow label={t("issued")}>{card.issuedAt.toISOString().slice(0, 10)}</DetailRow>
                 </dl>
+
+                {/*
+                 * Stamp cards only, because that is what the pass builders cover in this phase, and
+                 * an inert button on a points card would be a worse answer than no button.
+                 */}
+                {mayEditConsent && card.cardType === CardType.STAMP ? (
+                  <WalletPassPanel businessId={ctx.businessId} customerCardId={card.customerCardId} />
+                ) : null}
               </Card>
             ))}
           </div>

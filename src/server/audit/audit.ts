@@ -115,6 +115,18 @@ export const AuditAction = {
   /** An edit invalidated a standing approval. Recorded because it happens as a side effect. */
   CAMPAIGN_APPROVAL_INVALIDATED: "campaign.approval_invalidated",
 
+  // ── Phase 3A Prompt 1: wallet web links. ─────────────────────────────────
+  /**
+   * An invitation capability was minted for a card.
+   *
+   * Carries the row id and why it was issued. **Never the token, and never its digest** — a digest
+   * in an audit log is still a way to confirm a guess, and this row is read by more people and kept
+   * far longer than the capability it would be confirming.
+   */
+  SHARE_LINK_ISSUED: "share_link.issued",
+  /** A card's invitation link was revoked. The link stops working; the row stays. */
+  SHARE_LINK_REVOKED: "share_link.revoked",
+
   SEGMENT_CREATED: "segment.created",
   SEGMENT_UPDATED: "segment.updated",
   SEGMENT_ARCHIVED: "segment.archived",

@@ -228,6 +228,7 @@ model User {
   campaigns         Campaign[]                 @relation("CampaignAuthor")
   campaignRevisions CampaignRevision[]         @relation("RevisionAuthor")
   campaignApprovals CampaignApproval[]         @relation("ApprovalDecider")
+  shareLinks        CardShareLink[]            @relation("ShareLinkIssuer")
   audienceSnapshots CampaignAudienceSnapshot[] @relation("SnapshotAuthor")
 }
 
@@ -259,6 +260,7 @@ model Business {
   campaigns          Campaign[]
   campaignApprovals  CampaignApproval[]
   audienceSnapshots  CampaignAudienceSnapshot[]
+  cardShareLinks     CardShareLink[]
   pushMessages       PushMessage[]
   pushSubscriptions  PushSubscription[]
 }
@@ -512,12 +514,42 @@ model CustomerCard {
   operations        LoyaltyOperation[]
   pushSubscriptions PushSubscription[]
   pushDeliveries    PushDelivery[]
+  shareLinks        CardShareLink[]
 
   @@unique([customerBusinessProfileId, templateId])
   @@index([businessId, status])
   @@index([templateId])
   // Cards issued in a date range: the dashboard's acquisition figure (Phase 1b).
   @@index([businessId, issuedAt])
+}
+
+/// A card's INVITATION capability: the link a wallet pass opens.
+///
+/// Drawn separately from `qrToken`, `shareToken`, the serial and the enrolment source, so holding
+/// one never yields another. Only the SHA-256 digest is stored — the raw value exists in the
+/// response that minted it and in the wallet pass built from it, and nothing reads it back.
+///
+/// Issue-once: DELETE and TRUNCATE are refused by trigger, and UPDATE may change `revokedAt` and
+/// nothing else, once, from NULL. `scripts/db-roles.mjs` lists it under NO_DELETE_TABLES.
+model CardShareLink {
+  id             String    @id @default(uuid())
+  businessId     String
+  customerCardId String
+  /// SHA-256 of the raw capability, lower-case hex.
+  tokenDigest    String    @unique
+  /// Which pass issuance minted this. A label for the audit trail, never a route to anything.
+  issuedFor      String
+  issuedAt       DateTime
+  issuedByUserId String?
+  /// NULL while live. Set once and never cleared.
+  revokedAt      DateTime?
+  createdAt      DateTime  @default(now())
+
+  business Business     @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  card     CustomerCard @relation(fields: [customerCardId], references: [id], onDelete: Restrict)
+  issuedBy User?        @relation("ShareLinkIssuer", fields: [issuedByUserId], references: [id])
+
+  @@index([businessId, issuedAt(sort: Desc)])
 }
 
 /// APPEND-ONLY. UPDATE and DELETE are rejected by trigger `loyalty_operation_append_only`.

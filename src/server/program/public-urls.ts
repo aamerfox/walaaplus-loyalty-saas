@@ -26,3 +26,18 @@ function origin(): string {
 export function publicCardUrl(shareToken: string): string {
   return `${origin()}/card/${shareToken}`;
 }
+
+/**
+ * Where a customer opens the invitation page for their card's business.
+ *
+ * **The token is in the FRAGMENT, and that is the whole design.** A fragment is not sent with the
+ * request, so the capability appears in no access log, no proxy log, no `Referer` header and no
+ * error report — not on this server and not on any server the visitor navigates to next. The page
+ * reads it in the browser and posts it to `/api/share/resolve` in a body.
+ *
+ * No locale prefix, for the same reason `publicCardUrl` has none: a link that outlives the moment
+ * it was created should not also fix the language of whoever eventually opens it.
+ */
+export function publicShareUrl(rawToken: string): string {
+  return `${origin()}/share#${rawToken}`;
+}
