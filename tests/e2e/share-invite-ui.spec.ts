@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
+import qrcode from "qrcode-generator";
 import ar from "../../messages/ar.json";
+import en from "../../messages/en.json";
 import { prisma } from "@/server/db";
 import { mintShareLink, revokeShareLink } from "@/server/share/share-links";
 import { createStampCafe, enrolCustomer, TEST_PASSWORD, uniqueSyrianPhone } from "../setup/fixtures";
@@ -143,8 +145,9 @@ test.describe("the invitation page", () => {
     }
 
     // The URL is readable and selectable, so a refused clipboard is a missing convenience rather
-    // than a dead end.
-    await expect(page.getByTestId("share-url")).toContainText("/share#");
+    // than a dead end — and it is the canonical one, with no locale in it.
+    await expect(page.getByTestId("share-url")).toContainText(`/share#${fx.token}`);
+    await expect(page.getByTestId("share-url")).not.toContainText("/en/share");
 
     /*
      * No third-party script reaches this page. Every share target is a plain link a browser follows,
@@ -172,7 +175,7 @@ test.describe("the invitation page", () => {
     await page.getByTestId("share-copy").click();
     await expect(page.getByTestId("share-copy")).toHaveText("Link copied");
     const clipboard = await page.evaluate(() => navigator.clipboard.readText());
-    expect(clipboard).toContain(`/share#${fx.token}`);
+    expect(clipboard).toBe(`${new URL(page.url()).origin}/share#${fx.token}`);
   });
 
   test("uses the Web Share API when the device has one, and does not pretend otherwise", async ({ page }) => {
@@ -195,7 +198,7 @@ test.describe("the invitation page", () => {
 
     const shared = await page.evaluate(() => (window as unknown as { __shared: { url: string; text: string }[] }).__shared);
     expect(shared).toHaveLength(1);
-    expect(shared[0].url).toContain(`/share#${fx.token}`);
+    expect(shared[0].url).toBe(`${new URL(page.url()).origin}/share#${fx.token}`);
     expect(shared[0].text).toContain(fx.businessName);
     // The share sheet gets the business name and the link. Nothing else.
     expect(shared[0].text).not.toContain("ليلى");
@@ -256,6 +259,87 @@ test.describe("the invitation page", () => {
     // The copy result is announced without stealing focus.
     await expect(page.getByTestId("share-copy-status")).toHaveAttribute("aria-live", "polite");
   });
+});
+
+test.describe("what gets shared is locale-neutral", () => {
+  /*
+   * The page is locale-routed, so a visitor reaches it at `/en/share#…` or `/ar/share#…`. What they
+   * then hand to somebody else must NOT carry that prefix: a link forwarded from a chat outlives the
+   * moment it was sent and has no business choosing a language for whoever opens it. The server
+   * builds `publicShareUrl` with no prefix for exactly this reason, and the browser has to agree.
+   *
+   * This is a correction. The page used to share `window.location.href`, so a link sent by an
+   * Arabic-speaking customer opened in Arabic for an English-speaking recipient, and the other way
+   * round. Every surface that hands the URL to somebody is checked here, including the QR — which is
+   * the one artefact a recipient cannot read before acting on it.
+   */
+  for (const locale of ["en", "ar"] as const) {
+    test(`renders in ${locale} but shares the canonical URL everywhere`, async ({ page, context }) => {
+      await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+      await page.addInitScript(() => {
+        const shared: unknown[] = [];
+        (window as unknown as { __shared: unknown[] }).__shared = shared;
+        Object.defineProperty(navigator, "share", {
+          configurable: true,
+          value: async (data: unknown) => {
+            shared.push(data);
+          },
+        });
+      });
+
+      const fx = await cafeWithInvitation(`Locale ${locale} café`);
+      await page.goto(`/${locale}/share#${fx.token}`);
+      await expect(page.getByTestId("share-invite")).toBeVisible();
+
+      // The PAGE still honours the locale it was opened in: the visitor reads their own language.
+      await expect(page.locator("html")).toHaveAttribute("lang", locale);
+      await expect(page.locator("html")).toHaveAttribute("dir", locale === "ar" ? "rtl" : "ltr");
+      await expect(page.getByTestId("share-heading")).toHaveText(locale === "ar" ? ar.Share.title : en.Share.title);
+
+      // And the browser's own address still carries the prefix and the capability, untouched. The
+      // fix builds a different URL; it does not rewrite the one the visitor arrived on.
+      expect(page.url()).toContain(`/${locale}/share#${fx.token}`);
+
+      const canonical = `${new URL(page.url()).origin}/share#${fx.token}`;
+
+      // 1. The visible copy.
+      await expect(page.getByTestId("share-url")).toHaveText(canonical);
+
+      /*
+       * 2. The QR, compared against a symbol generated from the canonical URL with the same
+       *    settings the component uses. `qrcode-generator` is deterministic, so an identical module
+       *    pattern means an identical encoded payload — and a locale-prefixed URL is four characters
+       *    longer and produces a visibly different symbol. No decoder, and no new dependency.
+       */
+      const expected = qrcode(0, "M");
+      expected.addData(canonical);
+      expected.make();
+      const modulesOf = (markup: string) => [...markup.matchAll(/d="([^"]+)"/g)].map((m) => m[1]).join("|");
+      const rendered = await page.getByTestId("share-qr").innerHTML();
+      expect(modulesOf(rendered)).toBe(modulesOf(expected.createSvgTag({ cellSize: 6, margin: 4 })));
+      expect(modulesOf(rendered).length).toBeGreaterThan(0);
+
+      // 3. The clipboard.
+      await page.getByTestId("share-copy").click();
+      expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(canonical);
+
+      // 4. Native share.
+      await page.getByTestId("share-native").click();
+      const shared = await page.evaluate(() => (window as unknown as { __shared: { url: string }[] }).__shared);
+      expect(shared[0].url).toBe(canonical);
+
+      // 5. Every social target.
+      for (const id of ["whatsapp", "telegram", "facebook", "x", "reddit", "bluesky", "threads", "email"]) {
+        const href = (await page.getByTestId(`share-to-${id}`).getAttribute("href")) ?? "";
+        const decoded = decodeURIComponent(href);
+        expect(decoded, `${id} must carry the canonical URL`).toContain(canonical);
+        expect(decoded, `${id} must not carry a locale prefix`).not.toContain(`/${locale}/share`);
+      }
+
+      // Nothing anywhere on the page offers the locale-prefixed address as something to share.
+      expect(await page.content()).not.toContain(`/${locale}/share#${fx.token}`);
+    });
+  }
 });
 
 test.describe("a link that is not live", () => {

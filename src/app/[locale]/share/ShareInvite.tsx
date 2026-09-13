@@ -20,8 +20,8 @@ import qrcode from "qrcode-generator";
  * ## What never appears here
  *
  * No customer name, no phone, no card number, no serial, no balance, no programme, no card link,
- * no scanner QR. The QR on this page encodes **this page's own URL** — the thing a visitor is meant
- * to hand to a friend — and the only value that reaches the DOM besides it is the business name.
+ * no scanner QR. The QR encodes **the canonical invitation URL** — the thing a visitor is meant to
+ * hand to a friend — and the only value that reaches the DOM besides it is the business name.
  *
  * ## What it does not promise
  *
@@ -37,14 +37,28 @@ import qrcode from "qrcode-generator";
  * thing worth probing for and a visitor has no use for it.
  */
 
-/** Rendered as the QR and copied by the copy button: the page's own address, fragment included. */
-function currentUrl(): string {
-  return typeof window === "undefined" ? "" : window.location.href;
+/**
+ * The URL that gets shared: the canonical, **locale-neutral** one.
+ *
+ * Not `window.location.href`, which is what this used to be and which was wrong. This page is
+ * locale-routed, so a visitor reaches it at `/en/share#…` or `/ar/share#…` — and re-sharing that
+ * address pushes the sender's language onto whoever opens it next. A link forwarded from a chat
+ * outlives the moment it was sent and has no business deciding what language its recipient reads;
+ * that is the same reason `publicShareUrl` on the server emits no prefix either.
+ *
+ * So the origin comes from the browser — the visitor may legitimately be on a different host or
+ * port than the server's configured one — and the path is always `/share`, with the capability
+ * where it started: in the fragment, which is never sent with a request.
+ */
+function canonicalShareUrl(token: string): string {
+  if (typeof window === "undefined" || !token) return "";
+  return `${window.location.origin}/share#${token}`;
 }
 
 type State =
   | { kind: "loading" }
-  | { kind: "ok"; businessName: string; url: string }
+  /** `token` is kept so the URL is derived, not captured from wherever the visitor happened to land. */
+  | { kind: "ok"; businessName: string; token: string }
   /** Unknown, revoked, malformed or absent. Deliberately not distinguished. */
   | { kind: "unavailable" };
 
@@ -126,7 +140,7 @@ export default function ShareInvite() {
         if (cancelled) return;
         setNativeShare(canShare);
         if (data?.ok && typeof data.businessName === "string") {
-          setState({ kind: "ok", businessName: data.businessName, url: currentUrl() });
+          setState({ kind: "ok", businessName: data.businessName, token });
         } else {
           setState({ kind: "unavailable" });
         }
@@ -146,7 +160,8 @@ export default function ShareInvite() {
 
   useEffect(() => () => (copyTimer.current ? clearTimeout(copyTimer.current) : undefined), []);
 
-  const url = state.kind === "ok" ? state.url : "";
+  // Derived from the token the page was opened with, never read back out of the address bar.
+  const url = state.kind === "ok" ? canonicalShareUrl(state.token) : "";
   /** The business name and the link. Never a customer name, a balance, or anything else. */
   const message = state.kind === "ok" ? t("shareText", { business: state.businessName }) : "";
 
@@ -215,7 +230,8 @@ export default function ShareInvite() {
 
       <section className="rounded-3xl bg-white p-5 shadow-xl" aria-label={t("qrLabel")}>
         {/*
-         * The QR encodes THIS page's URL — the thing a visitor hands to a friend. It is not the
+         * The QR encodes the canonical invitation URL — the thing a visitor hands to a friend, with
+         * no locale prefix, so it does not choose a language for whoever opens it. It is not the
          * card's scanner QR, which stays on the card page where its holder shows it at a counter.
          */}
         <div
