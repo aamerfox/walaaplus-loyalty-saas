@@ -314,23 +314,29 @@ The read also requires the **claim token**. A row re-claimed by another pass whi
 comes back empty: no request is made and **no attempt is recorded**, because this pass is no longer
 describing its own work.
 
-**What that cannot do is unsend a request already on the wire.** The window is between that final
-per-delivery read and the moment the socket accepts the body — microseconds, and irreducible: a TCP
-connection and a database transaction do not commit together. If the owner's disable commits inside
-it, the receiver gets that one request.
+**What that cannot do is unsend a request already on the wire.** The rule is precise rather than
+timed: a committed disable, revoke or rotation is observed if it happens **before** the per-delivery
+read (`loadForDispatch`); once that read has returned, the attempt already in progress — decryption,
+URL re-validation, signing, DNS resolution, the TCP/TLS handshake, and the request itself — cannot be
+reliably cancelled by a later owner action. **This is not a short or fixed window.** DNS resolution
+and the TLS handshake in particular can each take a meaningful fraction of a second or more under a
+slow or degraded network, so no duration — "microseconds" or otherwise — is promised. What is
+guaranteed is the boundary itself: a database transaction and a socket cannot commit together, so
+there is no way to make an owner's action apply retroactively to a dispatch already under way.
 
-That is the **only** remaining gap, and it is worth being precise about how small it now is: before
-the per-delivery read it was as long as every earlier delivery in the batch took, which with ten
-claimed and a five-second timeout each could be most of a minute. Nothing in this product promises
-otherwise, and an owner who needs a guarantee that a specific event never arrives has to arrange it
-at the receiver.
+Before the per-delivery read existed, the same non-cancellable gap covered the whole rest of the
+batch — every delivery queued after a slow one, potentially minutes. The per-delivery read narrows
+that gap to one attempt's own dispatch time, but does not make it a fixed or negligible duration.
+Nothing in this product promises otherwise, and an owner who needs a guarantee that a specific event
+never arrives has to arrange it at the receiver.
 
-The same is true of **signing-secret rotation**, in the same window and no larger. Every delivery
-whose pre-dispatch read happens after the rotation commits signs with the new secret; a request
-already on the wire was signed with the old one and will verify against it. A receiver that switches
-to the new secret at the instant the owner rotates may reject that one request. The owner is told to
-update the receiver in the same sitting, and the honest description is: **rotation takes effect for
-every request not yet signed, not for every request not yet arrived.**
+The same boundary applies to **signing-secret rotation**. A rotation committed before a delivery's
+`loadForDispatch` read is used by that delivery; one committed after that read is not — the
+ciphertext, and the secret decrypted from it, were already captured. A receiver that switches to the
+new secret at the instant the owner rotates may reject a request that was already using the old one.
+The owner is told to update the receiver in the same sitting, and the precise description is:
+**rotation applies to every request whose signing secret has not yet been read from the database, not
+to every request that has not yet arrived at the receiver.**
 
 ### Key rotation
 

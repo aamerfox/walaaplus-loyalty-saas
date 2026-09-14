@@ -183,8 +183,9 @@ async function claimDue(now: Date, limit: number, token: string): Promise<string
  * state was re-read immediately before dispatch. It was not, and a batch read cannot be.
  *
  * So: one read, per delivery, in the loop, returning the CURRENT destination state, the CURRENT
- * ciphertexts and the CURRENT event. Everything `attemptOne` decides with is a value that was true
- * microseconds before the socket opened.
+ * ciphertexts and the CURRENT event. A disable, revoke or rotation the owner commits BEFORE this
+ * read is observed here and changes what happens next. One committed AFTER this read is not seen by
+ * this delivery at all — see the note on `attemptOne` for what that means and does not mean.
  *
  * ## The claim token is part of the WHERE
  *
@@ -345,19 +346,25 @@ function refuse(errorClass: WebhookErrorClass): SendWebhookResult {
  *
  * ## What this is given, and when
  *
- * A `DispatchRow` read by `loadForDispatch` **for this delivery, in this iteration**. Its
- * destination state, its ciphertexts and its event were all true microseconds ago — not when the
- * batch was claimed, which is a different and much earlier moment when the batch is slow.
+ * A `DispatchRow` read by `loadForDispatch` **for this delivery, in this iteration** — not the
+ * batch-claim moment, which is a different and much earlier read when the batch is slow.
  *
- * So a destination disabled, revoked or rotated while an earlier delivery was in flight is honoured
- * here: nothing is sent to it, and a rotated secret signs with the new value.
+ * A destination disabled, revoked or rotated **before that read committed** is honoured here:
+ * nothing is sent to it, and a rotated secret decrypts to the new value.
  *
- * ## The one boundary that remains, stated plainly
+ * ## The one boundary that remains, stated precisely
  *
- * **A request already on the wire cannot be unsent.** If the owner's disable commits after this
- * function has handed the body to the socket, the receiver gets it. The window is between the read
- * a few lines below and the moment the socket accepts the body — microseconds, and irreducible: a
- * TCP connection and a database transaction do not commit together. Written down in
+ * **Once `loadForDispatch` has returned, this attempt cannot be reliably cancelled by a later owner
+ * action.** Everything after that read — decrypting the URL and secret, re-validating the URL's
+ * shape, signing the body, resolving the hostname, opening the TCP and TLS connection, and writing
+ * the request — runs without checking the database again. None of those steps has a fixed or short
+ * duration: DNS resolution and the TLS handshake in particular can each take a meaningful fraction
+ * of a second, or longer under a slow or degraded network, so this is not a "microseconds" window.
+ *
+ * What holds regardless of how long it takes: a database transaction and a socket cannot commit
+ * together, so there is no point at which an owner's disable, revoke or rotation can be made to
+ * apply retroactively to an attempt that has already begun. That is the irreducible boundary between
+ * the database and the network, not a duration claim. Written down in
  * `docs/INTEGRATIONS-CAPABILITY-MATRIX.md` §7a rather than promised away.
  */
 async function attemptOne(

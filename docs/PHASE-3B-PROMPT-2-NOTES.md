@@ -327,8 +327,14 @@ Five deterministic tests, each claiming two deliveries and committing a change w
 the wire. **Four of the five go red** against the restored batch-snapshot implementation; the fifth
 is the disabled-test case, which is allowed either way by design.
 
-The one remaining boundary is now microseconds rather than most of a minute: a request already on
-the wire cannot be unsent. That is stated, not promised away.
+The one remaining boundary is unchanged in kind but far narrower in scope: a request already
+dispatched cannot be reliably cancelled by an owner action that commits after `loadForDispatch` has
+returned. That is **not a fixed or short duration** — decryption, URL re-validation, signing, DNS
+resolution and the TLS handshake all happen after the read and before the socket sends, and DNS or a
+slow network can make that take a noticeable fraction of a second or more. The guarantee is the
+boundary itself — a database transaction and a socket cannot commit together — not a promise about
+how long it lasts. Before this fix the same non-cancellable gap covered the rest of the batch, up to
+most of a minute; now it covers only one delivery's own dispatch.
 
 ---
 

@@ -9,7 +9,8 @@
 | Review fixes — lease, test matrix, encryption (migration, code, tests) | `76edaee` — see §13 |
 | Review fixes — lease, test matrix, encryption (documentation) | `9282fa2` |
 | Review fix — dispatch boundary (code, tests) | `35b6ab2` — see §14 |
-| Review fix — dispatch boundary (documentation) | the commit carrying this file |
+| Review fix — dispatch boundary (documentation) | `609f21e` |
+| Accuracy correction — dispatch-boundary wording, no behaviour change | the commit carrying this file — see §15 |
 | **Deploy this** | the tip of `rebuild/phase-0-foundation`. **Not `9695e17`, not `9282fa2`** |
 | Migration | `20260921120000_webhook_destinations`, the **15th** |
 | `master` | untouched at `b9ee686`, and absent from the `deploy` remote |
@@ -534,13 +535,21 @@ useful than pretending all five depend on the fix.
 
 ### 14.5 The boundary that remains
 
-A request already on the wire cannot be unsent. The window is now between that per-delivery read and
-the moment the socket accepts the body — **microseconds**, where before the fix it was up to most of
-a minute. Irreducible: a TCP connection and a database transaction do not commit together.
+A request already dispatched cannot be reliably cancelled by an owner action that commits after
+`loadForDispatch` has returned for that delivery. **This is stated as a boundary, not a duration**:
+an earlier version of this text said "microseconds", which overclaimed how fast the gap between the
+read and the socket sending actually is — decryption, URL re-validation, signing, DNS resolution and
+the TLS handshake all happen in that gap, and DNS or a slow network can make it take a noticeable
+fraction of a second or longer. What is guaranteed is that a database transaction and a socket cannot
+commit together, so no owner action can be made to apply retroactively to a dispatch already under
+way. Before this fix the same non-cancellable gap covered the rest of the batch, up to most of a
+minute; the per-delivery read narrows it to one delivery's own dispatch time, not to a fixed short
+interval.
 
-The same applies to secret rotation: every delivery whose pre-dispatch read happens after the
-rotation commits signs with the new secret; one already on the wire was signed with the old. Stated
-in §7a of the matrix, and not promised away.
+The same applies to secret rotation: a delivery whose `loadForDispatch` read happens after the
+rotation commits uses the new secret; one whose read happened before the rotation was already
+holding the old ciphertext and signs with the old secret. Stated in §7a of the matrix, and not
+promised away.
 
 ### 14.6 The quality bar, re-run in full
 
@@ -563,7 +572,35 @@ in §7a of the matrix, and not promised away.
 
 ---
 
-## 15. Which SHA to deploy
+## 15. Accuracy correction — the dispatch boundary was not "microseconds"
+
+`609f21e` fixed the dispatch boundary correctly but described the remaining non-cancellable window
+as "microseconds" in five places (two in `delivery.ts`'s comments, one each in the capability
+matrix, the implementation notes, and §14.5 above). That was an overclaim: between the
+per-delivery read (`loadForDispatch`) and the socket actually sending, `attemptOne` and
+`sendWebhook` still decrypt the URL and secret, re-validate the URL's shape, sign the body, resolve
+the hostname, and open the TCP/TLS connection. None of that has a fixed or short duration — DNS
+resolution and the TLS handshake in particular can each take a meaningful fraction of a second or
+longer under a slow or degraded network.
+
+**No behaviour changed.** This is a wording correction across five comments/docs sites. The
+replacement statement is a boundary, not a duration: a disable, revoke or rotation committed
+**before** `loadForDispatch` returns is observed and changes what happens; one committed **after**
+is not, and the attempt already under way cannot be reliably cancelled — because a database
+transaction and a socket cannot commit together, not because the gap is short. Secret rotation is
+corrected the same way: it applies to a delivery whose signing-secret read has not yet happened, not
+to one that has not yet "arrived" or been "signed".
+
+Two occurrences of the word "microseconds" were left alone because they are unrelated: a
+timing-safe digest comparison in `src/server/promotions/codes.ts`, and a note about test-queue
+spacing in `webhook-delivery.test.ts`.
+
+Verified: the diff to `delivery.ts` is comments only (confirmed by diffing non-comment lines); no
+migration or schema file changed; lint and typecheck are clean; all 106 webhook integration tests,
+both webhook unit suites (66 tests), and the webhook browser suite (16 tests) pass unchanged;
+`git diff --check` is clean; a secret/control-byte scan over the changed files found nothing.
+
+## 16. Which SHA to deploy
 
 The tip of `rebuild/phase-0-foundation` — the documentation commit carrying this file, which
 contains `770f324`, `9695e17` and the review-fix commit. The final report names the exact hash; a
