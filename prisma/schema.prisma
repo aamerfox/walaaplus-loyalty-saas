@@ -1316,12 +1316,17 @@ enum WebhookErrorClass {
   CIPHERTEXT_INVALID
   /// Permanent. Disabled or revoked before dispatch, or a real event for a destination not enabled.
   DESTINATION_NOT_ELIGIBLE
-  /// **Retryable.** The egress gateway was unreachable, unauthenticated, unconfigured or at its
-  /// concurrency limit. **The dispatch never left this deployment**, so it is not the merchant's
-  /// network and is deliberately not recorded as if it were.
+  /// **Retryable, and the database enforces it.** The egress gateway was unreachable,
+  /// unauthenticated, unconfigured or at its concurrency limit. **The dispatch never left this
+  /// deployment**, so it is not the merchant's network and is deliberately not recorded as if it
+  /// were. `walaaplus_validate_webhook_attempt` refuses an attempt that calls it permanent, and
+  /// `walaaplus_webhook_delivery_guard` refuses a delivery that settles REFUSED with it or reaches
+  /// FAILED before the attempt cap.
   GATEWAY_UNAVAILABLE
-  /// Permanent. The gateway refused the dispatch CONTRACT - a malformed URL, an oversized body, a
-  /// header outside the allow-list. A defect on this side; waiting does not fix it.
+  /// **Permanent, and the database enforces it.** The gateway refused the dispatch CONTRACT - a
+  /// malformed URL, an oversized body, a header outside the allow-list. A defect on this side;
+  /// waiting does not fix it, so it settles REFUSED on the first attempt and can never be the
+  /// reason a delivery ran out of attempts.
   GATEWAY_REJECTED
 }
 
