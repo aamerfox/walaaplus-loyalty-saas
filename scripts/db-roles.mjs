@@ -44,6 +44,7 @@ const APPEND_ONLY_TABLES = [
   "CampaignAudienceSnapshot",
   "CampaignAudienceMember",
   "ReferralAttribution",
+  "PromotionRedemption",
 ];
 /**
  * Tables whose rows may be updated but must never be removed.
@@ -58,7 +59,7 @@ const APPEND_ONLY_TABLES = [
  * trigger, because a grant cannot express it. Two layers, same as everywhere else: the role stops
  * the app, the trigger stops anyone with more rights than the app.
  */
-const NO_DELETE_TABLES = ["CardShareLink"];
+const NO_DELETE_TABLES = ["CardShareLink", "Promotion"];
 
 const MIGRATOR_ONLY_TABLES = ["_prisma_migrations"];
 const WORKER_SCHEMA = "pgboss";

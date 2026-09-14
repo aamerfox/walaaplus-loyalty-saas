@@ -230,6 +230,8 @@ model User {
   campaignApprovals CampaignApproval[]         @relation("ApprovalDecider")
   shareLinks        CardShareLink[]            @relation("ShareLinkIssuer")
   referralsRecorded ReferralAttribution[]      @relation("ReferralRecorder")
+  promotions        Promotion[]                @relation("PromotionAuthor")
+  redemptions       PromotionRedemption[]      @relation("RedemptionRecorder")
   audienceSnapshots CampaignAudienceSnapshot[] @relation("SnapshotAuthor")
 }
 
@@ -263,6 +265,8 @@ model Business {
   audienceSnapshots  CampaignAudienceSnapshot[]
   cardShareLinks     CardShareLink[]
   referrals          ReferralAttribution[]
+  promotions         Promotion[]
+  redemptions        PromotionRedemption[]
   pushMessages       PushMessage[]
   pushSubscriptions  PushSubscription[]
 }
@@ -363,6 +367,7 @@ model CustomerBusinessProfile {
   consentRecords       ConsentRecord[]
   audienceMemberships  CampaignAudienceMember[]
   referralAttributions ReferralAttribution[]
+  promotionRedemptions PromotionRedemption[]
 
   @@unique([businessId, customerId])
   @@index([businessId, lastSeenAt])
@@ -509,17 +514,18 @@ model CustomerCard {
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
 
-  business          Business                @relation(fields: [businessId], references: [id])
-  template          ProgramTemplate         @relation(fields: [templateId], references: [id])
-  programVersion    ProgramVersion          @relation(fields: [programVersionId], references: [id])
-  profile           CustomerBusinessProfile @relation(fields: [customerBusinessProfileId], references: [id])
-  utmSourceLink     UtmSourceLink?          @relation(fields: [utmSourceLinkId], references: [id])
-  operations        LoyaltyOperation[]
-  pushSubscriptions PushSubscription[]
-  pushDeliveries    PushDelivery[]
-  shareLinks        CardShareLink[]
-  referredBy        ReferralAttribution[]   @relation("EnrolledCard")
-  referralsGiven    ReferralAttribution[]   @relation("ReferringCard")
+  business             Business                @relation(fields: [businessId], references: [id])
+  template             ProgramTemplate         @relation(fields: [templateId], references: [id])
+  programVersion       ProgramVersion          @relation(fields: [programVersionId], references: [id])
+  profile              CustomerBusinessProfile @relation(fields: [customerBusinessProfileId], references: [id])
+  utmSourceLink        UtmSourceLink?          @relation(fields: [utmSourceLinkId], references: [id])
+  operations           LoyaltyOperation[]
+  pushSubscriptions    PushSubscription[]
+  pushDeliveries       PushDelivery[]
+  shareLinks           CardShareLink[]
+  referredBy           ReferralAttribution[]   @relation("EnrolledCard")
+  referralsGiven       ReferralAttribution[]   @relation("ReferringCard")
+  promotionRedemptions PromotionRedemption[]
 
   @@unique([customerBusinessProfileId, templateId])
   @@index([businessId, status])
@@ -612,6 +618,107 @@ model ReferralAttribution {
 
   @@index([businessId, recordedAt(sort: Desc)])
   @@index([referringShareLinkId])
+}
+
+/// Four states, and `EXPIRED` is terminal: a code that stopped working never starts again.
+enum PromotionState {
+  DRAFT
+  ACTIVE
+  PAUSED
+  EXPIRED
+}
+
+/// What a redemption row asserts.
+enum RedemptionEntry {
+  REDEEMED
+  VOIDED
+}
+
+/// How the code reached the counter. One value, because one flow exists: a staff member typed it.
+enum RedemptionMethod {
+  COUNTER_TYPED_CODE
+}
+
+/// A coupon a member of staff types at the counter.
+///
+/// **No amount, percentage, currency, tax, invoice or total.** `benefitDescription` is the
+/// merchant's own sentence about what the customer gets; nothing parses it and nothing computes
+/// from it. See `docs/PROMOTIONS-CAPABILITY-MATRIX.md`.
+///
+/// The code is stored as `sha256(codeSalt ‖ businessId ‖ normalised code)` and never as itself. The
+/// salt is per promotion and the reason is that a coupon code is short and human-typed: an unsalted
+/// digest of `AUTUMN10` is a dictionary lookup, not a search.
+///
+/// NO-DELETE with a constrained UPDATE: a lifecycle is a state change, so `promotion_guard` permits
+/// a legal transition and the mutable settings while freezing the code, the salt and the identity of
+/// the row. DELETE and TRUNCATE are refused.
+model Promotion {
+  id                 String         @id @default(uuid())
+  businessId         String
+  name               String
+  /// Lower-cased, whitespace-collapsed. Unique per business.
+  normalizedName     String
+  /// What the customer gets, in the merchant's own words. A sentence, not a calculation.
+  benefitDescription String
+  /// sha256(codeSalt ‖ businessId ‖ normalised code), lower-case hex.
+  codeDigest         String
+  /// 32 random bytes, base64url. Frozen at insert.
+  codeSalt           String
+  state              PromotionState @default(DRAFT)
+  startsAt           DateTime?
+  endsAt             DateTime?
+  /// Null means no limit. Counted over redemptions that have not been voided.
+  totalLimit         Int?
+  perCustomerLimit   Int?
+  createdByUserId    String?
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+
+  business    Business              @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  createdBy   User?                 @relation("PromotionAuthor", fields: [createdByUserId], references: [id])
+  redemptions PromotionRedemption[]
+
+  @@unique([businessId, normalizedName])
+  @@unique([businessId, codeDigest])
+  @@index([businessId, state])
+}
+
+/// APPEND-ONLY. One row per entitlement, and one more per withdrawal of one.
+///
+/// A row says: this customer is entitled to something, and a person will hand it over. It moves no
+/// money, no points and no stamps, and nothing reads it to compute a total.
+///
+/// Voiding writes a second row and **frees the slot** — a voided redemption means "that did not
+/// happen", so the customer can use their coupon. Deliberately the opposite of
+/// `ReferralAttribution`, where voiding does not free a slot because re-attributing would be
+/// retrospective.
+model PromotionRedemption {
+  id                        String           @id @default(uuid())
+  businessId                String
+  promotionId               String
+  entry                     RedemptionEntry
+  customerCardId            String
+  customerBusinessProfileId String
+  method                    RedemptionMethod
+  /// Set on a VOIDED row: which redemption it withdraws.
+  voidsRedemptionId         String?
+  /// Free text from whoever voided one. Never a code, a phone number or a name.
+  reason                    String?
+  recordedAt                DateTime
+  recordedByUserId          String?
+  createdAt                 DateTime         @default(now())
+
+  business   Business                @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  promotion  Promotion               @relation(fields: [promotionId], references: [id], onDelete: Restrict)
+  card       CustomerCard            @relation(fields: [customerCardId], references: [id], onDelete: Restrict)
+  profile    CustomerBusinessProfile @relation(fields: [customerBusinessProfileId], references: [id], onDelete: Restrict)
+  voids      PromotionRedemption?    @relation("RedemptionVoid", fields: [voidsRedemptionId], references: [id], onDelete: Restrict)
+  voidedBy   PromotionRedemption[]   @relation("RedemptionVoid")
+  recordedBy User?                   @relation("RedemptionRecorder", fields: [recordedByUserId], references: [id])
+
+  @@index([promotionId, entry])
+  @@index([promotionId, customerBusinessProfileId])
+  @@index([businessId, recordedAt(sort: Desc)])
 }
 
 /// APPEND-ONLY. UPDATE and DELETE are rejected by trigger `loyalty_operation_append_only`.

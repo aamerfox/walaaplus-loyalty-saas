@@ -127,6 +127,14 @@ export default function ScannerClient({
    * fragment at send time, never here, so the field keeps showing what they actually entered.
    */
   const [referralInput, setReferralInput] = useState("");
+  /**
+   * A coupon code the customer is saying out loud.
+   *
+   * Held only while it is being typed. It goes into a POST body on the counter route, is hashed
+   * there, and is cleared from this device as soon as the answer comes back — the one place a raw
+   * code exists is the moment between a cashier typing it and the server forgetting it.
+   */
+  const [couponInput, setCouponInput] = useState("");
   /** The customer's own card link, shown after enrolling or after a staff restore. */
   const [cardLink, setCardLink] = useState<{ url: string; qr: string } | null>(null);
   const [linkCopied, setLinkCopied] = useState(false);
@@ -483,6 +491,51 @@ export default function ScannerClient({
     }
   }, [businessId, busy, card, describeFailure, tc]);
 
+  /**
+   * Record a coupon for the card on screen.
+   *
+   * **Nothing is discounted or charged.** The answer says the offer was recorded for manual
+   * fulfilment and repeats what the merchant wrote it promises, so a cashier knows what to hand
+   * over. A refusal names no reason: a till that could tell "expired" from "never existed" could be
+   * asked which codes exist, one guess at a time.
+   */
+  const redeemCoupon = useCallback(async () => {
+    if (!card || busy || !couponInput.trim()) return;
+    setBusy(true);
+    setFeedback(null);
+    try {
+      const response = await fetch("/api/scanner/coupon", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        // In the body. A code in a path or a query string is written into every access log between
+        // this till and the server.
+        body: JSON.stringify({ businessId, customerCardId: card.customerCardId, code: couponInput.trim() }),
+      });
+      if (!response.ok) {
+        setFeedback({ tone: "error", text: await describeFailure(response) });
+        return;
+      }
+      const result = (await response.json()) as
+        | { outcome: "RECORDED"; benefitDescription: string }
+        | { outcome: "NOT_ACCEPTED" };
+
+      // Cleared either way, and before the message is shown: the code has done its only job.
+      setCouponInput("");
+      if (result.outcome === "RECORDED") {
+        setFeedback({
+          tone: "ok",
+          text: `${t("couponRecorded", { benefit: result.benefitDescription })} ${t("couponNothingApplied")}`,
+        });
+      } else {
+        setFeedback({ tone: "warn", text: t("couponNotAccepted") });
+      }
+    } catch {
+      setFeedback({ tone: "error", text: tc("genericError") });
+    } finally {
+      setBusy(false);
+    }
+  }, [businessId, busy, card, couponInput, describeFailure, t, tc]);
+
   const copyCardLink = useCallback(async () => {
     if (!cardLink) return;
     try {
@@ -743,6 +796,35 @@ export default function ScannerClient({
               className="w-full rounded-xl bg-turquoise-500 py-3 font-bold text-navy-950 disabled:opacity-50"
             >
               {busy ? t("searching") : t("enrollSubmit")}
+            </button>
+          </section>
+        )}
+
+        {card !== null && (
+          <section data-testid="scanner-coupon" className="space-y-3 rounded-2xl bg-navy-900 p-5 ring-1 ring-white/10">
+            <label htmlFor="scanner-coupon-code" className="block text-xs uppercase tracking-wide text-white/55">
+              {t("couponLabel")}
+            </label>
+            <input
+              id="scanner-coupon-code"
+              value={couponInput}
+              onChange={(e) => setCouponInput(e.target.value)}
+              placeholder={t("couponPlaceholder")}
+              maxLength={64}
+              dir="ltr"
+              autoComplete="off"
+              spellCheck={false}
+              data-testid="scanner-coupon-input"
+              className="w-full rounded-xl bg-navy-950/60 px-4 py-3 text-sm ring-1 ring-white/10 outline-none focus:ring-turquoise-500"
+            />
+            <button
+              type="button"
+              onClick={() => void redeemCoupon()}
+              disabled={busy || !couponInput.trim()}
+              data-testid="scanner-coupon-submit"
+              className="w-full rounded-xl bg-navy-950/60 py-3 text-sm font-bold ring-1 ring-white/15 disabled:opacity-50"
+            >
+              {t("couponSubmit")}
             </button>
           </section>
         )}

@@ -8,8 +8,10 @@ import { getConsentHistory, getConsentStatus } from "@/server/consent/consent";
 import { getCustomerProfile, listProfileActivity } from "@/server/customers/customer-360";
 import { isAppError } from "@/server/errors";
 import { resolveScannerContext } from "@/server/tenant/scanner-context";
+import { listCardRedemptions } from "@/server/promotions/redemption";
 import { countReferralAttributions, getCardAttribution } from "@/server/share/referrals";
 import ConsentControls from "./ConsentControls";
+import RedemptionsPanel from "./RedemptionsPanel";
 import ReferralPanel from "./ReferralPanel";
 import WalletPassPanel from "./WalletPassPanel";
 
@@ -101,11 +103,15 @@ export default async function CustomerProfilePage({
    * Per card, because an attribution belongs to the card it was recorded against. The count is an
    * aggregate and stays one: nothing here lists attributions, names a referrer or ranks anybody.
    */
-  const [attributions, referralCounts] = await Promise.all([
+  const [attributions, referralCounts, redemptions] = await Promise.all([
     Promise.all(
       profile.cards.map(async (card) => [card.customerCardId, await getCardAttribution(ctx, card.customerCardId)] as const),
     ).then((entries) => new Map(entries)),
     countReferralAttributions(ctx),
+    // What each card has been recorded as owed. Per card, because a redemption attaches to one.
+    Promise.all(
+      profile.cards.map(async (card) => [card.customerCardId, await listCardRedemptions(ctx, card.customerCardId)] as const),
+    ).then((entries) => new Map(entries)),
   ]);
 
   const numbers = new Intl.NumberFormat(locale === "ar" ? "ar-SY-u-nu-latn" : "en");
@@ -230,6 +236,23 @@ export default async function CustomerProfilePage({
                  */}
                 {mayEditConsent && card.cardType === CardType.STAMP ? (
                   <WalletPassPanel businessId={ctx.businessId} customerCardId={card.customerCardId} />
+                ) : null}
+
+                {mayEditConsent ? (
+                  <RedemptionsPanel
+                    businessId={ctx.businessId}
+                    mayVoid={mayVoidReferral}
+                    redemptions={(redemptions.get(card.customerCardId) ?? []).map((row) => ({
+                      id: row.id,
+                      promotionName: row.promotionName,
+                      benefitDescription: row.benefitDescription,
+                      recordedAt: row.recordedAt.toISOString(),
+                      voided: row.voided,
+                      voidedAt: row.voidedAt?.toISOString() ?? null,
+                      voidReason: row.voidReason,
+                      recordedByName: row.recordedByName,
+                    }))}
+                  />
                 ) : null}
 
                 {mayEditConsent ? (

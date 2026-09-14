@@ -127,6 +127,23 @@ export const AuditAction = {
   /** A card's invitation link was revoked. The link stops working; the row stays. */
   SHARE_LINK_REVOKED: "share_link.revoked",
 
+  // ── Phase 3A Prompt 3: promotions. Still no money, anywhere. ─────────────
+  /**
+   * A promotion was created.
+   *
+   * Carries the name and the limits. **Never the code, its digest or its salt** — a digest of a
+   * short human-chosen string is still a way to confirm a guess, and an audit row is read by more
+   * people and kept far longer than the request that carried the code.
+   */
+  PROMOTION_CREATED: "promotion.created",
+  /** Its settings changed. The code cannot be among them; the trigger refuses one. */
+  PROMOTION_UPDATED: "promotion.updated",
+  PROMOTION_STATE_CHANGED: "promotion.state_changed",
+  /** A coupon was recorded for manual fulfilment. No balance moved, so none is recorded. */
+  PROMOTION_REDEEMED: "promotion.redeemed",
+  /** An owner or manager withdrew one. Both rows stay. */
+  PROMOTION_REDEMPTION_VOIDED: "promotion.redemption_voided",
+
   // ── Phase 3A Prompt 2: referral attribution. Still no reward, anywhere. ───
   /**
    * A newly issued card was recorded as having arrived with an invitation.

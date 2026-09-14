@@ -19,6 +19,8 @@ import { createStampProgram, type StampProgramSummary } from "@/server/program/s
 
 const APP_TABLES = [
   "AuthRateLimit",
+  "PromotionRedemption",
+  "Promotion",
   "ReferralAttribution",
   "CardShareLink",
   "CampaignAudienceMember",
@@ -83,6 +85,8 @@ const APPEND_ONLY_TABLES = [
   "CampaignAudienceSnapshot",
   "CampaignAudienceMember",
   "ReferralAttribution",
+  "PromotionRedemption",
+  "Promotion",
 ];
 
 /** Wipe every application table, with the append-only triggers off for the duration. */
