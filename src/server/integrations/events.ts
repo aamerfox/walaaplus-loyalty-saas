@@ -3,22 +3,29 @@ import {
   IntegrationEventType,
   MembershipRole,
   Permission,
+  WebhookDestinationState,
   type Prisma,
 } from "@prisma/client";
 import { prisma } from "../db";
 import { ForbiddenError } from "../errors";
 import { requirePermission, type TenantContext } from "../tenant/context";
+import { MAX_DESTINATIONS_PER_BUSINESS } from "./webhooks/destinations";
 
 /**
  * The internal record that a completed workflow happened.
  *
  * ## This is not an integration
  *
- * Nothing here sends anything. There is no endpoint, no subscription, no credential, no signature,
- * no queue, no worker, no retry and no delivery status — and no `fetch`, HTTP client or timer
- * anywhere in this directory, which `tests/unit/integration-boundary.test.ts` asserts by reading the
- * source. `docs/INTEGRATIONS-CAPABILITY-MATRIX.md` was written before this file to make that a
- * constraint rather than a description of what happened to get built.
+ * Nothing in THIS file sends anything: no endpoint, no credential, no signature, no HTTP client, no
+ * queue and no timer, which `tests/unit/integration-boundary.test.ts` asserts by reading the source.
+ *
+ * Since Prompt 2 there is exactly one place in the product that makes an outbound request —
+ * `./webhooks/transport.ts`, called only by the worker — and `emitIntegrationEvent` still does not
+ * reach it. What it writes is an OUTBOX row: an obligation, in the same transaction as the event, to
+ * be carried out later by something else. A row in a table is not a request.
+ *
+ * `docs/INTEGRATIONS-CAPABILITY-MATRIX.md` was written before this file, and extended before Prompt
+ * 2, to make that a constraint rather than a description of what happened to get built.
  *
  * What this is: the **input** a delivery mechanism would one day read. Building the record first,
  * with nothing able to publish it, is the order that keeps a half-finished integration from being
@@ -72,7 +79,7 @@ export interface EmitIntegrationEventInput {
  * learned the hard way.
  */
 export async function emitIntegrationEvent(tx: TxClient, input: EmitIntegrationEventInput): Promise<void> {
-  await tx.integrationEvent.create({
+  const event = await tx.integrationEvent.create({
     data: {
       businessId: input.businessId,
       envelopeVersion: ENVELOPE_VERSION,
@@ -82,6 +89,39 @@ export async function emitIntegrationEvent(tx: TxClient, input: EmitIntegrationE
     },
     select: { id: true },
   });
+
+  /*
+   * The outbox, in THIS transaction.
+   *
+   * One `WebhookDelivery` row per enabled destination, written beside the event rather than after
+   * it. That is the whole transactionality story for Prompt 2: if the redemption rolls back, so
+   * does the event, and so does the obligation to tell anybody about it. There is no second write
+   * to a queue that could succeed when the first failed.
+   *
+   * Nothing is sent from here. A row in a table is not a request; the worker makes those.
+   *
+   * A destination enabled AFTER this event exists gets no delivery for it, for the same reason
+   * nothing is backfilled: an obligation created later would claim a decision was taken at a moment
+   * when it was not.
+   */
+  const destinations = await tx.webhookDestination.findMany({
+    where: { businessId: input.businessId, state: WebhookDestinationState.ENABLED },
+    select: { id: true },
+    take: MAX_DESTINATIONS_PER_BUSINESS,
+  });
+
+  for (const destination of destinations) {
+    await tx.webhookDelivery.create({
+      data: {
+        businessId: input.businessId,
+        destinationId: destination.id,
+        integrationEventId: event.id,
+        // Due immediately. The worker's next pass picks it up.
+        nextAttemptAt: new Date(),
+      },
+      select: { id: true },
+    });
+  }
 }
 
 /** One row of the merchant's own event history. Internal references and times, nothing else. */

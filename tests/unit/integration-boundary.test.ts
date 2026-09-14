@@ -3,30 +3,41 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 /**
- * The boundary this phase exists to hold: **nothing leaves the machine**.
+ * The boundary this phase exists to hold: **the event record does not leave the machine.**
  *
- * Phase 3B Prompt 1 builds the internal record a delivery mechanism would one day read, and no
- * delivery mechanism. The difference between those two is easy to lose a month from now, when
- * somebody adds "just a quick webhook" to the module that already has all the events in it — so the
- * absence is asserted by reading the source rather than left to a code review that may not happen.
+ * Prompt 1 built the internal record a delivery mechanism would one day read, and no delivery
+ * mechanism. **Prompt 2 built the delivery mechanism** — so this test was narrowed, deliberately and
+ * visibly, rather than deleted or quietly weakened.
  *
- * This is the same shape as `campaign-delivery-boundary.test.ts`, and for the same reason.
+ * What it covers now: `src/server/integrations/*.ts`, the top level, which is `events.ts`. That
+ * module writes an event and an outbox row and must never acquire a way to send one, because the
+ * transaction it runs in belongs to a cashier's till.
+ *
+ * What covers the rest: `tests/unit/webhook-boundary.test.ts`, which asserts that exactly one module
+ * under `src/server` holds an HTTP client, that it is the webhook transport, and that nothing under
+ * `src/app/` imports it or the runner that calls it.
+ *
+ * Narrowing a scan is how a guarantee gets lost, so the narrowing is stated here and the replacement
+ * is named. This is the same shape as `campaign-delivery-boundary.test.ts`, and for the same reason.
  */
 
 const ROOT = join(import.meta.dirname, "..", "..");
 const INTEGRATIONS = join(ROOT, "src", "server", "integrations");
 
-function sourcesUnder(dir: string): { path: string; text: string }[] {
-  const out: { path: string; text: string }[] = [];
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const full = join(dir, entry.name);
-    if (entry.isDirectory()) out.push(...sourcesUnder(full));
-    else if (/\.tsx?$/.test(entry.name)) out.push({ path: full, text: readFileSync(full, "utf8") });
-  }
-  return out;
+/**
+ * The TOP LEVEL of the integrations directory only — not its subdirectories.
+ *
+ * `webhooks/` is deliberately excluded: it is where Prompt 2 put the one HTTP client this product
+ * has, and `webhook-boundary.test.ts` is what governs it. Recursing here would either fail or,
+ * worse, be softened until it asserted nothing.
+ */
+function topLevelSources(dir: string): { path: string; text: string }[] {
+  return readdirSync(dir, { withFileTypes: true })
+    .filter((e) => e.isFile() && /\.tsx?$/.test(e.name))
+    .map((e) => ({ path: join(dir, e.name), text: readFileSync(join(dir, e.name), "utf8") }));
 }
 
-const SOURCES = sourcesUnder(INTEGRATIONS);
+const SOURCES = topLevelSources(INTEGRATIONS);
 
 /** Comments explain what is deliberately absent, so the scan reads code only. */
 function code(text: string): string {
@@ -37,6 +48,11 @@ describe("the integrations module cannot reach the network", () => {
   it("has source files to check", () => {
     // A scan over an empty directory passes vacuously, which is the one way this test could lie.
     expect(SOURCES.length).toBeGreaterThan(0);
+  });
+
+  it("covers events.ts, which is the module this rule is about", () => {
+    // Named explicitly, so a rename cannot quietly take the file out of the scan.
+    expect(SOURCES.map((s) => s.path.replace(/\\/g, "/")).some((p) => p.endsWith("/events.ts"))).toBe(true);
   });
 
   it("contains no HTTP client, queue, worker or timer", () => {
@@ -136,6 +152,8 @@ describe("the capability audit names every family, and promises none of them", (
 
   it("says plainly that a provider name is not an integration", () => {
     expect(MATRIX).toMatch(/not an integration/i);
+    // Prompt 2 added the webhook security record; a matrix without it is out of date with the code.
+    expect(MATRIX).toMatch(/## 7a\. Webhook security and decision record/);
     // The matrix's own words: "This phase has **none** of those, and the product must not imply otherwise."
     expect(MATRIX).toMatch(/none\*\* of those, and the product must not imply otherwise/i);
   });
@@ -166,8 +184,14 @@ describe("no screen claims a provider is connected", () => {
     /*
      * A button labelled "Connect" is the shortest path from "we have an events table" to "we
      * integrate with Stripe". Each locale is checked against the verbs that would make the claim in
-     * THAT language — the imperative اربط and the word مفتاح (key) for Arabic, rather than a
-     * transliteration of the English list, which would check nothing.
+     * THAT language, rather than a transliteration of the English list, which would check nothing.
+     *
+     * **The Arabic pattern was narrowed in Prompt 2, and the reason is worth stating.** It used to
+     * forbid مفتاح (key) outright, as a proxy for "API key". The block now legitimately contains
+     * مفتاح التوقيع — the owner's OWN signing secret for their OWN webhook — and مفتاح التشفير,
+     * which appears in a sentence saying the feature is NOT configured. Neither is a claim that a
+     * provider is attached, which is the thing being guarded against, so the pattern now names the
+     * claim itself: مفتاح API, ربط حساب, اربط, تفويض.
      *
      * `nothingConnected` is exempt in both, because it exists to DENY a connection and so
      * necessarily contains the word. The second assertion keeps that exemption from quietly
@@ -179,7 +203,7 @@ describe("no screen claims a provider is connected", () => {
         denial: /no provider is connected/i,
       },
       ar: {
-        forbidden: /اربط|مفتاح|تفويض|ربط حساب/,
+        forbidden: /اربط|مفتاح API|تفويض|ربط حساب/,
         denial: /لا يوجد مزو/,
       },
     };

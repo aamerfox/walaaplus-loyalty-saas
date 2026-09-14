@@ -124,6 +124,26 @@ const envSchema = z.object({
    */
   AUTH_RATE_LIMIT_PEPPER: z.string().min(16, "must be at least 16 characters").optional(),
 
+  /**
+   * Authenticated-encryption key for webhook destination URLs and signing secrets.
+   *
+   * **Optional here, and deliberately unvalidated here.** Two reasons, both about blast radius:
+   *
+   *   1. A deployment that uses no webhooks must start normally. Making this required would stop
+   *      the till over a feature nobody had configured.
+   *   2. A malformed value must not stop the application either. If the format were checked at
+   *      boot, a mistyped key would take down enrolment, stamps, redemptions and `/health` — over
+   *      a feature that should simply refuse.
+   *
+   * So the authority is `src/server/integrations/webhooks/crypto.ts`, at the moment the value is
+   * needed, and the failure is scoped to the webhook path: configuration and delivery fail closed,
+   * everything else is untouched.
+   *
+   * 32 bytes, as 64 hex characters or base64. Per environment; staging and production must not
+   * share one. See `docs/INTEGRATIONS-CAPABILITY-MATRIX.md` §8a for the deployment requirement.
+   */
+  INTEGRATION_ENCRYPTION_KEY: z.string().optional(),
+
   /*
    * ── No public-enrollment window (finding L-15, closed) ─────────────────────
    *

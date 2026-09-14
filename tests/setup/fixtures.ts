@@ -19,6 +19,9 @@ import { createStampProgram, type StampProgramSummary } from "@/server/program/s
 
 const APP_TABLES = [
   "AuthRateLimit",
+  "WebhookDeliveryAttempt",
+  "WebhookDelivery",
+  "WebhookDestination",
   "IntegrationEvent",
   "PromotionRedemption",
   "Promotion",
@@ -89,6 +92,9 @@ const APPEND_ONLY_TABLES = [
   "PromotionRedemption",
   "Promotion",
   "IntegrationEvent",
+  "WebhookDestination",
+  "WebhookDelivery",
+  "WebhookDeliveryAttempt",
 ];
 
 /** Wipe every application table, with the append-only triggers off for the duration. */

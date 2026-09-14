@@ -44,6 +44,33 @@ describe("tracked source is text, not binary", () => {
     ).toEqual([]);
   });
 
+  it("finds no other stray control byte either", () => {
+    /*
+     * Widened after a NUL escape written as a literal byte turned up in Prompt 2 — and the same scan
+     * then found a **pre-existing** one: a literal BACKSPACE byte in a regex in
+     * `customer-card-page.test.ts`, sitting where a word-boundary escape was meant. That assertion
+     * had been passing for a reason unrelated to what it claimed to check.
+     *
+     * NUL is the one that makes Git call a file binary; the rest are quieter and just as wrong. A
+     * control character in source is always an escape somebody wrote as a raw byte.
+     *
+     * Tab, newline and carriage return are excluded, being ordinary whitespace.
+     */
+    const offenders: string[] = [];
+    for (const path of TRACKED) {
+      if (!REVIEWED.test(path)) continue;
+      const bytes = readFileSync(join(REPO_ROOT, path));
+      for (const byte of bytes) {
+        const isWhitespace = byte === 9 || byte === 10 || byte === 13;
+        if ((byte < 32 && !isWhitespace) || byte === 127) {
+          offenders.push(`${path} (0x${byte.toString(16).padStart(2, "0")})`);
+          break;
+        }
+      }
+    }
+    expect(offenders, "a control byte in source is an escape somebody wrote as a raw byte").toEqual([]);
+  });
+
   /**
    * The two files this rule was written for, checked by asking Git rather than by inspecting bytes.
    *

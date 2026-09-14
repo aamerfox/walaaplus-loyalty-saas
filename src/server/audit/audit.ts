@@ -144,6 +144,23 @@ export const AuditAction = {
   /** An owner or manager withdrew one. Both rows stay. */
   PROMOTION_REDEMPTION_VOIDED: "promotion.redemption_voided",
 
+  // ── Phase 3B Prompt 2: webhook destinations. The only outbound capability. ─
+  /**
+   * The owner configured somewhere to send this business's events.
+   *
+   * Carries the name and the **hostname**. **Never the full URL, never the signing secret, and
+   * never either ciphertext** \u2014 the URL may hold a path token the receiver treats as
+   * authentication, and an audit row is read by more people and kept far longer than the request
+   * that created it.
+   */
+  WEBHOOK_DESTINATION_CREATED: "webhook.destination_created",
+  /** Enabled, disabled or revoked. The two states and nothing else. */
+  WEBHOOK_DESTINATION_STATE_CHANGED: "webhook.destination_state_changed",
+  /** A new signing secret was issued. The key version, never the secret. */
+  WEBHOOK_SECRET_ROTATED: "webhook.secret_rotated",
+  /** The owner asked for one fixed synthetic test envelope. Two row ids, no URL. */
+  WEBHOOK_TEST_QUEUED: "webhook.test_queued",
+
   // ── Phase 3A Prompt 2: referral attribution. Still no reward, anywhere. ───
   /**
    * A newly issued card was recorded as having arrived with an invitation.

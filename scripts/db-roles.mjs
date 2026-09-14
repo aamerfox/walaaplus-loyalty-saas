@@ -51,6 +51,11 @@ const APPEND_ONLY_TABLES = [
    * one, because a future consumer's idea of what it has already seen is a position in this table.
    */
   "IntegrationEvent",
+  /*
+   * A webhook attempt is a statement that something was tried, at a moment, with an outcome. There
+   * is nothing to correct: a second attempt is a second row, which is how retries already work.
+   */
+  "WebhookDeliveryAttempt",
 ];
 /**
  * Tables whose rows may be updated but must never be removed.
@@ -65,7 +70,24 @@ const APPEND_ONLY_TABLES = [
  * trigger, because a grant cannot express it. Two layers, same as everywhere else: the role stops
  * the app, the trigger stops anyone with more rights than the app.
  */
-const NO_DELETE_TABLES = ["CardShareLink", "Promotion"];
+const NO_DELETE_TABLES = [
+  "CardShareLink",
+  "Promotion",
+  /*
+   * A destination's lifecycle IS a state change — disabled, enabled, revoked — and rotating its
+   * signing secret replaces one ciphertext with another, so UPDATE is unavoidable. What it may
+   * become is narrowed by `webhook_destination_guard`: the endpoint, the business and the creation
+   * facts are frozen, the transitions are a table, and REVOKED is terminal.
+   */
+  "WebhookDestination",
+  /*
+   * A delivery's whole purpose is to change state: pending, attempted, settled. The trigger allows
+   * exactly that and nothing else — the attempt counter only ever rises and only by one, a settled
+   * delivery is settled, and a row that reached DELIVERED carries no error class. Deleting one
+   * would erase the record of what this business tried to send.
+   */
+  "WebhookDelivery",
+];
 
 const MIGRATOR_ONLY_TABLES = ["_prisma_migrations"];
 const WORKER_SCHEMA = "pgboss";

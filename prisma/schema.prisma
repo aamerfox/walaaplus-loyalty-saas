@@ -219,20 +219,21 @@ model User {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  memberships       BusinessMembership[]
-  operations        LoyaltyOperation[]         @relation("OperationActor")
-  auditLogs         AuditLog[]                 @relation("AuditActor")
-  pushMessages      PushMessage[]              @relation("PushAuthor")
-  segments          CustomerSegment[]          @relation("SegmentAuthor")
-  consentRecords    ConsentRecord[]            @relation("ConsentActor")
-  campaigns         Campaign[]                 @relation("CampaignAuthor")
-  campaignRevisions CampaignRevision[]         @relation("RevisionAuthor")
-  campaignApprovals CampaignApproval[]         @relation("ApprovalDecider")
-  shareLinks        CardShareLink[]            @relation("ShareLinkIssuer")
-  referralsRecorded ReferralAttribution[]      @relation("ReferralRecorder")
-  promotions        Promotion[]                @relation("PromotionAuthor")
-  redemptions       PromotionRedemption[]      @relation("RedemptionRecorder")
-  audienceSnapshots CampaignAudienceSnapshot[] @relation("SnapshotAuthor")
+  memberships         BusinessMembership[]
+  operations          LoyaltyOperation[]         @relation("OperationActor")
+  auditLogs           AuditLog[]                 @relation("AuditActor")
+  pushMessages        PushMessage[]              @relation("PushAuthor")
+  segments            CustomerSegment[]          @relation("SegmentAuthor")
+  consentRecords      ConsentRecord[]            @relation("ConsentActor")
+  campaigns           Campaign[]                 @relation("CampaignAuthor")
+  campaignRevisions   CampaignRevision[]         @relation("RevisionAuthor")
+  campaignApprovals   CampaignApproval[]         @relation("ApprovalDecider")
+  shareLinks          CardShareLink[]            @relation("ShareLinkIssuer")
+  referralsRecorded   ReferralAttribution[]      @relation("ReferralRecorder")
+  promotions          Promotion[]                @relation("PromotionAuthor")
+  redemptions         PromotionRedemption[]      @relation("RedemptionRecorder")
+  audienceSnapshots   CampaignAudienceSnapshot[] @relation("SnapshotAuthor")
+  webhookDestinations WebhookDestination[]
 }
 
 model Business {
@@ -250,26 +251,29 @@ model Business {
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
-  memberships        BusinessMembership[]
-  locations          Location[]
-  templates          ProgramTemplate[]
-  customerProfiles   CustomerBusinessProfile[]
-  cards              CustomerCard[]
-  operations         LoyaltyOperation[]
-  idempotencyRecords IdempotencyRecord[]
-  auditLogs          AuditLog[]
-  segments           CustomerSegment[]
-  consentRecords     ConsentRecord[]
-  campaigns          Campaign[]
-  campaignApprovals  CampaignApproval[]
-  audienceSnapshots  CampaignAudienceSnapshot[]
-  cardShareLinks     CardShareLink[]
-  referrals          ReferralAttribution[]
-  promotions         Promotion[]
-  redemptions        PromotionRedemption[]
-  integrationEvents  IntegrationEvent[]
-  pushMessages       PushMessage[]
-  pushSubscriptions  PushSubscription[]
+  memberships         BusinessMembership[]
+  locations           Location[]
+  templates           ProgramTemplate[]
+  customerProfiles    CustomerBusinessProfile[]
+  cards               CustomerCard[]
+  operations          LoyaltyOperation[]
+  idempotencyRecords  IdempotencyRecord[]
+  auditLogs           AuditLog[]
+  segments            CustomerSegment[]
+  consentRecords      ConsentRecord[]
+  campaigns           Campaign[]
+  campaignApprovals   CampaignApproval[]
+  audienceSnapshots   CampaignAudienceSnapshot[]
+  cardShareLinks      CardShareLink[]
+  referrals           ReferralAttribution[]
+  promotions          Promotion[]
+  redemptions         PromotionRedemption[]
+  integrationEvents   IntegrationEvent[]
+  webhookDestinations WebhookDestination[]
+  webhookDeliveries   WebhookDelivery[]
+  webhookAttempts     WebhookDeliveryAttempt[]
+  pushMessages        PushMessage[]
+  pushSubscriptions   PushSubscription[]
 }
 
 /// A user's role inside one business. Resolved from the database on EVERY request.
@@ -1144,7 +1148,8 @@ model IntegrationEvent {
   occurredAt      DateTime              @default(now())
   createdAt       DateTime              @default(now())
 
-  business Business @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  business   Business          @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  deliveries WebhookDelivery[]
 
   /// One event per entity per type, forever. What makes emission idempotent.
   @@unique([eventType, entityId])
@@ -1160,4 +1165,148 @@ enum IntegrationEventType {
 /// What `entityId` points at. The trigger dispatches on this to decide which table to check.
 enum IntegrationEntityType {
   PROMOTION_REDEMPTION
+}
+
+/// Where an owner has asked this business's events to be sent.
+///
+/// The only outbound capability in the product. HTTPS only, owner only, and it begins DISABLED:
+/// nothing is sent anywhere until somebody says so explicitly.
+///
+/// **The URL and the signing secret are AES-256-GCM ciphertext**, each with its own random nonce,
+/// and the algorithm and key version are their own columns rather than something inferred from the
+/// blob. There is no plaintext column for either, and no fallback: without
+/// `INTEGRATION_ENCRYPTION_KEY` the feature fails closed rather than storing a secret in the clear.
+///
+/// See `docs/INTEGRATIONS-CAPABILITY-MATRIX.md` §7a.
+model WebhookDestination {
+  id                  String                  @id @default(uuid())
+  businessId          String
+  /// The owner's own label. Their screens only.
+  name                String
+  /// Lower-cased hostname. Plaintext because the owner reads it and it is not a credential.
+  endpointHost        String
+  /// sha256 of the normalised URL with the business id mixed in. For the unique index only.
+  endpointDigest      String
+  /// `v<n>.<nonce>.<tag>.<ciphertext>`, base64url. The full URL, which may carry a path token.
+  endpointCipher      String
+  /// The same shape. Shown to the owner once and never readable again.
+  signingSecretCipher String
+  cipherAlgorithm     WebhookCipher
+  cipherKeyVersion    Int
+  state               WebhookDestinationState @default(DISABLED)
+  /// When the secret was last shown to the owner. A fact about disclosure.
+  secretIssuedAt      DateTime
+  createdByUserId     String?
+  createdAt           DateTime                @default(now())
+  updatedAt           DateTime                @updatedAt
+
+  business   Business          @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  createdBy  User?             @relation(fields: [createdByUserId], references: [id], onDelete: SetNull)
+  deliveries WebhookDelivery[]
+
+  @@unique([businessId, endpointDigest])
+  @@unique([businessId, name])
+  @@index([businessId, state])
+}
+
+/// One obligation to send one envelope to one destination.
+///
+/// A transactional OUTBOX: created in the same transaction as the `IntegrationEvent` it carries, so
+/// the worker only ever sees committed work and nothing is queued for an action that rolled back.
+///
+/// A retry is an ATTEMPT, not a second delivery. Nothing here mutates `IntegrationEvent`.
+model WebhookDelivery {
+  id                 String                 @id @default(uuid())
+  businessId         String
+  destinationId      String
+  /// Null for a test delivery, which describes no real event.
+  integrationEventId String?
+  isTest             Boolean                @default(false)
+  status             WebhookDeliveryStatus  @default(PENDING)
+  attemptCount       Int                    @default(0)
+  /// When the worker may next pick it up. Null once the delivery is at rest.
+  nextAttemptAt      DateTime?
+  lastOutcome        WebhookAttemptOutcome?
+  lastErrorClass     WebhookErrorClass      @default(NONE)
+  lastHttpStatus     Int?
+  lastAttemptAt      DateTime?
+  settledAt          DateTime?
+  createdAt          DateTime               @default(now())
+
+  business         Business                 @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  destination      WebhookDestination       @relation(fields: [destinationId], references: [id], onDelete: Restrict)
+  integrationEvent IntegrationEvent?        @relation(fields: [integrationEventId], references: [id], onDelete: Restrict)
+  attempts         WebhookDeliveryAttempt[]
+
+  // The partial indexes — unique on (destinationId, integrationEventId) WHERE the event is not
+  // null, and the due-work index WHERE status = 'PENDING' — live in the migration only. Prisma
+  // cannot express a partial index, and declaring the unconditional form here would make the two
+  // disagree; the same convention as `PromotionRedemption_voids_key`.
+  @@index([businessId, createdAt(sort: Desc)])
+  @@index([destinationId, createdAt(sort: Desc)])
+}
+
+/// One attempt to send one delivery. Append-only.
+///
+/// **Operational facts only**: when, what category of outcome, and a bounded error class. There is
+/// no column for a response body, a request body, a header, a URL or a raw error string — a driver's
+/// error text can carry a hostname or a header, so it is classified rather than kept.
+model WebhookDeliveryAttempt {
+  id            String                @id @default(uuid())
+  businessId    String
+  deliveryId    String
+  attemptNumber Int
+  /// Assigned by the database. The trigger overwrites whatever arrives.
+  attemptedAt   DateTime              @default(now())
+  outcome       WebhookAttemptOutcome
+  errorClass    WebhookErrorClass
+  /// The status code and nothing else from the response.
+  httpStatus    Int?
+  createdAt     DateTime              @default(now())
+
+  business Business        @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  delivery WebhookDelivery @relation(fields: [deliveryId], references: [id], onDelete: Restrict)
+
+  @@unique([deliveryId, attemptNumber])
+  @@index([businessId, attemptedAt(sort: Desc)])
+}
+
+/// A destination is born disabled; REVOKED is terminal.
+enum WebhookDestinationState {
+  DISABLED
+  ENABLED
+  REVOKED
+}
+
+/// PENDING is the only state the worker picks up.
+enum WebhookDeliveryStatus {
+  PENDING
+  DELIVERED
+  REFUSED
+  FAILED
+}
+
+enum WebhookAttemptOutcome {
+  DELIVERED
+  RETRYABLE
+  PERMANENT
+}
+
+/// A bounded classification. The raw error string is never stored.
+enum WebhookErrorClass {
+  NONE
+  HTTP_CLIENT_ERROR
+  HTTP_RATE_LIMITED
+  HTTP_SERVER_ERROR
+  HTTP_REDIRECT
+  TIMEOUT
+  NETWORK
+  TLS
+  UNSAFE_ADDRESS
+  ENCRYPTION_UNAVAILABLE
+}
+
+/// Only AES-256-GCM exists. An enum so a row cannot claim an algorithm nothing here can read.
+enum WebhookCipher {
+  AES_256_GCM
 }

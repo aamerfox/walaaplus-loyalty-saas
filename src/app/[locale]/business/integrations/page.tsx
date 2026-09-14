@@ -5,7 +5,9 @@ import { PageHeader } from "@/components/ui";
 import { getCurrentUserId } from "@/server/auth/session";
 import { isAppError } from "@/server/errors";
 import { listIntegrationEvents } from "@/server/integrations/events";
+import { listDestinations, webhooksConfigured } from "@/server/integrations/webhooks/destinations";
 import { resolveScannerContext } from "@/server/tenant/scanner-context";
+import WebhooksClient, { type DestinationRow } from "./WebhooksClient";
 
 /**
  * What this business has recorded for a delivery mechanism that does not exist yet.
@@ -13,13 +15,19 @@ import { resolveScannerContext } from "@/server/tenant/scanner-context";
  * **Owner and manager only.** A cashier serves the customer in front of them; a feed of everything
  * the business has done is a different thing, and they get a 404 rather than an empty screen.
  *
- * The screen's first job is to not lie. There is no provider connected, no key, no endpoint and no
- * "Connect" button, and the notice at the top says so in as many words — because an integrations
- * page with provider names on it is how a product comes to be described as integrated with things
- * it has never contacted. `docs/INTEGRATIONS-CAPABILITY-MATRIX.md` §0.
+ * The screen's first job is to not lie. **No named provider is connected** — no email, SMS,
+ * WhatsApp, payment or point-of-sale integration exists, and there is no key that could make one.
+ * The notice at the top says so in as many words, because an integrations page with provider names
+ * on it is how a product comes to be described as integrated with things it has never contacted.
+ * `docs/INTEGRATIONS-CAPABILITY-MATRIX.md` §0.
  *
- * Rendered on the server with no client component: there is nothing to interact with. Every value
- * shown is an internal id, a type or a time — the table has no column that could hold anything else.
+ * Since Prompt 2 the page has a second half: **custom webhook destinations**, which are the one
+ * outbound capability the product has. That half is **owner only** — stricter than the event
+ * history above it, because a destination is a standing instruction to send this business's
+ * activity to a third party, and a manager should not be able to arrange one.
+ *
+ * The event history is rendered on the server with no client component. Every value shown is an
+ * internal id, a type or a time — the table has no column that could hold anything else.
  */
 
 /** A server-rendered row. Ids are internal uuids; the shortened form is for reading, not security. */
@@ -45,6 +53,28 @@ export default async function IntegrationsPage({ params }: { params: Promise<{ l
     if (isAppError(e)) notFound();
     throw e;
   }
+
+  /*
+   * The webhook half, for an owner only.
+   *
+   * A manager reaching this page sees the event history and nothing below it — not an empty
+   * destinations list, not a disabled form. `listDestinations` would refuse them anyway; this is
+   * what keeps the screen from advertising a capability they cannot use.
+   */
+  const isOwner = ctx.role === MembershipRole.OWNER;
+  const destinations: DestinationRow[] = isOwner
+    ? (await listDestinations(ctx)).map((row) => ({
+        id: row.id,
+        name: row.name,
+        endpointHost: row.endpointHost,
+        state: row.state,
+        cipherKeyVersion: row.cipherKeyVersion,
+        secretIssuedAt: row.secretIssuedAt.toISOString(),
+        pending: row.pending,
+        delivered: row.delivered,
+        failed: row.failed,
+      }))
+    : [];
 
   const label: Record<IntegrationEventType, string> = {
     [IntegrationEventType.PROMOTION_REDEMPTION_RECORDED]: t("typeRedemptionRecorded"),
@@ -97,6 +127,10 @@ export default async function IntegrationsPage({ params }: { params: Promise<{ l
             {t("noContactData")}
           </p>
         </section>
+
+        {isOwner ? (
+          <WebhooksClient businessId={ctx.businessId} destinations={destinations} configured={webhooksConfigured()} />
+        ) : null}
 
         <p className="text-xs text-slate-500">{t("roadmap")}</p>
       </div>

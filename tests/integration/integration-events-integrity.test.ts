@@ -370,7 +370,14 @@ describe("an event is never edited or removed", () => {
       owner.integrationEvent.update({ where: { id: eventId }, data: { envelopeVersion: 1 } }),
     ).rejects.toThrow(/append-only/i);
     await expect(owner.integrationEvent.delete({ where: { id: eventId } })).rejects.toThrow(/append-only/i);
-    await expect(owner.$executeRawUnsafe('TRUNCATE TABLE "IntegrationEvent"')).rejects.toThrow(/append-only/i);
+    /*
+     * Since Prompt 2, `WebhookDelivery` holds a foreign key to this table, so PostgreSQL refuses the
+     * TRUNCATE outright before any trigger runs. Both refusals are the protection working; the
+     * assertion accepts either rather than pretending the trigger is the only thing standing there.
+     */
+    await expect(owner.$executeRawUnsafe('TRUNCATE TABLE "IntegrationEvent"')).rejects.toThrow(
+      /append-only|referenced in a foreign key/i,
+    );
   });
 
   it("keeps the runtime role to SELECT and INSERT", async () => {

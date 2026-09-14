@@ -125,7 +125,7 @@ describe("the public customer card", () => {
       expect(svg).toMatch(/^<svg/);
       // Nothing is fetched to render it: no <image>, no href, and the only URL in the document is
       // the SVG namespace itself, which is an identifier rather than an address.
-      expect(svg).not.toMatch(/<image/i);
+      expect(svg).not.toMatch(/<image\b/i);
       expect(svg).not.toMatch(/href=/i);
       const urls = svg.match(/https?:\/\/[^"'\s>]+/g) ?? [];
       expect(urls).toEqual(["http://www.w3.org/2000/svg"]);

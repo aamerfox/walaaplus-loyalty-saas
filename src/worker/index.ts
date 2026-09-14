@@ -7,12 +7,14 @@
  * Startup order: validate environment → connect pg-boss → register jobs → expose /health.
  * Shutdown: SIGINT/SIGTERM stop accepting work, let in-flight jobs finish, close cleanly.
  *
- * No business jobs are scheduled here yet; see src/worker/jobs/smoke.ts for the proving job.
+ * Jobs: src/worker/jobs/smoke.ts proves the pipe works; src/worker/jobs/webhook-delivery.ts is the
+ * one place this product sends an outbound request.
  */
 import { env, EnvValidationError } from "../server/env";
 import { createBoss } from "./boss";
 import { startHealthServer, type HealthServer } from "./health";
 import { registerSmokeJob } from "./jobs/smoke";
+import { registerWebhookDeliveryJob, WEBHOOK_DELIVERY_QUEUE } from "./jobs/webhook-delivery";
 
 function log(msg: string, extra: Record<string, unknown> = {}): void {
   // Never log connection strings, secrets or job payloads.
@@ -54,8 +56,13 @@ async function main(): Promise<void> {
 
   await boss.start();
   await registerSmokeJob(boss);
+  /*
+   * The only outbound HTTP in the product, and it is here rather than in a request handler: a
+   * webhook is a request to somebody else's server, and a till must never wait on one.
+   */
+  await registerWebhookDeliveryJob(boss);
   started = true;
-  log("worker started", { queues: ["system.smoke"] });
+  log("worker started", { queues: ["system.smoke", WEBHOOK_DELIVERY_QUEUE] });
 }
 
 main().catch((err: unknown) => {
