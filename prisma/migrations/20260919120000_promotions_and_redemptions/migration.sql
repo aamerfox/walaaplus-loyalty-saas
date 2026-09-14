@@ -1,6 +1,6 @@
 -- Phase 3A Prompt 3 — a coupon a member of staff types, and an entitlement a human hands over.
 --
--- ONE additive migration. Three enums, two tables, five triggers. Nothing existing is changed,
+-- ONE additive migration. Three enums, two tables, six triggers. Nothing existing is changed,
 -- dropped or backfilled.
 --
 -- ## What this is, and the exclusion that defines it
