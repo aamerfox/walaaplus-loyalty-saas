@@ -1,11 +1,13 @@
 # Integrations — capability audit
 
-Written **before** the Phase 3B Prompt 1 implementation and used to constrain it. Every row below was
-decided first; the code that followed builds the "Supported now" column and nothing else.
+Written **before** the Phase 3B Prompt 1 implementation and used to constrain it, and extended
+**before** Prompt 2 with §7a, the webhook security and decision record. Every row below was decided
+first; the code that followed builds the "Supported now" column and nothing else.
 
-The shape of this phase in one sentence: **the product records, in its own database, that something
-happened — and nothing leaves the machine.** No provider is contacted, no endpoint is called, no
-credential exists to call one with.
+The shape of Prompt 1 in one sentence: **the product records, in its own database, that something
+happened.** Prompt 2 adds the one way that record may leave: **a custom outbound webhook to a URL
+the owner typed, signed, and nothing else.** No named provider is connected, and none of §§2–6 moved
+a bucket.
 
 ---
 
@@ -44,7 +46,21 @@ Four buckets, used consistently:
 | Append-only at the **grant** level and the **trigger** level | **Supported now** | Runtime role holds `SELECT`, `INSERT`. Triggers refuse `UPDATE`, `DELETE`, `TRUNCATE` even for the owner. |
 | Semantic integrity enforced **in the database** | **Supported now** | The referenced entity must exist, belong to the same business, and be of the kind the event type claims. A direct writer with no service in the way cannot forge a row. |
 | An owner/manager **read view** | **Supported now** | `/business/integrations`. Internal ids, types and times. **404 for a cashier.** |
-| Anything that leaves the machine | **Out of scope — the defining exclusion** | See §7. |
+| Anything that leaves the machine | **Was the defining exclusion of Prompt 1** | Prompt 2 opens exactly one door, to one kind of destination, under the rules in §7a. |
+
+### What Prompt 2 adds
+
+| capability | bucket | notes |
+|---|---|---|
+| **Custom outbound webhook** to an owner-supplied HTTPS URL | **Supported now** | The only outbound capability in the product. Carries the `IntegrationEvent` envelope and nothing else. |
+| Owner-only destination management | **Supported now** | Create, rotate, enable, disable, revoke, test. A manager and a cashier can do none of it and cannot see that the screen exists. |
+| **AES-256-GCM** encryption of the URL and the signing secret at rest | **Supported now** | `INTEGRATION_ENCRYPTION_KEY`, random 96-bit nonce per value, algorithm and key version stored explicitly. **No plaintext fallback.** |
+| **HMAC-SHA-256** request signing | **Supported now** | Over `timestamp.body`, so a captured body cannot be replayed under a new timestamp. |
+| SSRF and DNS-rebinding defence | **Supported now** | §7a. Re-resolved immediately before every request; the socket connects only to an address that was validated in that moment. |
+| Bounded retries with exponential backoff | **Supported now** | Transient failures only. An unsafe-URL refusal is never retried. |
+| A durable, tenant-isolated delivery record and an append-only attempt history | **Supported now** | Outcome category, HTTP status and a bounded error class. **No body, no headers, no URL, no error text.** |
+| Delivery from a request handler | **Out of scope, structurally** | The only HTTP client in the product lives in the worker's delivery module, and a source scan asserts nothing under `src/app/` imports it. |
+| Inbound webhooks, public webhook creation, public API tokens | **Out of scope** | Unchanged from Prompt 1. |
 
 ---
 
@@ -117,13 +133,160 @@ make.
 | capability | bucket | notes |
 |---|---|---|
 | An internal record that an event happened | **Supported now** | This prompt. `IntegrationEvent`. |
-| An endpoint URL a merchant can register | **Out of scope for this prompt** | A merchant-supplied URL is a server-side request to an address the server was told to trust. SSRF, internal-network reachability, redirect handling and DNS rebinding are all real and none of them is a afternoon's work. |
-| Outbound HTTP of any kind | **Out of scope for this prompt** | There is no `fetch`, no HTTP client, no queue, no worker and no timer under `src/server/integrations/`, and a source scan asserts it. |
-| HMAC request signing | **Foundation later** | The reference product signs with `X-Signature`. That needs a per-subscription secret, which needs somewhere to put a secret (§8). |
-| A retry policy, a dead-letter record, a delivery log | **Foundation later** | The event row is the input to all three. None exists. |
+| An endpoint URL a merchant can register | **Supported now (Prompt 2)** | HTTPS only, owner only, validated on save **and again immediately before every request**. §7a. |
+| Outbound HTTP | **Supported now, in exactly one module** | `src/server/integrations/webhooks/delivery.ts`, called only by the worker. `src/server/integrations/events.ts` still has no HTTP client, no queue and no timer, and the source scan still asserts it. |
+| HMAC request signing | **Supported now (Prompt 2)** | HMAC-SHA-256 over `timestamp.body`, with a per-destination secret revealed once and thereafter stored encrypted. |
+| A retry policy and a delivery log | **Supported now (Prompt 2)** | Bounded exponential backoff for transient failures; an append-only attempt history holding outcome, status and error class. A dead letter is a delivery that reached `FAILED`; nothing is deleted. |
 | A public API with `X-API-Key` | **Out of scope for this prompt** | Keys are secrets; see §8. Also a rate limiter per key, a response envelope, pagination, and versioning. |
 | Event types beyond the two built here | **Out of scope for this prompt** | The reference product has roughly forty. This prompt has **two**, both for a workflow that is already finished and already safe. Adding an event for a workflow is a decision about what that workflow is allowed to tell the outside world. |
 | **Backfilling historical events** | **Out of scope, and refused by the database** | No event exists for any redemption or void that happened before this migration, and none can be created afterwards. `occurredAt` is assigned by the trigger, so nobody can date one into the past — and the trigger additionally requires it to **equal the redemption's own `recordedAt`**, which is true exactly when the two rows were written in the same transaction. A writer cannot imitate that by supplying a matching value, because the value it supplies is discarded before it is compared. |
+
+---
+
+## 7a. Webhook security and decision record
+
+Written before Prompt 2 was implemented. Each heading is a decision somebody has to be able to
+disagree with later.
+
+### Encryption at rest
+
+A destination holds two values worth stealing: the **URL** (which may carry a path or query token
+the receiver treats as authentication) and the **signing secret**. Both are encrypted with
+**AES-256-GCM** — authenticated encryption, so a tampered ciphertext fails to decrypt rather than
+decrypting to something else.
+
+- **Key**: `INTEGRATION_ENCRYPTION_KEY`, 32 bytes, per environment. Approved by the owner for
+  deployment; see §8a for the exact requirement.
+- **Nonce**: 96 bits, freshly random per value. Never reused, never derived from the plaintext.
+- **Metadata**: the algorithm and the key version are stored in their own columns, not inferred.
+  A future key rotation writes version 2 alongside version 1 rows and knows which is which.
+- **No fallback.** There is no plaintext mode, no "if the key is missing, store it raw", no
+  development shortcut. If the key is absent or malformed, webhook configuration and delivery
+  **fail closed** — and nothing else does: enrolment, stamps, points, redemptions, referrals, the
+  scanner, B7 and `/health` are all untouched, because none of them imports the crypto module.
+- **What is not encrypted**: the destination's name and hostname, which the owner needs to read on
+  their own screen, and which are not credentials.
+
+### Signing
+
+`HMAC-SHA-256` over `"{timestamp}.{body}"`, hex, sent as `X-Walaaplus-Signature: v1=…`.
+
+The timestamp is inside the signed string rather than only in a header, so a captured body cannot
+be replayed later under a fresh timestamp. Receivers should reject a timestamp far from their own
+clock. The scheme is versioned (`v1=`) so a future algorithm can be added without ambiguity.
+
+**A signature proves the body came from this product. It does not prove the body is new** — that is
+what the event id is for.
+
+### SSRF and DNS rebinding
+
+A merchant-supplied URL is a request the server makes to an address it was told to trust. The rules,
+all enforced:
+
+| rule | why |
+|---|---|
+| **HTTPS only** | plaintext would expose the signed body and the URL's own path token |
+| no user-info in the URL (`https://user:pass@host/`) | credentials in a URL end up in logs and in error strings |
+| no IP-literal host | a hostname can be checked against DNS policy; a literal bypasses the question |
+| no `localhost`, `*.localhost`, `.local`, `.internal`, or a bare single-label host | the loopback and the cluster are not customers |
+| no private, loopback, link-local, multicast, broadcast, unique-local, or otherwise reserved address | RFC1918, 127/8, 169.254/16, `::1`, `fc00::/7`, `fe80::/10`, and the rest |
+| **no redirects** | a 200 from a validated host that redirects to `169.254.169.254` is the classic bypass. A 3xx is a refusal, not a hop |
+| **re-resolved immediately before every request** | the decision that matters is the one made at connection time |
+| the socket connects only to the address validated in that moment | via a custom `lookup`, so there is no gap between checking and connecting |
+
+**DNS rebinding is the reason the last two rules exist.** Validating the hostname when the owner
+saves it proves nothing later: the same name can resolve to a public address then and to
+`10.0.0.1` a second afterwards. So the check is not "was this safe once" but "is this address safe
+now, and is it the address this socket is using". Node's `lookup` hook is what makes those the same
+question — the resolver returns only an address that has just passed validation, and the agent
+connects to that.
+
+TLS SNI and the `Host` header stay the hostname, so a receiver behind virtual hosting still works.
+
+### Transport limits
+
+Short connect and total timeouts. No redirects. The response body is read to a hard cap and then the
+socket is destroyed; **the body is never logged, stored, returned or classified.** Only the status
+code is kept. The request body is a fixed, small JSON envelope, and is refused before sending if it
+somehow exceeds its cap.
+
+### Delivery semantics — at-least-once, never exactly-once
+
+This is the single most important sentence for a receiver to read, and it is in the UI in both
+languages as well as here:
+
+> **A receiver may get the same event more than once. It must de-duplicate by event id.**
+
+Exactly-once delivery over a network does not exist. A request can succeed and the response be lost;
+a retry then delivers a second copy of something already processed. `X-Walaaplus-Event-Id` is stable
+across every attempt and across every destination, and a receiver that keys on it is correct. One
+that does not is the receiver's own problem, stated in advance rather than discovered.
+
+### Retries
+
+Bounded exponential backoff, and **only for failures that could plausibly succeed later**:
+
+| outcome | retried? |
+|---|---|
+| network error, connect failure, timeout | yes |
+| HTTP 429, HTTP 5xx | yes |
+| HTTP 4xx other than 429 | no — the receiver has said no |
+| a 3xx redirect | no — a misconfiguration, and following it is the bypass |
+| TLS failure | no — needs the owner to fix a certificate, not time |
+| **unsafe URL or unsafe resolved address** | **never** — retrying an SSRF attempt is attempting it again |
+| the encryption key missing or malformed | no — fail closed, and a retry cannot fix a deployment |
+
+A timeout or a network error is **never** recorded as delivered. Attempts are capped; the delivery
+then rests at `FAILED` and is visible to the owner.
+
+### Endpoint verification
+
+A destination **begins disabled** and receives nothing until the owner explicitly enables it. Before
+that, the owner may send **one fixed synthetic test envelope** — no customer, no card, no real
+event — through the same signing, the same SSRF checks and the same transport limits.
+
+A test delivery is never triggered automatically, never by a schedule, and never by another user's
+action. It is audited by row id, without the URL and without the secret.
+
+**What verification deliberately is not**: there is no challenge-response handshake in which the
+receiver echoes a token. That is a real design worth having and it needs the receiver to implement
+something; today the owner reads a status and decides.
+
+### Key rotation
+
+Two independent rotations:
+
+- **The signing secret** rotates per destination, on the owner's request. The new value is shown
+  once and never again; the old value stops working immediately. A receiver must be updated in the
+  same sitting, so the UI says so before the rotation happens.
+- **`INTEGRATION_ENCRYPTION_KEY`** rotates per environment. Rows carry their key version, so a
+  rotation writes version *n+1* and leaves version *n* rows readable while they are re-encrypted.
+  **The re-encryption tool does not exist yet** — the schema is ready for it, the code is not, and
+  pretending otherwise would be the kind of claim this document exists to prevent. Recorded as
+  **D29**.
+
+### Retention
+
+Nothing deletes a delivery or an attempt. A revoked destination keeps its history, because the
+history is a record of what this business sent to whom. There is **no retention period**, and one is
+a decision with the same shape as D9, D13, D20 and D23 — recorded as **D30**.
+
+### Owner authority
+
+Only an `OWNER` may create, edit, reveal, rotate, enable, disable, revoke, test or list destinations.
+A `MANAGER` holds `VIEW_INTEGRATIONS` and may read the *event* history; that is where their access
+stops. A destination is a standing instruction to send this business's activity to a third party,
+which is an owner's decision in the same way approving a campaign is.
+
+### The receiver's responsibilities, stated so nobody assumes otherwise
+
+1. **De-duplicate by `X-Walaaplus-Event-Id`.** Delivery is at-least-once.
+2. **Verify the signature** before trusting the body.
+3. **Reject an old timestamp**, or a replayed request is accepted forever.
+4. **Answer quickly** — 2xx as soon as the event is durably accepted, and do the work afterwards.
+   A slow receiver is a timed-out delivery and a retry.
+5. **Expect the event id and nothing else to identify the subject.** The body carries internal ids;
+   resolving them to a customer is an authorized read the receiver does not have.
 
 ---
 
@@ -147,7 +310,29 @@ to decide:
 5. **Whether a credential is per business or per platform**, which decides whether a merchant brings
    their own account or rides on ours — a commercial question, not a technical one.
 
-None of these is guessed here. **Recorded as decision D27.**
+None of these is guessed here for a *provider* credential. **Recorded as decision D27.**
+
+### 8a. The one key that now has an answer — `INTEGRATION_ENCRYPTION_KEY`
+
+The owner has approved a dedicated per-environment secret for Prompt 2's webhook encryption. It
+answers question 1 and 2 above for this one purpose and for no other.
+
+**The exact deployment requirement, for whoever provisions the environment:**
+
+| | |
+|---|---|
+| Name | `INTEGRATION_ENCRYPTION_KEY` |
+| Value | **32 bytes**, supplied as 64 hex characters or as standard/URL-safe base64. Generate with `openssl rand -hex 32` |
+| Scope | **per environment.** Staging and production must not share one |
+| Consumers | the web process and the worker process — both, or delivery fails closed |
+| Absent or malformed | webhook configuration and delivery fail closed; **every other workflow is unaffected** |
+| Rotation | writes a new key version; version *n* rows stay readable. The re-encryption tool does not exist yet (**D29**) |
+
+**It must never be committed, logged, rendered, printed in an error, or embedded in a test fixture.**
+`src/server/env.ts` prints variable NAMES only, and the crypto module's errors name the variable and
+never the value. No value for it exists anywhere in this repository, and none was generated for any
+environment by the work that added support for it: **provisioning it is Freebuff's step, after
+review.**
 
 ---
 
