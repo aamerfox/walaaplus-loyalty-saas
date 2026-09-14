@@ -21,6 +21,24 @@ export class ValidationError extends AppError {
   }
 }
 
+/**
+ * A webhook endpoint on a port this product does not offer.
+ *
+ * Its own error class, and therefore its own code on the wire, for one reason: the screen has to be
+ * able to say WHICH rule was broken. Every other refusal on that form is "check the address", which
+ * is no help at all to an owner who typed a perfectly good address with `:8443` on the end.
+ *
+ * **The message is a fixed sentence and never contains the submitted value** — not the URL, not the
+ * hostname, not the path, not the query, not the port that was tried. An endpoint's path or query
+ * can carry a token the receiver treats as authentication, and an error message is the single most
+ * likely place for one to end up copied into a screenshot, a support ticket or a log.
+ */
+export class WebhookPortError extends AppError {
+  constructor() {
+    super("WEBHOOK_PORT_NOT_443", "Webhook endpoints must use HTTPS port 443", 400);
+  }
+}
+
 export class UnauthorizedError extends AppError {
   constructor(message = "Authentication required") {
     super("UNAUTHORIZED", message, 401);

@@ -116,14 +116,26 @@ export default function WebhooksClient({ businessId, destinations, configured }:
       });
       const payload = (await res.json().catch(() => null)) as Record<string, unknown> | null;
       if (!res.ok) {
+        /*
+         * The port refusal gets its own sentence, keyed on the server's error CODE rather than on
+         * the status, because "check the address" is no help to somebody who typed a perfectly good
+         * address with `:8443` on the end. Every other 400 keeps the generic line.
+         *
+         * Nothing from the response body is rendered: the code selects one of our own translated
+         * strings, and the server's message — which never contains the submitted URL either — is
+         * not displayed.
+         */
+        const code = (payload?.error as { code?: string } | undefined)?.code;
         setError(
           res.status === 403
             ? t("errorForbidden")
-            : res.status === 400
-              ? t("errorInvalid")
-              : res.status === 409
-                ? t("errorTaken")
-                : t("error"),
+            : code === "WEBHOOK_PORT_NOT_443"
+              ? t("errorPort")
+              : res.status === 400
+                ? t("errorInvalid")
+                : res.status === 409
+                  ? t("errorTaken")
+                  : t("error"),
         );
         return null;
       }

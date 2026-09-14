@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import ar from "../../messages/ar.json";
+import en from "../../messages/en.json";
 import { prisma } from "@/server/db";
 import { createStampCafe, TEST_PASSWORD } from "../setup/fixtures";
 
@@ -14,7 +15,9 @@ import { createStampCafe, TEST_PASSWORD } from "../setup/fixtures";
  *  - **the secret is shown once**, with a warning, and never comes back;
  *  - **the URL never appears** anywhere after it is typed;
  *  - **a manager and a cashier cannot see the section at all**;
- *  - **an unsafe address is refused at the form**, not at delivery time.
+ *  - **an unsafe address is refused at the form**, not at delivery time;
+ *  - **a port other than 443 is refused at the form too**, with a sentence that says which rule was
+ *    broken rather than the generic "check the address" — and in both languages.
  *
  * The default viewport is a Pixel 7 (playwright.config.ts); the desktop passes set 1440×900.
  */
@@ -119,6 +122,54 @@ test.describe("the owner sets one up", () => {
       await expect(page.getByTestId("webhooks-error")).toBeVisible({ timeout: 30_000 });
     }
     expect(await scoped(cafe.businessId).count()).toBe(0);
+  });
+
+  test("refuses a port other than 443, and says which rule was broken", async ({ page }) => {
+    /*
+     * The gateway has always refused anything but 443. It refused at DISPATCH, which meant this
+     * form accepted `:8443`, the destination sat in the list looking configured, and every attempt
+     * then failed with an error class the owner had to go and read. The refusal belongs here.
+     *
+     * The sentence matters as much as the refusal: "check the address" is no help to somebody whose
+     * address is perfectly good apart from a port.
+     */
+    await page.setViewportSize(DESKTOP);
+    const cafe = await createStampCafe({ name: "Port café" });
+    await signIn(page, await emailOf(cafe.userId));
+    await page.goto("/en/business/integrations");
+
+    for (const url of [
+      "https://hooks.example.com:8443/walaaplus",
+      "https://hooks.example.com:80/walaaplus",
+      "https://hooks.example.com:3000/walaaplus",
+    ]) {
+      await addDestination(page, `Port ${url}`, url);
+      const error = page.getByTestId("webhooks-error");
+      await expect(error).toBeVisible({ timeout: 30_000 });
+      // From the message file, so this cannot pass against the generic line.
+      await expect(error).toContainText(en.Integrations.errorPort);
+    }
+
+    // Nothing was created, and nothing was queued.
+    expect(await scoped(cafe.businessId).count()).toBe(0);
+    expect(await scoped(cafe.businessId).deliveries()).toHaveLength(0);
+
+    /*
+     * And the MESSAGE never repeats what was typed. Scoped to the error element on purpose: the URL
+     * field still holds the owner's own text, which is right - they have to be able to correct it -
+     * so the thing that must not echo is the sentence the product writes, not the form they filled.
+     */
+    const errorText = (await page.getByTestId("webhooks-error").innerText()).trim();
+    for (const fragment of ["8443", "3000", "/walaaplus", "hooks.example.com"]) {
+      expect(errorText, fragment).not.toContain(fragment);
+    }
+
+    await shot(page, "desktop-en-webhook-port-refused");
+
+    // The same form accepts the same address on 443, so the rule is a port rule and nothing wider.
+    await addDestination(page, "Ops", URL_A);
+    await expect(page.getByTestId("webhook-secret")).toBeVisible({ timeout: 30_000 });
+    expect(await scoped(cafe.businessId).count()).toBe(1);
   });
 
   test("enables, tests, and shows the queued test without sending from the page", async ({ page }) => {
@@ -334,6 +385,23 @@ test.describe("Arabic", () => {
     await expect(page.getByTestId(`webhook-state-${row.id}`)).toHaveText(ar.Integrations.stateDisabled);
     await expect(page.getByTestId(`webhook-disabled-${row.id}`)).toContainText(ar.Integrations.disabledNotice);
     await shot(page, "phone-ar-webhooks");
+  });
+
+  test("refuses a port other than 443 in Arabic", async ({ page }) => {
+    const cafe = await createStampCafe({ name: "مقهى المنفذ" });
+    await signIn(page, await emailOf(cafe.userId), "ar");
+    await page.goto("/ar/business/integrations");
+
+    await addDestination(page, "منفذ", "https://hooks.example.com:8443/walaaplus");
+    const error = page.getByTestId("webhooks-error");
+    await expect(error).toBeVisible({ timeout: 30_000 });
+    // From the Arabic message file, so an English fallback fails this.
+    await expect(error).toContainText(ar.Integrations.errorPort);
+    await expect(error).not.toContainText(en.Integrations.errorPort);
+    await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+
+    expect(await scoped(cafe.businessId).count()).toBe(0);
+    await shot(page, "phone-ar-webhook-port-refused");
   });
 
   test("shows the desktop screen in Arabic", async ({ page }) => {

@@ -19,19 +19,20 @@ vi.mock("@/server/auth/session", async (importOriginal) => {
 import { prisma } from "@/server/db";
 import { startEgressServer, type EgressServer } from "@/egress/server";
 import { addressProblem, type AddressPolicy, type LookupFn } from "@/server/integrations/webhooks/address";
-import { encryptSecret, signaturesMatch, signPayload } from "@/server/integrations/webhooks/crypto";
+import {
+  CURRENT_KEY_VERSION,
+  encryptSecret,
+  newSigningSecret,
+  signaturesMatch,
+  signPayload,
+} from "@/server/integrations/webhooks/crypto";
 import {
   backoffSeconds,
   LEASE_SECONDS,
   MAX_ATTEMPTS,
   runDueDeliveries,
 } from "@/server/integrations/webhooks/delivery";
-import {
-  createDestination,
-  queueTestDelivery,
-  rotateSecret,
-  setDestinationState,
-} from "@/server/integrations/webhooks/destinations";
+import { queueTestDelivery, rotateSecret, setDestinationState } from "@/server/integrations/webhooks/destinations";
 import { HEADER, TEST_EVENT_ENTITY_PREFIX } from "@/server/integrations/webhooks/envelope";
 import { sendWebhook } from "@/server/integrations/webhooks/gateway";
 import { codeDigest, newCodeSalt } from "@/server/promotions/codes";
@@ -146,10 +147,50 @@ function localResolver(): LookupFn {
 
 const HOST = "hooks.test.example.com";
 
+/**
+ * A destination row written directly, in the shape `createDestination` writes.
+ *
+ * **Not a way round a rule.** Since the save-time port check, the owner's create path refuses any
+ * port but 443 — correctly, and that refusal is exactly what an owner should meet. These tests are
+ * about DELIVERY, and they talk to a local HTTPS receiver on whatever ephemeral port the OS handed
+ * out, so asking the service to bend its own rule for them would be the wrong trade entirely: it
+ * would mean a seam on the save path, which is the one path that must not have one.
+ *
+ * So they write the row the service would have written — same ciphertexts, same algorithm and key
+ * version, same DISABLED start, same `secretIssuedAt` — and leave the service's rules to the tests
+ * that are about the service. `webhooks.test.ts` proves `createDestination` produces this shape and
+ * `webhook-port.test.ts` proves what it refuses; `webhook-integrity.test.ts` already builds rows
+ * this way for the same reason.
+ */
+async function makeDestination(
+  fx: StampCafeFixture,
+  input: { name: string; url: string },
+): Promise<{ destination: { id: string }; signingSecret: string }> {
+  const signingSecret = newSigningSecret();
+  const parsed = new URL(input.url);
+  const row = await prisma.webhookDestination.create({
+    data: {
+      businessId: fx.businessId,
+      name: input.name,
+      endpointHost: parsed.hostname,
+      // Only the unique index reads this, and every destination here is a different address.
+      endpointDigest: randomBytes(32).toString("hex"),
+      endpointCipher: encryptSecret(input.url),
+      signingSecretCipher: encryptSecret(signingSecret),
+      cipherAlgorithm: "AES_256_GCM",
+      cipherKeyVersion: CURRENT_KEY_VERSION,
+      secretIssuedAt: new Date(),
+      createdByUserId: fx.userId,
+    },
+    select: { id: true },
+  });
+  return { destination: { id: row.id }, signingSecret };
+}
+
 async function cafeWithDestination(name: string, path = "/hook") {
   const fx: StampCafeFixture = await createStampCafe({ name });
   session.userId = fx.userId;
-  const created = await createDestination(fx.ctx, {
+  const created = await makeDestination(fx, {
     name: "Ops",
     url: `https://${HOST}:${receiver.port}${path}`,
   });
@@ -309,7 +350,7 @@ describe("what happens when the receiver says no", () => {
     // not the receiver's answer, so it is retryable and is never recorded as delivered.
     const fx = await createStampCafe({ name: "Dead café" });
     session.userId = fx.userId;
-    const created = await createDestination(fx.ctx, {
+    const created = await makeDestination(fx, {
       name: "Ops",
       url: `https://${HOST}:${receiver.port + 1}/hook`,
     });
@@ -883,7 +924,7 @@ describe("the dispatch read is per delivery, not per batch", () => {
 
     const made: { destinationId: string; deliveryId: string; signingSecret: string }[] = [];
     for (const n of [1, 2]) {
-      const created = await createDestination(fx.ctx, {
+      const created = await makeDestination(fx, {
         name: `Ops ${n}`,
         url: `https://${HOST}:${receiver.port}/hook?d=${n}`,
       });
@@ -979,7 +1020,7 @@ describe("the dispatch read is per delivery, not per batch", () => {
     session.userId = fx.userId;
 
     // One test delivery to keep the batch busy, then a real one to a second destination.
-    const keepBusy = await createDestination(fx.ctx, { name: "Busy", url: `https://${HOST}:${receiver.port}/hook?d=0` });
+    const keepBusy = await makeDestination(fx, { name: "Busy", url: `https://${HOST}:${receiver.port}/hook?d=0` });
     await setDestinationState(fx.ctx, keepBusy.destination.id, "ENABLED");
     const busy = await queueTestDelivery(fx.ctx, keepBusy.destination.id);
     await migratorPrisma().webhookDelivery.update({
@@ -987,7 +1028,7 @@ describe("the dispatch read is per delivery, not per batch", () => {
       data: { nextAttemptAt: new Date(Date.now() - 60_000) },
     });
 
-    const target = await createDestination(fx.ctx, { name: "Target", url: `https://${HOST}:${receiver.port}/hook?d=1` });
+    const target = await makeDestination(fx, { name: "Target", url: `https://${HOST}:${receiver.port}/hook?d=1` });
     await setDestinationState(fx.ctx, target.destination.id, "ENABLED");
     const eventId = await realEventFor(fx);
     const realDeliveryId = (

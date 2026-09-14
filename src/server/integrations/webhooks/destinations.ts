@@ -11,9 +11,16 @@ import {
 import { z } from "zod";
 import { AuditAction, recordAudit } from "../../audit/audit";
 import { prisma } from "../../db";
-import { ConflictCode, ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../../errors";
+import {
+  ConflictCode,
+  ConflictError,
+  ForbiddenError,
+  NotFoundError,
+  ValidationError,
+  WebhookPortError,
+} from "../../errors";
 import { requirePermission, type TenantContext } from "../../tenant/context";
-import { assertSafeWebhookUrl, UnsafeWebhookAddressError } from "./address";
+import { assertSafeWebhookUrl, UnsafeWebhookAddressError, WEBHOOK_PORT } from "./address";
 import {
   CURRENT_KEY_VERSION,
   encryptionAvailable,
@@ -195,6 +202,25 @@ export async function createDestination(
     if (e instanceof UnsafeWebhookAddressError) throw new ValidationError(e.message);
     throw e;
   }
+
+  /*
+   * The port, refused at the moment the owner presses Save.
+   *
+   * The egress gateway has always refused anything but 443, correctly — but it refuses at DISPATCH,
+   * which meant an owner who typed `:8443` got a destination that saved, sat in the list looking
+   * configured, and then failed every attempt with GATEWAY_REJECTED. A rule the product only tells
+   * you about after you have already used it is not a rule the product has explained.
+   *
+   * This is where "before" is worth being exact about. Nothing has happened yet at this line: no
+   * signing secret has been generated, nothing has been encrypted, no row has been written, no
+   * audit entry exists, no delivery has been queued, and the owner has not been shown a secret. The
+   * refusal costs a round trip and leaves no trace.
+   *
+   * The gateway's own check is NOT relaxed in exchange. It still covers everything this one cannot:
+   * a row written before this rule existed, one restored from a backup, or one inserted by
+   * something that is not this function.
+   */
+  if (safe.port !== WEBHOOK_PORT) throw new WebhookPortError();
 
   const existing = await prisma.webhookDestination.count({ where: { businessId: ctx.businessId } });
   if (existing >= MAX_DESTINATIONS_PER_BUSINESS) {

@@ -46,6 +46,24 @@ export class UnsafeWebhookAddressError extends Error {
 export const MAX_URL_LENGTH = 2000;
 
 /**
+ * The only port a webhook destination may use, at either end of its life.
+ *
+ * It lives HERE, in the module both ends already share, because it is enforced twice and the two
+ * enforcements must not be able to disagree:
+ *
+ *   - `destinations.ts` refuses any other port when the OWNER SAVES, so the refusal arrives with
+ *     the form rather than in an attempt history days later;
+ *   - `src/egress/contract.ts` refuses it again when the GATEWAY DISPATCHES, which is what still
+ *     covers a row written before this rule existed, restored from a backup, or inserted directly.
+ *
+ * `assertSafeWebhookUrl` below deliberately does NOT apply it. That function answers "is this
+ * address safe to request at all", which is a different question from "is this a port this product
+ * offers" — and the gateway needs the port as a separate, injectable decision so a test can reach a
+ * receiver on an ephemeral port without softening any address rule.
+ */
+export const WEBHOOK_PORT = 443;
+
+/**
  * Host suffixes that never reach a customer's server.
  *
  * `.local` is mDNS, `.internal` and `.intranet` are the conventional private zones, and

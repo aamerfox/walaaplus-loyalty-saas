@@ -1,4 +1,4 @@
-import { assertSafeWebhookUrl, UnsafeWebhookAddressError } from "../server/integrations/webhooks/address";
+import { assertSafeWebhookUrl, UnsafeWebhookAddressError, WEBHOOK_PORT } from "../server/integrations/webhooks/address";
 
 /**
  * The dispatch contract — the entire vocabulary this gateway understands.
@@ -28,8 +28,13 @@ export const MAX_DISPATCH_URL_BYTES = 2000;
 /** One header value. Generous for a signature, far short of anything worth smuggling. */
 export const MAX_HEADER_VALUE_BYTES = 256;
 
-/** HTTPS, and the assigned port. A webhook on 8443 is a decision this product does not offer. */
-export const REQUIRED_PORT = 443;
+/**
+ * HTTPS, and the assigned port. A webhook on 8443 is a decision this product does not offer.
+ *
+ * Re-exported from `address.ts` rather than written again, so the owner's save-time refusal and
+ * this dispatch-time refusal cannot drift to different numbers.
+ */
+export const REQUIRED_PORT = WEBHOOK_PORT;
 
 /**
  * Which destination ports a dispatch may use.
