@@ -19,6 +19,7 @@ import { createStampProgram, type StampProgramSummary } from "@/server/program/s
 
 const APP_TABLES = [
   "AuthRateLimit",
+  "IntegrationEvent",
   "PromotionRedemption",
   "Promotion",
   "ReferralAttribution",
@@ -87,6 +88,7 @@ const APPEND_ONLY_TABLES = [
   "ReferralAttribution",
   "PromotionRedemption",
   "Promotion",
+  "IntegrationEvent",
 ];
 
 /** Wipe every application table, with the append-only triggers off for the duration. */

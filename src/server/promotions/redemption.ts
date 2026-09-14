@@ -1,4 +1,6 @@
 import {
+  IntegrationEntityType,
+  IntegrationEventType,
   MembershipRole,
   Permission,
   PromotionState,
@@ -8,6 +10,7 @@ import {
 import { AuditAction, recordAudit } from "../audit/audit";
 import { prisma } from "../db";
 import { ForbiddenError, NotFoundError, ValidationError } from "../errors";
+import { emitIntegrationEvent } from "../integrations/events";
 import { requirePermission, type TenantContext } from "../tenant/context";
 import { codeDigest, digestsMatch, isUsableCode } from "./codes";
 import { MAX_PROMOTIONS_PER_BUSINESS } from "./promotions";
@@ -174,6 +177,24 @@ export async function redeemCoupon(ctx: TenantContext, input: RedeemCouponInput)
         metadata: { redemptionId: redemption.id, promotionId: promotion.id },
       });
 
+      /*
+       * The internal event, in THIS transaction.
+       *
+       * Not after it, and not best-effort. An event written afterwards is one that goes missing
+       * whenever the process dies between the two writes, and a consumer cannot tell a missing
+       * event from an event that never should have existed. Here, either both rows are there or
+       * neither is.
+       *
+       * It carries the redemption's row id and nothing about the customer, the card, the code or
+       * the offer. See `src/server/integrations/events.ts`.
+       */
+      await emitIntegrationEvent(tx, {
+        businessId: ctx.businessId,
+        eventType: IntegrationEventType.PROMOTION_REDEMPTION_RECORDED,
+        entityType: IntegrationEntityType.PROMOTION_REDEMPTION,
+        entityId: redemption.id,
+      });
+
       return {
         outcome: "RECORDED" as const,
         redemptionId: redemption.id,
@@ -303,7 +324,7 @@ export async function voidRedemption(
   if (!existing) throw new NotFoundError("Redemption not found");
 
   await prisma.$transaction(async (tx) => {
-    await tx.promotionRedemption.create({
+    const voidRow = await tx.promotionRedemption.create({
       data: {
         businessId: ctx.businessId,
         promotionId: existing.promotionId,
@@ -317,6 +338,7 @@ export async function voidRedemption(
         reason: trimmed ?? null,
         recordedByUserId: ctx.userId,
       },
+      select: { id: true },
     });
 
     await recordAudit(tx, {
@@ -327,6 +349,24 @@ export async function voidRedemption(
       entityId: existing.customerCardId,
       // The row id. Not the reason, not the code, and there is no amount to omit.
       metadata: { redemptionId: existing.id, promotionId: existing.promotionId },
+    });
+
+    /*
+     * The event names the VOID row, not the redemption it withdraws.
+     *
+     * Both are rows in an append-only table and both are things that happened, so an event per row
+     * is the only account that stays true: the "recorded" event said a customer was owed something,
+     * and it still did. The void is a second fact, not a correction to the first — which is exactly
+     * how the table itself models it.
+     *
+     * The void reason is deliberately not carried. It is free text a colleague wrote for another
+     * colleague, and an event is read by whatever is listening.
+     */
+    await emitIntegrationEvent(tx, {
+      businessId: ctx.businessId,
+      eventType: IntegrationEventType.PROMOTION_REDEMPTION_VOIDED,
+      entityType: IntegrationEntityType.PROMOTION_REDEMPTION,
+      entityId: voidRow.id,
     });
   });
 

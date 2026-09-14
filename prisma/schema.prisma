@@ -267,6 +267,7 @@ model Business {
   referrals          ReferralAttribution[]
   promotions         Promotion[]
   redemptions        PromotionRedemption[]
+  integrationEvents  IntegrationEvent[]
   pushMessages       PushMessage[]
   pushSubscriptions  PushSubscription[]
 }
@@ -706,7 +707,7 @@ model PromotionRedemption {
   reason                    String?
   /// Assigned by the database. `walaaplus_validate_redemption` overwrites whatever arrives,
   /// so this default only spares a caller from inventing a value it is not allowed to choose.
-  recordedAt                DateTime                @default(now())
+  recordedAt                DateTime         @default(now())
   recordedByUserId          String?
   createdAt                 DateTime         @default(now())
 
@@ -1114,4 +1115,49 @@ model AuthRateLimit {
 
   @@unique([scope, keyHash])
   @@index([expiresAt])
+}
+
+/// What a completed workflow tells the rest of the system, and nothing more.
+///
+/// Append-only, tenant-isolated, and written in the SAME TRANSACTION as the action it describes:
+/// no event for an action that failed, and no action that survives a failed event.
+///
+/// This is the input to a future delivery mechanism and it is not one. There is no endpoint,
+/// subscription, secret, retry state or delivery status here, and no outbound HTTP anywhere in the
+/// code that writes it. See `docs/INTEGRATIONS-CAPABILITY-MATRIX.md`.
+///
+/// **There is no JSON metadata column, deliberately.** A free-form bag is where a phone number ends
+/// up eventually. Typed columns mean the table has nowhere to put a contact detail, a capability or
+/// its digest, a coupon code, a secret or an amount — and a column-name check asserts it stays that
+/// way.
+model IntegrationEvent {
+  id              String                @id @default(uuid())
+  businessId      String
+  /// The envelope shape. 1 is the only version that exists; a CHECK and the trigger refuse others.
+  envelopeVersion Int                   @default(1)
+  eventType       IntegrationEventType
+  entityType      IntegrationEntityType
+  /// An internal row id in this business. Never a serial, a token, a card number or a phone number.
+  entityId        String
+  /// Assigned by the database. `walaaplus_validate_integration_event` overwrites whatever arrives,
+  /// so this default only spares a caller from inventing a value it is not allowed to choose.
+  occurredAt      DateTime              @default(now())
+  createdAt       DateTime              @default(now())
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Restrict)
+
+  /// One event per entity per type, forever. What makes emission idempotent.
+  @@unique([eventType, entityId])
+  @@index([businessId, occurredAt(sort: Desc)])
+}
+
+/// The workflows that emit an event. Two, both already finished and both already safe.
+enum IntegrationEventType {
+  PROMOTION_REDEMPTION_RECORDED
+  PROMOTION_REDEMPTION_VOIDED
+}
+
+/// What `entityId` points at. The trigger dispatches on this to decide which table to check.
+enum IntegrationEntityType {
+  PROMOTION_REDEMPTION
 }

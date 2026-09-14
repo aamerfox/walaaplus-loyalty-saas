@@ -410,6 +410,23 @@
     "title": "Welcome to Zademi",
     "description": "The ultimate loyalty platform for your business."
   },
+  "Integrations": {
+    "emptyBody": "An entry appears here when a member of staff records an offer at the counter, or when one is withdrawn. Events recorded before this feature existed are not shown, because they were never written.",
+    "emptyTitle": "Nothing recorded yet",
+    "envelope": "Envelope",
+    "envelopeValue": "v{version}",
+    "historyHint": "One entry per completed offer redemption and per withdrawal, written at the same moment as the action itself. Newest first.",
+    "historyTitle": "Recorded events",
+    "noContactData": "No phone number, email address, code, card, wallet pass or amount is kept in these entries — only which kind of thing happened, and when.",
+    "nothingConnected": "No provider is connected. There is no email, SMS, WhatsApp, webhook, payment or point-of-sale connection here, and no key that could make one. These are internal records only.",
+    "occurredAt": "Recorded",
+    "reference": "Internal reference",
+    "roadmap": "Which providers could ever be connected, and what each one would need first, is written down in the integrations capability audit rather than implied by this screen.",
+    "subtitle": "What this business has recorded for future delivery. Nothing is connected, and nothing is sent.",
+    "title": "Integrations",
+    "typeRedemptionRecorded": "Offer recorded",
+    "typeRedemptionVoided": "Offer withdrawn"
+  },
   "Join": {
     "failed": "Enrollment could not be completed. Please try again.",
     "firstNameLabel": "Name",
@@ -511,6 +528,7 @@
     "distribution": "Card Distribution",
     "feedback": "Feedback Collection",
     "forms": "Installation Forms",
+    "integrations": "Integrations",
     "locations": "Locations",
     "logout": "Log out",
     "openMenu": "Open the menu",

@@ -45,6 +45,12 @@ const APPEND_ONLY_TABLES = [
   "CampaignAudienceMember",
   "ReferralAttribution",
   "PromotionRedemption",
+  /*
+   * An event is a statement that something happened. There is no correcting one, because the thing
+   * either happened or the transaction that claimed it did was rolled back; and there is no removing
+   * one, because a future consumer's idea of what it has already seen is a position in this table.
+   */
+  "IntegrationEvent",
 ];
 /**
  * Tables whose rows may be updated but must never be removed.
