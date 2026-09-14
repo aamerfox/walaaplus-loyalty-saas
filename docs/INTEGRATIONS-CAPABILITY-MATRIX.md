@@ -40,7 +40,7 @@ Four buckets, used consistently:
 |---|---|---|
 | A tenant-isolated, append-only **internal event record** | **Supported now** | `IntegrationEvent`. One row per completed promotion redemption and per void. Nothing reads it but an owner or manager, and nothing delivers it. |
 | A **versioned envelope** | **Supported now** | `envelopeVersion` is on every row and is `1`. A future consumer that cannot read a version it does not know is a consumer that fails safely; one that guesses is a consumer that mis-delivers. |
-| Events written **in the same transaction** as the action | **Supported now** | No event for an action that failed, and no action that survives a failed event. Proved by making the event insert throw and asserting the redemption is not there. |
+| Events written **in the same transaction** as the action | **Supported now, and enforced by the database** | No event for an action that failed, and no action that survives a failed event — proved by making the event insert throw and asserting the redemption is not there. And no event for an action that finished earlier: the trigger requires the event's `occurredAt` to equal the redemption's `recordedAt`, which is true only inside one transaction. See §7. |
 | Append-only at the **grant** level and the **trigger** level | **Supported now** | Runtime role holds `SELECT`, `INSERT`. Triggers refuse `UPDATE`, `DELETE`, `TRUNCATE` even for the owner. |
 | Semantic integrity enforced **in the database** | **Supported now** | The referenced entity must exist, belong to the same business, and be of the kind the event type claims. A direct writer with no service in the way cannot forge a row. |
 | An owner/manager **read view** | **Supported now** | `/business/integrations`. Internal ids, types and times. **404 for a cashier.** |
@@ -123,7 +123,7 @@ make.
 | A retry policy, a dead-letter record, a delivery log | **Foundation later** | The event row is the input to all three. None exists. |
 | A public API with `X-API-Key` | **Out of scope for this prompt** | Keys are secrets; see §8. Also a rate limiter per key, a response envelope, pagination, and versioning. |
 | Event types beyond the two built here | **Out of scope for this prompt** | The reference product has roughly forty. This prompt has **two**, both for a workflow that is already finished and already safe. Adding an event for a workflow is a decision about what that workflow is allowed to tell the outside world. |
-| **Backfilling historical events** | **Out of scope, deliberately** | No event is emitted for any redemption or void that happened before this migration. A backfilled event claims a delivery decision was made at a moment when it was not, and `occurredAt` is assigned by the database precisely so nobody can date one into the past. |
+| **Backfilling historical events** | **Out of scope, and refused by the database** | No event exists for any redemption or void that happened before this migration, and none can be created afterwards. `occurredAt` is assigned by the trigger, so nobody can date one into the past — and the trigger additionally requires it to **equal the redemption's own `recordedAt`**, which is true exactly when the two rows were written in the same transaction. A writer cannot imitate that by supplying a matching value, because the value it supplies is discarded before it is compared. |
 
 ---
 

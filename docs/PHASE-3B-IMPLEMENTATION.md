@@ -104,13 +104,52 @@ producing two rows a future consumer would deliver twice.
 
 ---
 
-## 4. No backfill, deliberately
+## 4. No backfill — refused, not merely intended
 
-Every redemption and void recorded before this migration has **no event**.
+Every redemption and void recorded before this migration has **no event**, and none can be created
+for one afterwards.
 
-A backfilled row would assert that a decision to publish was taken at a moment when it was not. And
-`occurredAt` is assigned by the trigger from the server clock precisely so that nobody — not a
-service, not a script, not a console session — can date one into the past.
+A backfilled row would assert that a decision to publish was taken at a moment when it was not.
+
+### What the first version of this got wrong
+
+`occurredAt` being server-assigned stops a row being dated into the past. It does **not** stop a row
+being written *today* for a redemption from last month. Everything else the trigger checked — the
+entity exists, it is this business's, it is the right kind — is satisfied by exactly that row. So a
+direct writer could have manufactured an event for any old redemption that had none, which is the
+backfill this phase refuses to do.
+
+Found in review of `9c4a13e`, before anything was deployed.
+
+### The rule that closes it
+
+```sql
+IF NEW."occurredAt" IS DISTINCT FROM redemption."recordedAt" THEN
+  RAISE EXCEPTION 'IntegrationEvent: an event must be written in the same transaction as the thing it describes'
+```
+
+Both timestamps are assigned by their own triggers from `now()`, which in PostgreSQL is the
+**transaction's start time** and is identical for every statement inside one. So equality means
+"these two rows were written in the same transaction", and a later transaction — with a different
+`now()` — cannot produce it.
+
+**Neither side can be chosen by the caller.** `PromotionRedemption.recordedAt` is overwritten by
+`walaaplus_validate_redemption`; `occurredAt` is overwritten at the top of this function. A writer
+that knows exactly when the redemption happened and supplies that value still fails, because the
+value it supplies is discarded before the comparison. There is a test that tries.
+
+It is checked **last**, after the existence, tenant and entity-kind rules, so each refusal stays
+specific about what was actually wrong rather than collapsing into one message.
+
+### The residual, stated
+
+The columns are `TIMESTAMP(3)`, so two transactions beginning within the same millisecond would
+compare equal. That closes the thing the rule exists for — an **old** redemption can never be matched
+— and it is written into the migration rather than glossed. An exact same-transaction proof is
+available (comparing `PromotionRedemption.xmin` against `pg_current_xact_id()`) and was not taken:
+it would behave differently under savepoints, which Prisma's transaction handling may introduce, and
+trading a robust rule for an exact one that might refuse a legitimate write is the wrong trade
+without a reason to make it.
 
 If a consumer ever needs history, that is a decision with a policy attached, not a script somebody
 runs on a Friday.
@@ -128,6 +167,8 @@ runs on a Friday.
 - the entity must belong to **the same business** as the event
 - the entity must be the **kind the event type claims**: a "recorded" event names a `REDEEMED` row, a
   "voided" event names a `VOIDED` row
+- the event's `occurredAt` must **equal the entity's own `recordedAt`**, which is true only when the
+  two rows were written in one transaction — §4
 
 `walaaplus_reject_integration_event_mutation` refuses `UPDATE`, `DELETE` and `TRUNCATE`, for the
 table owner as well as the runtime role.
@@ -194,6 +235,7 @@ along with `/api/webhooks` and `/api/events`.
 | both append-only triggers | **1** red |
 | the envelope-version CHECK | **1** red |
 | the `(eventType, entityId)` unique index | **1** red |
+| only the same-transaction comparison (§4) | **4** red, and the positive control stayed green |
 
 Each was restored and the suite re-run green.
 

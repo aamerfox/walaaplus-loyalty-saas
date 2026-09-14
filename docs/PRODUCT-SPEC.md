@@ -953,9 +953,13 @@ redemption that fails leaves no event; an event that fails takes the redemption 
 best-effort path, because a best-effort event is one a consumer will eventually be missing without
 knowing.
 
-**Nothing is backfilled.** Redemptions and voids recorded before the migration have no event: a
-backfilled row would assert that a decision to publish was taken at a moment when it was not, and
-`occurredAt` is assigned by the database precisely so nobody can date one into the past.
+**Nothing is backfilled, and the database refuses to be talked into it.** Redemptions and voids
+recorded before the migration have no event, and none can be created for them afterwards. A
+backfilled row would assert that a decision to publish was taken at a moment when it was not.
+`occurredAt` is assigned by the database, so nobody can date one into the past — and the trigger
+further requires it to equal the redemption's own `recordedAt`, which is true exactly when the two
+rows were written in the same transaction. Supplying a matching timestamp does not help: the
+supplied value is discarded before it is compared.
 
 **The database refuses a row that does not describe something that happened.** The entity must exist,
 belong to the same business, and be the kind the event type claims. The table is append-only at the

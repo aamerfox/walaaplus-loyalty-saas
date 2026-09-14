@@ -5,8 +5,10 @@
 | | |
 |---|---|
 | Code, migration and tests | `adca926` |
-| Documentation | the commit carrying this file |
-| **Deploy this** | the tip of `rebuild/phase-0-foundation` |
+| Documentation | `9c4a13e` |
+| Review fix (migration, tests) | `c63aa41` — see §13 |
+| Review fix (documentation) | the commit carrying this file |
+| **Deploy this** | the tip of `rebuild/phase-0-foundation`. **Not `9c4a13e`** — see §13 |
 | Migration | `20260920120000_integration_events`, the **14th** |
 | `master` | untouched at `b9ee686`, and absent from the `deploy` remote |
 
@@ -84,8 +86,10 @@ append-only table and both are things that happened — the "recorded" event sai
 something and it still did. A void is a second fact, not a correction, which is how
 `PromotionRedemption` already models it.
 
-**Nothing is backfilled.** Redemptions and voids from before the migration have no event, and
-`occurredAt` is assigned by the trigger so nobody can date one into the past.
+**Nothing is backfilled, and the database refuses to be talked into it.** Redemptions and voids
+from before the migration have no event, and none can be created for them afterwards: `occurredAt`
+is assigned by the trigger, and must equal the redemption's own `recordedAt` — true only inside one
+transaction. See §13, where this started as a policy and became a rule.
 
 ---
 
@@ -98,6 +102,8 @@ something and it still did. A void is a second fact, not a correction, which is 
 - the entity must exist
 - the entity must belong to the **same business**
 - the entity must be the **kind the event type claims** (recorded → `REDEEMED`, voided → `VOIDED`)
+- the event's `occurredAt` must **equal the entity's `recordedAt`**, which is true only when both
+  rows were written in the same transaction — §13
 
 `walaaplus_reject_integration_event_mutation` refuses `UPDATE`, `DELETE` and `TRUNCATE`, for the
 table owner as well as the runtime role. Plus a CHECK that `envelopeVersion = 1` and a unique index
@@ -194,6 +200,7 @@ Everything below was run locally on this machine, against local PostgreSQL in Do
 | `npx playwright test` — run 1 | **104 passed**, 3.4m |
 | `npx playwright test` — run 2 | **104 passed**, 3.4m |
 | `npx vitest run` | **90 files, 1225 tests passed**, 535.4s |
+| *(re-run after the §13 fix)* | **90 files, 1230 tests passed**, 457.1s |
 | `npm audit` / `--omit=dev` | 0 vulnerabilities each |
 | `node scripts/db-migrate.mjs status` | 14 migrations, schema up to date |
 | `prisma migrate diff` | one pre-existing naming difference — §8a |
@@ -209,7 +216,7 @@ New tests this prompt:
 |---|---|
 | `tests/unit/integration-boundary.test.ts` | 10 |
 | `tests/integration/integration-events.test.ts` | 14 |
-| `tests/integration/integration-events-integrity.test.ts` | 13 |
+| `tests/integration/integration-events-integrity.test.ts` | 13, then **18** after §13 |
 | `tests/e2e/integrations-ui.spec.ts` | 12 |
 
 ### 8a. The one migrate-diff difference, reported rather than buried
@@ -335,11 +342,143 @@ either.
 
 ---
 
-## 13. Which SHA to deploy
+## 13. Review hardening — the no-backfill guarantee was a policy, not a rule
 
-The tip of `rebuild/phase-0-foundation` — the documentation commit carrying this file, which contains
-`adca926`. The final report names the exact hash; it is not written here because a file cannot name
-the commit it is part of.
+`9c4a13e` was reviewed and one database-level gap was found. It is fixed in **`c63aa41`**. Migration
+14 had not reached staging, so `20260920120000_integration_events` was **amended** rather than
+followed by a fifteenth; the count stays at **14**, and none of the thirteen earlier migrations,
+`master`, `public/`, the deployment configuration, the provider scope or Phase 3A behaviour was
+touched.
+
+### 13.1 What was wrong
+
+`walaaplus_validate_integration_event` confirmed that the named `PromotionRedemption` exists, belongs
+to the business, and is the entry kind the event type claims. None of that says **when** the event
+was written.
+
+Server-assigned `occurredAt` stops a row being dated into the past. It does not stop a row being
+written *today* for a redemption from last month — and such a row satisfies every other check. So a
+direct runtime writer could have manufactured an event for any old redemption that had none, which is
+exactly the backfill §7 of the capability matrix says will not happen. The guarantee was a policy in
+a document, not a rule in the database.
+
+Nothing had been deployed, and no wrong row exists: the service has always written both rows in one
+transaction. The gap was what a *second* writer could have done.
+
+### 13.2 The rule
+
+```sql
+IF NEW."occurredAt" IS DISTINCT FROM redemption."recordedAt" THEN
+  RAISE EXCEPTION 'IntegrationEvent: an event must be written in the same transaction as the thing it describes'
+    USING ERRCODE = 'check_violation', HINT = '… Events are never backfilled.';
+END IF;
+```
+
+`occurredAt` stays server-authoritative — it is still assigned from `now()` at the top of the
+function, before anything reads it. The new comparison is against
+`PromotionRedemption.recordedAt`, which `walaaplus_validate_redemption` assigns the same way.
+
+Both are `now()`, which in PostgreSQL is the **transaction's start time** and is identical for every
+statement inside one transaction. So:
+
+| | |
+|---|---|
+| same transaction | the two timestamps are the same value → accepted |
+| any later transaction | a different `now()` → refused |
+
+**Neither side can be chosen by the caller**, because each is overwritten by its own trigger before
+it is read. A writer that knows exactly when the redemption happened and supplies that value is still
+refused — and there is a test that tries precisely that.
+
+Checked **last**, after the existence, tenant and entity-kind rules, so each refusal stays specific
+about what was actually wrong.
+
+### 13.3 The residual, stated rather than glossed
+
+The columns are `TIMESTAMP(3)`, so two transactions beginning within the same millisecond would
+compare equal. That fully closes the case the rule exists for — an **old** redemption can never be
+matched — and it is written into the migration.
+
+An exact proof is available and was not taken: comparing `PromotionRedemption.xmin` against
+`pg_current_xact_id()` identifies the writing transaction precisely. It behaves differently under
+savepoints, which Prisma's transaction handling may introduce, and trading a robust rule for an exact
+one that might refuse a legitimate write is the wrong trade without a reason to make it. Recorded
+here so the option is visible rather than forgotten.
+
+### 13.4 The suite was restructured, because the rule changed what a valid insert looks like
+
+Seven existing tests inserted an event in a different transaction from the redemption it named —
+which was legal before and is not now. All of them went red on the first run, which is the rule
+working.
+
+Every event that should succeed is now written **in one transaction with a fresh redemption**, via a
+`sameTransaction()` helper: that is the only shape the database accepts, so it is the shape the
+positive controls have to take. The refusal tests are unaffected — the existence, tenant and
+entity-kind rules are checked before the time rule, so each still fails on its own specific message,
+which the assertions now name exactly.
+
+Five tests added for the rule itself:
+
+| test | what it proves |
+|---|---|
+| accepts an event inserted alongside a brand-new redemption | the same-transaction path works, and the two timestamps are equal |
+| refuses an event for a redemption committed in an earlier transaction | the backfill is refused, **and no event row is written** |
+| refuses a withdrawal event for a void row committed earlier | the same, for the other event type |
+| cannot be imitated by supplying the redemption's own recorded time | the supplied value is discarded before comparison |
+| refuses one written in a later transaction even seconds afterwards | not a stale-row problem — "later" means "different transaction", not "old" |
+
+And the service workflows still each produce their matching event: `integration-events.test.ts` is
+unchanged and its 14 tests pass, including the redemption event, the void event, the "no event for a
+refused coupon" case and both transactionality tests.
+
+### 13.5 The new rule was watched fail
+
+Removing **only** the comparison — every other line of the function left exactly as it is — and
+re-running:
+
+```
+× refuses an event for a redemption committed in an earlier transaction
+× refuses a withdrawal event for a void row committed earlier
+× cannot be imitated by supplying the redemption's own recorded time
+× refuses one written in a later transaction even seconds afterwards
+  Tests  4 failed | 14 passed (18)
+```
+
+Four red, and the fifth new test — the positive control — stayed green, which is what tells you the
+rule refuses the right rows rather than all of them. Restored, and both suites re-run: **32 passed**.
+
+### 13.6 The quality bar, re-run in full after the fix
+
+| Check | Result |
+|---|---|
+| `node scripts/gate.mjs` | **PASS 15/15**, 570.3s |
+| `npx playwright test` — run 1 | **104 passed**, 3.1m |
+| `npx playwright test` — run 2 | **104 passed**, 2.9m |
+| `npx vitest run` | **90 files, 1230 tests passed**, 457.1s |
+| `npm audit` / `--omit=dev` | 0 vulnerabilities each |
+| `node scripts/db-migrate.mjs status` | **14** migrations, schema up to date |
+| `prisma migrate diff` | unchanged — the same pre-existing `ConsentRecord` naming difference, §8a |
+| `git diff --check` | clean |
+| `git status --porcelain public/` | **0** |
+| Secret scan over every changed file | clean |
+| Screenshots | `desktop-en-integrations.png` re-read after the run; the service path still writes its event and nothing regressed |
+
+Only two files changed in `c63aa41`: the migration and the integrity suite.
+
+---
+
+## 14. Which SHA to deploy
+
+The tip of `rebuild/phase-0-foundation` — the documentation commit carrying this file, which
+contains `adca926`, `9c4a13e` and `c63aa41`. The final report names the exact hash; it is not written
+here because a file cannot name the commit it is part of.
+
+**`9c4a13e` must not be deployed.** Nothing in it is wrong today — the service has only ever written
+an event inside the transaction that produced it, so every existing row is correct. What it ships is
+a migration whose no-backfill guarantee rests on the service being the only writer, and a migration
+is the hardest artefact to correct once applied. It has not been applied anywhere yet, which is the
+only window in which this is one more `IF` rather than a fifteenth migration reasoning about rows
+that already exist.
 
 `master` is untouched at `b9ee686` and does not exist on the `deploy` remote. Staging is Freebuff's
 after review, and nothing in this report claims a staging, provider, device, POS, wallet or
