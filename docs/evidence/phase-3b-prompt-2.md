@@ -12,7 +12,8 @@
 | Review fix — dispatch boundary (documentation) | `609f21e` |
 | Accuracy correction — dispatch-boundary duration claim removed, no behaviour change | `a839ded` — see §15 |
 | Accuracy correction — dispatch-boundary consistency claim corrected, no behaviour change | the commit carrying this file — see §16 |
-| **Deploy this** | the tip of `rebuild/phase-0-foundation`. **Not `9695e17`, not `9282fa2`, not `a839ded`** |
+| Configuration correction — the encryption key now reaches `web` and `worker` | the code commit below — see §18 |
+| **Deploy this** | the tip of `rebuild/phase-0-foundation`. **Not `9695e17`, not `9282fa2`, not `a839ded`, not `874a2f6`** |
 | Migration | `20260921120000_webhook_destinations`, the **15th** |
 | `master` | untouched at `b9ee686`, and absent from the `deploy` remote |
 
@@ -279,9 +280,16 @@ this repository, and none was generated for any environment by this work. `src/s
 variable names only; the crypto module's errors name the variable and never the value, asserted by a
 test that checks not even an eight-character prefix appears.
 
-The worker must be running for any webhook to be delivered. Nothing else in the deployment changes:
-no Caddy, DNS, TLS, firewall, volume or compose change was made, and `.env.example` is the one
-template touched — it documents the name, with an empty value.
+The worker must be running for any webhook to be delivered.
+
+**Setting the variable in an env file is necessary and not sufficient** — see §18, which is the
+correction that followed this section being read as if it were sufficient. Compose passes a service
+only the variables its own `environment:` block names, so all three compose files now name this one
+on `web` and on `worker`, optionally (`${INTEGRATION_ENCRYPTION_KEY:-}`), and on no other service.
+`.env.example` and `.env.staging.example` document the name with an empty value.
+
+Nothing else in the deployment changes: no Caddy, DNS, TLS, firewall, volume, port, network or
+resource-limit change was made in any file.
 
 ---
 
@@ -649,13 +657,110 @@ nothing; a search for the retired phrasing ("before/after `loadForDispatch` retu
 this read", "read has returned") returns no matches outside quoted historical text describing what
 earlier commits got wrong.
 
-## 17. Which SHA to deploy
+## 18. Configuration correction — a secret in the env file that reached no container
+
+Freebuff stopped before recreating `web` and `worker` on staging and reported the reason:
+`INTEGRATION_ENCRYPTION_KEY` was present in the server's `.env.staging`, and
+`docker-compose.staging-cohost.yml` passed it to neither service. The two generic compose files had
+the same omission. The block was correct and the finding was correct.
+
+**Why setting it was not enough.** Compose gives a service only the variables that service's own
+`environment:` block names. That is deliberate in this repository — `env_file: .env` was removed
+from `web` in Phase 0 precisely because it handed the application container every variable in the
+file, migrator password included — but named-variable least privilege only works if the naming is
+complete. An omitted name is an absent secret, and the failure is silent from outside: the
+application starts, serves, and only webhooks refuse.
+
+**What changed.** One line, on `web` and on `worker`, in each of the three compose files:
+
+```yaml
+INTEGRATION_ENCRYPTION_KEY: ${INTEGRATION_ENCRYPTION_KEY:-}
+```
+
+`:-` rather than `:?`. `:?` is how these files make a required variable fail loudly, and it would be
+the wrong tool here: a deployment that configures no webhooks must start exactly as it did before
+the feature existed, so an unset optional secret must never stop the till. `:-` resolves to an empty
+string; `src/server/env.ts` accepts it (optional, deliberately unvalidated there) and
+`webhooks/crypto.ts` treats blank identically to unset — `EncryptionUnavailableError`, no plaintext
+fallback, no degraded mode, webhook path only.
+
+No `env_file` was introduced. No other service receives the key. No port, network, healthcheck,
+resource limit or `TRUST_PROXY_HEADERS` setting changed in any file.
+
+`.env.staging.example` now names the variable with no value, gives the generation command, says the
+value is per-environment, says **both** `web` and `worker` need the same one, and says that leaving
+it blank is a supported state rather than a broken one. `docs/STAGING-RUNBOOK.md` §2 and
+`docs/INTEGRATIONS-CAPABILITY-MATRIX.md` §8a say the same, and §8a now explains why an env file
+entry alone does nothing.
+
+### 18.1 What the tests prove
+
+`tests/unit/compose-exposure.test.ts` gained a block over all three files:
+
+- `web` and `worker` receive the variable **by name**;
+- no other service receives it — not by name, and not smuggled inside another variable's value;
+- the interpolation stays optional (`:-`, never `:?`);
+- the value in the file is always the interpolation, never a literal;
+- no service uses `env_file`;
+- and wiring it changed no exposure: the complete set of published bindings, the complete network
+  attachment of every service in both staging files, and each stack's `TRUST_PROXY_HEADERS` are
+  restated literally, so a port, a network or a trust flag that drifts alongside a future
+  environment edit fails here even if the assertions above still pass.
+
+`tests/unit/deploy-config.test.ts` gained one: the staging template must name the key with no value,
+carry the generation command, and say both processes need the same per-environment value.
+
+**Each was watched fail.** Removing the key from the co-hosted `worker` failed
+"passes it by name to web and to worker" naming `worker`. Adding it to `migrate` in the dedicated
+staging file failed "passes it to no other service" naming `migrate`. Changing `:-` to `:?` failed
+"keeps it optional at interpolation time". Publishing `127.0.0.1:8099:8081` from the co-hosted
+worker failed "leaves the published ports of all three stacks exactly as they were" — the
+exposure guard is load-bearing, not decorative. Every edit was reverted and the suites returned to
+green.
+
+`tests/unit/webhook-crypto.test.ts` already asserted that a blank key is refused exactly like an
+absent one; a comment now ties that case to the `:-` form, because that is what makes `:-` safe.
+
+### 18.2 Resolved-configuration check, without printing values
+
+`docker compose config --format json` was run for each file, with a placeholder env file and then
+with the key removed from it, and piped through a script that prints the service name and
+`present, non-empty` / `present, empty` / `ABSENT` and nothing else. No value — not even the
+placeholder — was printed.
+
+| File | Key set to a placeholder | Key unset |
+|---|---|---|
+| `docker-compose.yml` (`--profile app`) | `web`, `worker` non-empty; `db`, `test-db`, `migrate`, `proxy` absent | exit 0; `web`, `worker` empty; others absent |
+| `docker-compose.staging.yml` | `web`, `worker` non-empty; `db`, `migrate`, `proxy` absent | exit 0; `web`, `worker` empty; others absent |
+| `docker-compose.staging-cohost.yml` | `web`, `worker` non-empty; `db`, `migrate` absent | exit 0; `web`, `worker` empty; others absent |
+
+The unset column is the "must not stop the application" requirement: Compose resolves the file
+successfully and the container receives an empty variable rather than the deployment failing.
+
+### 18.3 One thing this does not fix, stated plainly
+
+In **both** staging files the `worker` is attached to `backend` alone, and `backend` is
+`internal: true` — no gateway, no route to any external host in either direction. The encryption key
+lets the worker **decrypt** a destination; it does not let it **reach** one. Outbound webhook
+delivery from those files' worker will fail at the network layer however correct the key is.
+
+That is left exactly as it is, and deliberately: attaching the worker to a routed network is an
+exposure decision for the owner, to be taken on its own terms and reviewed on its own terms, not a
+side effect of wiring a secret in a correction that was asked to change no network. It is written
+into the worker's own comment in both files, into §8a of the capability matrix, and here, so that
+whoever enables webhooks on staging meets it in the runbook rather than in a stuck delivery queue.
+
+No migration was added or amended; `git diff --stat -- prisma/` is empty and staging stays at
+15/15. No staging deployment, no external webhook test, and no provider, device, POS or wallet test
+was performed by this work.
+
+## 19. Which SHA to deploy
 
 The tip of `rebuild/phase-0-foundation` — the documentation commit carrying this file, which
 contains `770f324`, `9695e17` and the review-fix commit. The final report names the exact hash; a
 file cannot name the commit it is part of.
 
-**Neither `9695e17` nor `9282fa2` may be deployed.**
+**Neither `9695e17` nor `9282fa2` may be deployed, and `874a2f6` will not deliver a webhook.**
 
 `9695e17` can send a webhook twice under overlapping worker passes, silently never sends the test a
 disabled destination's own screen offers, and permanently discards every queued delivery if the
@@ -667,7 +772,11 @@ could still receive one, for up to most of a minute. It also carries a comment a
 this file asserting a cutover that did not exist, which is the worse half: a wrong guarantee written
 down is one somebody relies on.
 
-Neither has been applied anywhere.
+`874a2f6` is correct in every respect this report describes except one: no compose file passes
+`INTEGRATION_ENCRYPTION_KEY` into `web` or `worker`, so a deployment of it cannot configure or
+deliver a webhook however the environment file is filled in. §18 is the fix.
+
+Neither `9695e17` nor `9282fa2` has been applied anywhere.
 
 `master` is untouched at `b9ee686`. Staging is Freebuff's after independent review, and nothing in
 this report claims a staging, provider, device, POS, wallet or external-network test was performed.

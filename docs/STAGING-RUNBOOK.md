@@ -70,14 +70,21 @@ is how you confirm that.
 
 ## 2. Secrets
 
-**Owner.** Three secrets exist. Generate all three **on the server**, never on a laptop, never in
-a chat window, never in a ticket:
+**Owner.** Four secrets exist: three required, one optional. Generate them **on the server**,
+never on a laptop, never in a chat window, never in a ticket:
 
 ```bash
-openssl rand -base64 48   # NEXTAUTH_SECRET        (never goes in a URL; base64 is fine)
-openssl rand -hex 32      # POSTGRES_PASSWORD      (the migrator/owner role)
-openssl rand -hex 32      # APP_DB_PASSWORD        (the restricted runtime role)
+openssl rand -base64 48   # NEXTAUTH_SECRET             (never goes in a URL; base64 is fine)
+openssl rand -hex 32      # POSTGRES_PASSWORD           (the migrator/owner role)
+openssl rand -hex 32      # APP_DB_PASSWORD             (the restricted runtime role)
+openssl rand -hex 32      # INTEGRATION_ENCRYPTION_KEY  (optional; webhooks only)
 ```
+
+The fourth is optional in a precise sense. Leave it blank and the stack starts and runs normally —
+enrolment, stamps, points, redemptions, the scanner, the till. What fails, closed, is webhook
+configuration and webhook delivery: `src/server/integrations/webhooks/crypto.ts` refuses to encrypt
+or decrypt, names the variable, and prints no part of any value. There is no plaintext fallback and
+no degraded mode. Set it only if this environment will use outbound webhooks.
 
 **The two database passwords must be hex.** Both are embedded in a connection string that
 `docker-compose.staging.yml` builds:
@@ -127,10 +134,30 @@ file. Ownership of these values is owner decision B5.
 | `POSTGRES_DB` | `.env.staging` | Optional; defaults to `loyalty` |
 | `APP_DB_USER`, `APP_DB_PASSWORD` | `.env.staging` | Restricted runtime role. Defaults to the name `walaaplus_app` |
 | `NEXTAUTH_SECRET` | `.env.staging` | Minimum 32 characters |
+| `INTEGRATION_ENCRYPTION_KEY` | `.env.staging` | **Optional.** 32 bytes, hex or base64. Reaches `web` **and** `worker`, both, and no other service. Blank is a supported state: only webhooks fail, closed |
 | `DATABASE_URL`, `MIGRATE_DATABASE_URL`, `NEXTAUTH_URL`, `TRUST_PROXY_HEADERS`, `NODE_ENV`, `WORKER_HEALTH_PORT` | **`docker-compose.staging.yml`** | Built from the above. Do not also put them in the env file |
 
 Every one of them is validated at startup by `src/server/env.ts`. A missing or malformed value
 stops the process and reports the variable **name**; no value is ever printed or logged.
+
+`INTEGRATION_ENCRYPTION_KEY` is the one deliberate exception to that sentence: `env.ts` accepts it
+as an optional string and checks nothing about its contents, so a malformed webhook key cannot stop
+the till. It is validated where it is used instead, and the failure is scoped to webhooks.
+
+**A variable in `.env.staging` does not reach a container unless a compose file names it.** That is
+the point of naming variables one at a time rather than using `env_file`, and it is also how this
+one was first missed: the key was on the server and no service received it. Both staging compose
+files now pass it to `web` and to `worker` by name, using `${INTEGRATION_ENCRYPTION_KEY:-}` so that
+leaving it unset cannot stop the stack. To check what a container will actually receive, without
+printing anything:
+
+```bash
+docker compose -f docker-compose.staging-cohost.yml --env-file .env.staging config \
+  | grep -c INTEGRATION_ENCRYPTION_KEY    # expect 2: web and worker
+```
+
+Never run `docker compose config` without that pipe on a terminal someone can see or a log someone
+keeps — it resolves and prints every value in the file.
 
 ---
 

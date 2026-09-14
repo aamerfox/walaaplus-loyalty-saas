@@ -428,6 +428,37 @@ never the value. No value for it exists anywhere in this repository, and none wa
 environment by the work that added support for it: **provisioning it is Freebuff's step, after
 review.**
 
+#### How it reaches the two processes
+
+Setting the variable in an environment file is not enough on its own, and this was found the hard
+way: a staging deployment had the key in `.env.staging` while no compose file passed it into a
+container, so `web` and `worker` started without it and every webhook operation failed closed with
+the value sitting on disk. Compose gives a service only the variables that service's own
+`environment:` block names — which is deliberate, because `env_file` would hand a container every
+variable in the file including the migrator password — so an omitted name is an absent secret.
+
+All three compose files now name it, on `web` and on `worker` and nowhere else:
+
+```yaml
+INTEGRATION_ENCRYPTION_KEY: ${INTEGRATION_ENCRYPTION_KEY:-}
+```
+
+`:-` rather than `:?`, on purpose. `:?` is how these files make a *required* variable fail loudly,
+and it would be wrong here: an absent optional secret must not stop a till over a feature the
+deployment may not use. `:-` resolves to an empty string, which `env.ts` accepts and the crypto
+module treats exactly as unset — so the stack starts and the webhook path, and only the webhook
+path, fails closed. `tests/unit/compose-exposure.test.ts` fails the gate if either application
+service stops receiving it, if any other service starts receiving it, if the form becomes required,
+or if a literal value ever appears in place of the interpolation.
+
+**One thing the key does not do: give the worker a route.** In both staging files the `worker`
+service is attached to the `backend` network alone, and that network is `internal: true` — it has no
+gateway, so there is no path to any external host from that container in either direction. The key
+lets the worker *decrypt* a destination; it does not let it *reach* one, and outbound delivery from
+those files' worker will fail at the network layer however correct the key is. That is left exactly
+as it is: attaching the worker to a routed network is an exposure decision for the owner, taken
+deliberately and reviewed on its own terms, not a side effect of wiring a secret.
+
 ---
 
 ## 9. What the event row may never contain
