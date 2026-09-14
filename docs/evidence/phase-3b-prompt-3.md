@@ -298,11 +298,11 @@ it is the guard added after the same thing happened in Phase 3A.
 - **R5 — the worker's copy of the URL check is advisory.** A destination whose DNS changes between
   it and the gateway's resolution is caught by the gateway's connect-time guard, not by the worker's.
   That is the design; the worker's copy is kept because a URL that fails it never crosses the hop.
-- **R6 — a destination saved on a port other than 443 is refused at dispatch, not at save time.**
-  The gateway refuses it permanently as `GATEWAY_REJECTED`, which is correct, but the owner sees it
-  in the attempt history rather than in an error when they press Save. Creation-time validation
-  means a new message in both locales and was left out of this scope deliberately. **Recommended
-  follow-up.**
+- **R6 — CLOSED, not accepted.** A destination on a port other than 443 used to save, sit in the
+  list looking configured, and fail every attempt as `GATEWAY_REJECTED`. It is now refused at the
+  moment the owner presses Save, in both languages, before anything is encrypted, written, audited,
+  queued or disclosed. See §13. The gateway's own check is unchanged and still covers a row this
+  path never saw.
 - **R7 — no healthcheck on the gateway**, deliberately: a health route would be a second contract.
   `docker compose ps` and its one `listening` log line are how you tell. If it is down, delivery
   retries and loses nothing.

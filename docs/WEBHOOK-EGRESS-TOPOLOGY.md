@@ -160,10 +160,17 @@ of the URL, at the moment it is about to connect. Not because the worker's check
 because the gateway is the process with the route: it must be safe against a caller that is wrong,
 including a future caller nobody has written yet.
 
+**And refused twice.** Since the save-time port rule, a destination whose effective port is not 443
+never reaches the database at all — `createDestination` refuses it before encryption, persistence,
+the audit entry, any queueing or any secret disclosure, with a message the owner reads in their own
+language. What the gateway's copy still covers is everything the save path cannot see: a row written
+before that rule existed, one restored from a backup, or one inserted by something that is not the
+create path. The two share one constant, `WEBHOOK_PORT` in `address.ts`, so they cannot drift.
+
 | Refused | Examples |
 |---|---|
 | Any scheme but `https:` | `http:`, `file:`, `gopher:`, `ftp:` |
-| Any port but 443 | `:8443`, `:80`, `:22`, `:0` |
+| Any port but 443 | `:8443`, `:80`, `:22`, `:0` — **and at save time as well as at dispatch** |
 | IP literals | `https://93.184.216.34/…`, `https://[2606:2800::1]/…` |
 | Loopback, private, link-local, CGNAT, multicast, reserved, documentation | `127.0.0.0/8`, `10/8`, `172.16/12`, `192.168/16`, `100.64/10`, `169.254/16`, `224/4`, `240/4`, `::1`, `fc00::/7`, `fe80::/10`, `ff00::/8`, `2001:db8::/32`, `64:ff9b::/96` |
 | Cloud metadata | `169.254.169.254`, `fd00:ec2::254` — covered by link-local and unique-local above, and named here because it is the target that matters |
