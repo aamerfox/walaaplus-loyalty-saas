@@ -72,7 +72,21 @@ CREATE TYPE "WebhookErrorClass" AS ENUM (
   'NETWORK',
   'TLS',
   'UNSAFE_ADDRESS',        -- the URL or its freshly resolved address failed validation. NEVER retried
-  'ENCRYPTION_UNAVAILABLE' -- the key is absent or malformed. Fail closed
+  -- The environment key is absent or malformed. **Retryable**, and deliberately so: it is a
+  -- deployment condition an operator corrects in minutes, and refusing every queued delivery
+  -- permanently because a variable was briefly unset would turn a five-minute outage into data loss.
+  -- Nothing is sent while it lasts; the delivery simply waits, and exhausts to FAILED like any other
+  -- transient failure if nobody fixes it.
+  'ENCRYPTION_UNAVAILABLE',
+  -- The stored ciphertext did not decrypt under a key that IS present and well-formed: tampered, or
+  -- written under a key that no longer exists. **Permanent.** A retry cannot make a row decrypt, and
+  -- treating it as transient would hide a corrupted destination behind five quiet failures.
+  'CIPHERTEXT_INVALID',
+  -- The destination was disabled or revoked between queueing and dispatch, or a real event was
+  -- queued for a destination that is not enabled. **Permanent**: the owner's decision is not a
+  -- transient condition. Distinct from UNSAFE_ADDRESS, which used to absorb this and made an
+  -- ordinary "switched it off" look like an attempted SSRF in the owner's history.
+  'DESTINATION_NOT_ELIGIBLE'
 );
 
 -- Only AES-256-GCM exists. An enum rather than free text so a row cannot claim an algorithm nothing
@@ -165,10 +179,45 @@ CREATE TABLE "WebhookDelivery" (
     "lastHttpStatus" INTEGER,
     "lastAttemptAt" TIMESTAMP(3),
     "settledAt" TIMESTAMP(3),
+    /*
+     * The LEASE. Three columns that move together or not at all.
+     *
+     * `claimDue` takes them in one `UPDATE ... WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED)
+     * RETURNING`, which is a single atomic statement: two workers, or two overlapping passes of one
+     * worker, cannot both come away with the same row. The previous design read with `findMany` and
+     * only wrote after sending, so an overlap sent the same webhook twice.
+     *
+     * `leaseExpiresAt` is what makes a crash recoverable. A worker that dies holding a claim leaves
+     * the row untouched; once the lease passes, the row is eligible again and another pass takes it.
+     * That is also precisely where **at-least-once** comes from: a process that dies after the
+     * request reached the receiver but before the outcome was written will retry, and the receiver
+     * de-duplicates by event id. Nothing here can make that exactly-once, and nothing pretends to.
+     *
+     * `claimToken` is a random uuid and nothing else. **No URL, no body, no secret, no response, no
+     * error text** — a lease is a claim on a row, not a record of what was attempted.
+     */
+    "claimedAt" TIMESTAMP(3),
+    "leaseExpiresAt" TIMESTAMP(3),
+    "claimToken" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT "WebhookDelivery_pkey" PRIMARY KEY ("id"),
     CONSTRAINT "WebhookDelivery_attemptCount_nonnegative" CHECK ("attemptCount" >= 0),
+    -- The retry cap, in the database as well as in `MAX_ATTEMPTS`. A caller that lost count cannot
+    -- keep hammering a receiver, and a direct writer cannot set the counter past the ceiling to make
+    -- room for more.
+    CONSTRAINT "WebhookDelivery_attemptCount_capped" CHECK ("attemptCount" <= 5),
+    -- All three lease columns, or none. A half-set lease is a row nobody can reason about.
+    CONSTRAINT "WebhookDelivery_lease_coherent" CHECK (
+      ("claimedAt" IS NULL AND "leaseExpiresAt" IS NULL AND "claimToken" IS NULL)
+      OR ("claimedAt" IS NOT NULL AND "leaseExpiresAt" IS NOT NULL AND "claimToken" IS NOT NULL)
+    ),
+    -- A lease that expires before it starts is not a lease.
+    CONSTRAINT "WebhookDelivery_lease_ordered"
+      CHECK ("leaseExpiresAt" IS NULL OR "claimedAt" IS NULL OR "leaseExpiresAt" > "claimedAt"),
+    -- A claim token is a uuid. Nothing longer fits, so nothing longer can be smuggled in.
+    CONSTRAINT "WebhookDelivery_claimToken_shape"
+      CHECK ("claimToken" IS NULL OR "claimToken" ~ '^[0-9a-f-]{36}$'),
     -- An HTTP status or nothing; never a made-up number.
     CONSTRAINT "WebhookDelivery_lastHttpStatus_range"
       CHECK ("lastHttpStatus" IS NULL OR ("lastHttpStatus" BETWEEN 100 AND 599)),
@@ -184,8 +233,9 @@ CREATE UNIQUE INDEX "WebhookDelivery_destinationId_integrationEventId_key"
   WHERE "integrationEventId" IS NOT NULL;
 
 -- The worker's only query: what is due.
+-- The claim query's index: pending, due, and not currently leased.
 CREATE INDEX "WebhookDelivery_status_nextAttemptAt_idx"
-  ON "WebhookDelivery"("status", "nextAttemptAt")
+  ON "WebhookDelivery"("status", "nextAttemptAt", "leaseExpiresAt")
   WHERE "status" = 'PENDING';
 CREATE INDEX "WebhookDelivery_businessId_createdAt_idx" ON "WebhookDelivery"("businessId", "createdAt" DESC);
 CREATE INDEX "WebhookDelivery_destinationId_createdAt_idx" ON "WebhookDelivery"("destinationId", "createdAt" DESC);
@@ -385,10 +435,14 @@ BEGIN
       END IF;
     END IF;
 
-    -- Work starts unstarted. A row created as DELIVERED would be a delivery nobody made.
+    -- Work starts unstarted. A row created as DELIVERED would be a delivery nobody made, and one
+    -- created already claimed would be a lease nobody holds.
     IF NEW."status" <> 'PENDING' OR NEW."attemptCount" <> 0 OR NEW."settledAt" IS NOT NULL THEN
       RAISE EXCEPTION 'WebhookDelivery: a new delivery is pending and unattempted'
         USING ERRCODE = 'check_violation';
+    END IF;
+    IF NEW."claimedAt" IS NOT NULL OR NEW."leaseExpiresAt" IS NOT NULL OR NEW."claimToken" IS NOT NULL THEN
+      RAISE EXCEPTION 'WebhookDelivery: a new delivery is unclaimed' USING ERRCODE = 'check_violation';
     END IF;
     RETURN NEW;
   END IF;
@@ -429,6 +483,10 @@ BEGIN
       RAISE EXCEPTION 'WebhookDelivery: a settled delivery has a settled time and no next attempt'
         USING ERRCODE = 'check_violation';
     END IF;
+    -- A settled delivery holds no lease. Leaving one would make a finished row look claimed forever.
+    IF NEW."claimedAt" IS NOT NULL OR NEW."leaseExpiresAt" IS NOT NULL OR NEW."claimToken" IS NOT NULL THEN
+      RAISE EXCEPTION 'WebhookDelivery: a settled delivery holds no claim' USING ERRCODE = 'check_violation';
+    END IF;
     -- The rule a bug would most plausibly break, written down so it cannot: a timeout or a network
     -- error is NEVER delivered.
     IF NEW."status" = 'DELIVERED' AND NEW."lastErrorClass" <> 'NONE' THEN
@@ -439,12 +497,24 @@ BEGIN
       RAISE EXCEPTION 'WebhookDelivery: delivered means the receiver answered 2xx'
         USING ERRCODE = 'check_violation';
     END IF;
-    -- An unsafe address is never retried, so it can never be the reason a delivery ran out of
-    -- attempts. It settles REFUSED, immediately.
-    IF NEW."status" = 'FAILED' AND NEW."lastErrorClass" = 'UNSAFE_ADDRESS' THEN
-      RAISE EXCEPTION 'WebhookDelivery: an unsafe address is refused, never retried to exhaustion'
+    -- The permanent classes are never retried, so none of them can be the reason a delivery ran out
+    -- of attempts. Each settles REFUSED, immediately.
+    IF NEW."status" = 'FAILED'
+       AND NEW."lastErrorClass" IN ('UNSAFE_ADDRESS', 'CIPHERTEXT_INVALID', 'DESTINATION_NOT_ELIGIBLE') THEN
+      RAISE EXCEPTION 'WebhookDelivery: % is refused, never retried to exhaustion', NEW."lastErrorClass"
         USING ERRCODE = 'check_violation';
     END IF;
+  END IF;
+
+  /*
+   * The retry cap, as a state rule rather than only a counter.
+   *
+   * A delivery that has used every attempt is not pending — there is nothing left to do with it. A
+   * caller that left one PENDING at the cap would create a row the worker picks up forever.
+   */
+  IF NEW."status" = 'PENDING' AND NEW."attemptCount" >= 5 THEN
+    RAISE EXCEPTION 'WebhookDelivery: a delivery at the attempt cap is settled, not pending'
+      USING ERRCODE = 'check_violation';
   END IF;
 
   RETURN NEW;
@@ -508,10 +578,24 @@ BEGIN
   IF NEW."outcome" <> 'DELIVERED' AND NEW."errorClass" = 'NONE' THEN
     RAISE EXCEPTION 'WebhookDeliveryAttempt: a failed attempt says why' USING ERRCODE = 'check_violation';
   END IF;
-  -- An unsafe address is permanent by definition. Classifying it retryable is what would make the
-  -- product attempt an SSRF a second time.
-  IF NEW."errorClass" = 'UNSAFE_ADDRESS' AND NEW."outcome" <> 'PERMANENT' THEN
-    RAISE EXCEPTION 'WebhookDeliveryAttempt: an unsafe address is permanent' USING ERRCODE = 'check_violation';
+  -- The three permanent classes. Classifying an unsafe address retryable is what would make the
+  -- product attempt an SSRF a second time; the other two are permanent because no amount of waiting
+  -- changes them.
+  IF NEW."errorClass" IN ('UNSAFE_ADDRESS', 'CIPHERTEXT_INVALID', 'DESTINATION_NOT_ELIGIBLE')
+     AND NEW."outcome" <> 'PERMANENT' THEN
+    RAISE EXCEPTION 'WebhookDeliveryAttempt: % is permanent', NEW."errorClass"
+      USING ERRCODE = 'check_violation';
+  END IF;
+  /*
+   * And the one that must NOT be permanent.
+   *
+   * A missing environment key is a deployment condition an operator corrects, so a delivery that met
+   * one waits and tries again. Recording it as permanent would quietly discard every queued webhook
+   * because a variable was unset for five minutes — which is the gap this rule exists to close.
+   */
+  IF NEW."errorClass" = 'ENCRYPTION_UNAVAILABLE' AND NEW."outcome" <> 'RETRYABLE' THEN
+    RAISE EXCEPTION 'WebhookDeliveryAttempt: an unavailable key is retryable, not permanent'
+      USING ERRCODE = 'check_violation';
   END IF;
 
   RETURN NEW;

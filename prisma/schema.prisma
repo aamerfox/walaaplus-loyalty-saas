@@ -1231,6 +1231,12 @@ model WebhookDelivery {
   lastHttpStatus     Int?
   lastAttemptAt      DateTime?
   settledAt          DateTime?
+  /// The lease. Three columns that move together, taken atomically by `claimDue` so two workers
+  /// cannot dispatch one delivery, and expiring so a crashed worker does not strand it.
+  /// `claimToken` is a uuid and nothing else — never a URL, body, secret, response or error text.
+  claimedAt          DateTime?
+  leaseExpiresAt     DateTime?
+  claimToken         String?
   createdAt          DateTime               @default(now())
 
   business         Business                 @relation(fields: [businessId], references: [id], onDelete: Restrict)
@@ -1302,8 +1308,14 @@ enum WebhookErrorClass {
   TIMEOUT
   NETWORK
   TLS
+  /// Permanent. Retrying an SSRF attempt is attempting it again.
   UNSAFE_ADDRESS
+  /// **Retryable.** A deployment condition an operator corrects; nothing is sent meanwhile.
   ENCRYPTION_UNAVAILABLE
+  /// Permanent. A stored value did not decrypt under a key that is present and well-formed.
+  CIPHERTEXT_INVALID
+  /// Permanent. Disabled or revoked before dispatch, or a real event for a destination not enabled.
+  DESTINATION_NOT_ELIGIBLE
 }
 
 /// Only AES-256-GCM exists. An enum so a row cannot claim an algorithm nothing here can read.

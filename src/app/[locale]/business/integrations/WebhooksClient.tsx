@@ -41,6 +41,8 @@ export interface DestinationRow {
   pending: number;
   delivered: number;
   failed: number;
+  /** The most recent attempt's category, or null if nothing has been tried yet. */
+  lastErrorClass: string | null;
 }
 
 const TONE: Record<DestinationStateName, "success" | "warn" | "neutral"> = {
@@ -55,6 +57,32 @@ const STATE_LABEL = {
   ENABLED: "stateEnabled",
   REVOKED: "stateRevoked",
 } as const;
+
+/**
+ * What the owner is told about the last attempt.
+ *
+ * Operational words only. **No cryptographic detail**: a missing key reads as "a setting this
+ * server needs", and an unreadable ciphertext reads as "settings that can no longer be read" —
+ * enough for an owner to know whether to wait, call an administrator, or make a new destination,
+ * and nothing about algorithms, versions or which value failed.
+ *
+ * The two the review asked to be distinguishable are the first two: one is temporary and will be
+ * retried, the other is not and will not.
+ */
+const OUTCOME_LABEL: Record<string, string> = {
+  NONE: "outcomeNone",
+  ENCRYPTION_UNAVAILABLE: "outcomeKeyMissing",
+  CIPHERTEXT_INVALID: "outcomeUnreadable",
+  DESTINATION_NOT_ELIGIBLE: "outcomeNotEligible",
+  UNSAFE_ADDRESS: "outcomeAddress",
+  TIMEOUT: "outcomeTimeout",
+  NETWORK: "outcomeNetwork",
+  TLS: "outcomeTls",
+  HTTP_REDIRECT: "outcomeRedirect",
+  HTTP_CLIENT_ERROR: "outcomeClientError",
+  HTTP_RATE_LIMITED: "outcomeRateLimited",
+  HTTP_SERVER_ERROR: "outcomeServerError",
+};
 
 interface Props {
   businessId: string;
@@ -217,6 +245,11 @@ export default function WebhooksClient({ businessId, destinations, configured }:
                   {t("statusPending")} {d.pending} · {t("statusDelivered")} {d.delivered} · {t("statusFailed")}{" "}
                   {d.failed}
                 </p>
+                {d.lastErrorClass !== null && OUTCOME_LABEL[d.lastErrorClass] ? (
+                  <p className="mt-1 text-sm text-slate-600" data-testid={`webhook-outcome-${d.id}`}>
+                    {t("lastOutcome")}: {t(OUTCOME_LABEL[d.lastErrorClass] as never)}
+                  </p>
+                ) : null}
 
                 {d.state === "DISABLED" && (
                   <p className="mt-2 text-sm text-slate-600" data-testid={`webhook-disabled-${d.id}`}>

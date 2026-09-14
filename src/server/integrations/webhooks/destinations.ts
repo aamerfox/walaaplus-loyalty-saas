@@ -6,6 +6,7 @@ import {
   WebhookCipher,
   WebhookDeliveryStatus,
   WebhookDestinationState,
+  type WebhookErrorClass,
 } from "@prisma/client";
 import { z } from "zod";
 import { AuditAction, recordAudit } from "../../audit/audit";
@@ -79,6 +80,11 @@ export interface DestinationView {
   pending: number;
   delivered: number;
   failed: number;
+  /**
+   * The most recent attempt's error class, so the screen can say what is happening in operational
+   * words. **A category, never a detail** — there is no column here that could carry one.
+   */
+  lastErrorClass: WebhookErrorClass | null;
 }
 
 /** Listed literally. There is deliberately no `endpointCipher` or `signingSecretCipher` here. */
@@ -92,8 +98,15 @@ const DESTINATION_SELECT = {
   createdAt: true,
 } satisfies Prisma.WebhookDestinationSelect;
 
-async function countsFor(destinationIds: string[]): Promise<Map<string, { pending: number; delivered: number; failed: number }>> {
-  const counts = new Map<string, { pending: number; delivered: number; failed: number }>();
+interface DestinationCounts {
+  pending: number;
+  delivered: number;
+  failed: number;
+  lastErrorClass: WebhookErrorClass | null;
+}
+
+async function countsFor(destinationIds: string[]): Promise<Map<string, DestinationCounts>> {
+  const counts = new Map<string, DestinationCounts>();
   if (destinationIds.length === 0) return counts;
 
   const rows = await prisma.webhookDelivery.groupBy({
@@ -101,7 +114,7 @@ async function countsFor(destinationIds: string[]): Promise<Map<string, { pendin
     where: { destinationId: { in: destinationIds } },
     _count: { _all: true },
   });
-  for (const id of destinationIds) counts.set(id, { pending: 0, delivered: 0, failed: 0 });
+  for (const id of destinationIds) counts.set(id, { pending: 0, delivered: 0, failed: 0, lastErrorClass: null });
   for (const row of rows) {
     const bucket = counts.get(row.destinationId);
     if (!bucket) continue;
@@ -109,14 +122,31 @@ async function countsFor(destinationIds: string[]): Promise<Map<string, { pendin
     else if (row.status === WebhookDeliveryStatus.DELIVERED) bucket.delivered += row._count._all;
     else bucket.failed += row._count._all;
   }
+
+  // The most recent attempt per destination, for the status line. One row each, newest first.
+  const recent = await prisma.webhookDelivery.findMany({
+    where: { destinationId: { in: destinationIds }, lastOutcome: { not: null } },
+    orderBy: { lastAttemptAt: "desc" },
+    select: { destinationId: true, lastErrorClass: true },
+  });
+  for (const row of recent) {
+    const bucket = counts.get(row.destinationId);
+    if (bucket && bucket.lastErrorClass === null) bucket.lastErrorClass = row.lastErrorClass;
+  }
   return counts;
 }
 
 function toView(
   row: Prisma.WebhookDestinationGetPayload<{ select: typeof DESTINATION_SELECT }>,
-  counts: { pending: number; delivered: number; failed: number } | undefined,
+  counts: DestinationCounts | undefined,
 ): DestinationView {
-  return { ...row, pending: counts?.pending ?? 0, delivered: counts?.delivered ?? 0, failed: counts?.failed ?? 0 };
+  return {
+    ...row,
+    pending: counts?.pending ?? 0,
+    delivered: counts?.delivered ?? 0,
+    failed: counts?.failed ?? 0,
+    lastErrorClass: counts?.lastErrorClass ?? null,
+  };
 }
 
 export async function listDestinations(ctx: TenantContext): Promise<DestinationView[]> {

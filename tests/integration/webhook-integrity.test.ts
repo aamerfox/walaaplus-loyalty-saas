@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const session = vi.hoisted(() => ({ userId: null as string | null }));
@@ -565,9 +565,9 @@ describe("the tables have nowhere to put anything sensitive", () => {
         "signingSecretCipher", "state", "updatedAt",
       ],
       WebhookDelivery: [
-        "attemptCount", "businessId", "createdAt", "destinationId", "id", "integrationEventId",
-        "isTest", "lastAttemptAt", "lastErrorClass", "lastHttpStatus", "lastOutcome",
-        "nextAttemptAt", "settledAt", "status",
+        "attemptCount", "businessId", "claimToken", "claimedAt", "createdAt", "destinationId", "id",
+        "integrationEventId", "isTest", "lastAttemptAt", "lastErrorClass", "lastHttpStatus",
+        "lastOutcome", "leaseExpiresAt", "nextAttemptAt", "settledAt", "status",
       ],
       WebhookDeliveryAttempt: [
         "attemptNumber", "attemptedAt", "businessId", "createdAt", "deliveryId", "errorClass",
@@ -603,6 +603,13 @@ describe("the tables have nowhere to put anything sensitive", () => {
       // A timestamp recording WHEN the secret was shown. It holds no secret, and naming it
       // anything else would make the column worse to read in order to satisfy a regex.
       "secretIssuedAt",
+      /*
+       * A lease identifier: a uuid naming which pass holds a row, checked into that shape by a
+       * CHECK constraint. It is a "token" only in the sense that a cloakroom ticket is — it grants
+       * nothing and means nothing outside this table, and the constraint above proves nothing
+       * longer than a uuid can be stored in it.
+       */
+      "claimToken",
     ]);
     /*
      * `name` on its own is exempt by construction: it is the OWNER's label for their own
@@ -674,3 +681,226 @@ async function eventFor(w: World): Promise<string> {
     return event.id;
   });
 }
+
+describe("the lease cannot be forged", () => {
+  let mine: World;
+  let deliveryId: string;
+
+  beforeEach(async () => {
+    await resetDatabase();
+    mine = await build("Lease caf\u00e9");
+    deliveryId = (
+      await prisma.webhookDelivery.create({
+        data: { businessId: mine.cafe.businessId, destinationId: mine.destinationId, isTest: true, nextAttemptAt: new Date() },
+        select: { id: true },
+      })
+    ).id;
+  });
+
+  const token = () => randomUUID();
+
+  it("refuses a delivery created already claimed", async () => {
+    const now = new Date();
+    await expect(
+      prisma.webhookDelivery.create({
+        data: {
+          businessId: mine.cafe.businessId,
+          destinationId: mine.destinationId,
+          isTest: true,
+          nextAttemptAt: now,
+          claimedAt: now,
+          leaseExpiresAt: new Date(now.getTime() + 1000),
+          claimToken: token(),
+        },
+      }),
+    ).rejects.toThrow(/unclaimed/);
+  });
+
+  it("refuses a half-set lease, in every combination", async () => {
+    // A lease missing one of its three columns is a row nobody can reason about.
+    const now = new Date();
+    for (const data of [
+      { claimedAt: now },
+      { leaseExpiresAt: now },
+      { claimToken: token() },
+      { claimedAt: now, leaseExpiresAt: new Date(now.getTime() + 1000) },
+      { claimedAt: now, claimToken: token() },
+    ]) {
+      await expect(
+        prisma.webhookDelivery.update({ where: { id: deliveryId }, data }),
+        JSON.stringify(Object.keys(data)),
+      ).rejects.toThrow(/check constraint|Webhook/i);
+    }
+  });
+
+  it("refuses a lease that expires before it starts", async () => {
+    const now = new Date();
+    await expect(
+      prisma.webhookDelivery.update({
+        where: { id: deliveryId },
+        data: { claimedAt: now, leaseExpiresAt: new Date(now.getTime() - 1000), claimToken: token() },
+      }),
+    ).rejects.toThrow(/check constraint|Webhook/i);
+  });
+
+  it("refuses a claim token that is not a uuid", async () => {
+    // Nothing longer fits, so nothing longer can be smuggled into the lease.
+    const now = new Date();
+    for (const bad of ["not-a-uuid", "https://hooks.example.com/x", "a".repeat(64), ""]) {
+      await expect(
+        prisma.webhookDelivery.update({
+          where: { id: deliveryId },
+          data: { claimedAt: now, leaseExpiresAt: new Date(now.getTime() + 1000), claimToken: bad },
+        }),
+        JSON.stringify(bad),
+      ).rejects.toThrow(/check constraint|Webhook/i);
+    }
+  });
+
+  it("accepts a well-formed lease, and releasing it", async () => {
+    const now = new Date();
+    await expect(
+      prisma.webhookDelivery.update({
+        where: { id: deliveryId },
+        data: { claimedAt: now, leaseExpiresAt: new Date(now.getTime() + 1000), claimToken: token() },
+      }),
+    ).resolves.toBeTruthy();
+    await expect(
+      prisma.webhookDelivery.update({
+        where: { id: deliveryId },
+        data: { claimedAt: null, leaseExpiresAt: null, claimToken: null },
+      }),
+    ).resolves.toBeTruthy();
+  });
+
+  it("refuses a settled delivery that still holds a claim", async () => {
+    const now = new Date();
+    await expect(
+      prisma.webhookDelivery.update({
+        where: { id: deliveryId },
+        data: {
+          status: "DELIVERED",
+          settledAt: now,
+          nextAttemptAt: null,
+          lastHttpStatus: 200,
+          attemptCount: 1,
+          claimedAt: now,
+          leaseExpiresAt: new Date(now.getTime() + 1000),
+          claimToken: token(),
+        },
+      }),
+    ).rejects.toThrow(/holds no claim/);
+  });
+});
+
+describe("the retry cap is the database's, not only the code's", () => {
+  let mine: World;
+  let deliveryId: string;
+
+  beforeEach(async () => {
+    await resetDatabase();
+    mine = await build("Cap caf\u00e9");
+    deliveryId = (
+      await prisma.webhookDelivery.create({
+        data: { businessId: mine.cafe.businessId, destinationId: mine.destinationId, isTest: true, nextAttemptAt: new Date() },
+        select: { id: true },
+      })
+    ).id;
+  });
+
+  it("refuses an attempt count past the ceiling", async () => {
+    // Walk it up to the cap one at a time, which is the only way the trigger allows.
+    for (let n = 1; n <= 5; n += 1) {
+      await prisma.webhookDelivery.update({
+        where: { id: deliveryId },
+        data:
+          n === 5
+            ? { attemptCount: n, status: "FAILED", settledAt: new Date(), nextAttemptAt: null, lastErrorClass: "TIMEOUT" }
+            : { attemptCount: n },
+      });
+    }
+    // And the sixth is refused by the CHECK, even for a settled row.
+    await expect(
+      migratorPrisma().$executeRawUnsafe('UPDATE "WebhookDelivery" SET "attemptCount" = 6 WHERE "id" = $1', deliveryId),
+    ).rejects.toThrow(/check constraint|Webhook/i);
+  });
+
+  it("refuses a delivery left PENDING at the cap", async () => {
+    // A row the worker would pick up forever.
+    for (let n = 1; n <= 4; n += 1) {
+      await prisma.webhookDelivery.update({ where: { id: deliveryId }, data: { attemptCount: n } });
+    }
+    await expect(
+      prisma.webhookDelivery.update({ where: { id: deliveryId }, data: { attemptCount: 5 } }),
+    ).rejects.toThrow(/at the attempt cap is settled/);
+  });
+});
+
+describe("the permanent and retryable classes are the database's rules too", () => {
+  let mine: World;
+  let deliveryId: string;
+
+  beforeEach(async () => {
+    await resetDatabase();
+    mine = await build("Class caf\u00e9");
+    deliveryId = (
+      await prisma.webhookDelivery.create({
+        data: { businessId: mine.cafe.businessId, destinationId: mine.destinationId, isTest: true, nextAttemptAt: new Date() },
+        select: { id: true },
+      })
+    ).id;
+    await prisma.webhookDelivery.update({ where: { id: deliveryId }, data: { attemptCount: 1 } });
+  });
+
+  function attemptData(overrides: Record<string, unknown> = {}) {
+    return {
+      businessId: mine.cafe.businessId,
+      deliveryId,
+      attemptNumber: 1,
+      outcome: "PERMANENT" as const,
+      errorClass: "CIPHERTEXT_INVALID" as const,
+      ...overrides,
+    };
+  }
+
+  it("refuses a permanent class recorded as retryable", async () => {
+    for (const errorClass of ["UNSAFE_ADDRESS", "CIPHERTEXT_INVALID", "DESTINATION_NOT_ELIGIBLE"] as const) {
+      await expect(
+        prisma.webhookDeliveryAttempt.create({ data: attemptData({ errorClass, outcome: "RETRYABLE" }) }),
+        errorClass,
+      ).rejects.toThrow(/is permanent/);
+    }
+  });
+
+  it("refuses an unavailable key recorded as permanent", async () => {
+    /*
+     * The rule that closes the gap this prompt was about. Recording a brief key outage as permanent
+     * would quietly discard every queued webhook because a variable was unset for five minutes.
+     */
+    await expect(
+      prisma.webhookDeliveryAttempt.create({
+        data: attemptData({ errorClass: "ENCRYPTION_UNAVAILABLE", outcome: "PERMANENT" }),
+      }),
+    ).rejects.toThrow(/retryable, not permanent/);
+  });
+
+  it("accepts an unavailable key recorded as retryable", async () => {
+    const row = await prisma.webhookDeliveryAttempt.create({
+      data: attemptData({ errorClass: "ENCRYPTION_UNAVAILABLE", outcome: "RETRYABLE" }),
+      select: { id: true },
+    });
+    expect(row.id).toBeTruthy();
+  });
+
+  it("refuses each permanent class retried to exhaustion", async () => {
+    for (const lastErrorClass of ["UNSAFE_ADDRESS", "CIPHERTEXT_INVALID", "DESTINATION_NOT_ELIGIBLE"] as const) {
+      await expect(
+        prisma.webhookDelivery.update({
+          where: { id: deliveryId },
+          data: { status: "FAILED", settledAt: new Date(), nextAttemptAt: null, lastErrorClass },
+        }),
+        lastErrorClass,
+      ).rejects.toThrow(/never retried to exhaustion/);
+    }
+  });
+});

@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const session = vi.hoisted(() => ({ userId: null as string | null }));
@@ -18,12 +18,25 @@ vi.mock("@/server/auth/session", async (importOriginal) => {
 
 import { prisma } from "@/server/db";
 import { addressProblem, type LookupFn } from "@/server/integrations/webhooks/address";
-import { signaturesMatch, signPayload } from "@/server/integrations/webhooks/crypto";
-import { backoffSeconds, MAX_ATTEMPTS, runDueDeliveries } from "@/server/integrations/webhooks/delivery";
+import { encryptSecret, signaturesMatch, signPayload } from "@/server/integrations/webhooks/crypto";
+import {
+  backoffSeconds,
+  LEASE_SECONDS,
+  MAX_ATTEMPTS,
+  runDueDeliveries,
+} from "@/server/integrations/webhooks/delivery";
 import { createDestination, queueTestDelivery, setDestinationState } from "@/server/integrations/webhooks/destinations";
 import { HEADER, TEST_EVENT_ENTITY_PREFIX } from "@/server/integrations/webhooks/envelope";
 import { sendWebhook } from "@/server/integrations/webhooks/transport";
-import { createStampCafe, migratorPrisma, resetDatabase, type StampCafeFixture } from "../setup/fixtures";
+import { codeDigest, newCodeSalt } from "@/server/promotions/codes";
+import {
+  createStampCafe,
+  enrolCustomer,
+  migratorPrisma,
+  resetDatabase,
+  uniqueSyrianPhone,
+  type StampCafeFixture,
+} from "../setup/fixtures";
 import { startReceiver, type Receiver } from "../setup/webhook-receiver";
 
 /**
@@ -114,7 +127,7 @@ describe("a queued delivery is sent, signed, and recorded", () => {
     const { deliveryId } = await queueTestDelivery(fx.ctx, destinationId);
 
     const summary = await runOnce();
-    expect(summary).toMatchObject({ attempted: 1, delivered: 1 });
+    expect(summary).toMatchObject({ claimed: 1, delivered: 1 });
 
     const request = receiver.requests.at(-1);
     expect(request).toBeDefined();
@@ -351,7 +364,7 @@ describe("retries are bounded and back off", () => {
 
     // Immediately again: nothing is due, so nothing is attempted.
     const second = await runOnce(new Date(now.getTime() + 1000));
-    expect(second.attempted).toBe(0);
+    expect(second.claimed).toBe(0);
     const row = await migratorPrisma().webhookDelivery.findFirstOrThrow({ where: { id: deliveryId } });
     expect(row.attemptCount).toBe(1);
   });
@@ -364,31 +377,128 @@ describe("retries are bounded and back off", () => {
   });
 });
 
-describe("delivery fails closed without the key, and touches nothing else", () => {
+describe("an unavailable key waits; a corrupt ciphertext does not", () => {
   beforeEach(async () => {
     await resetDatabase();
     receiver.reset();
   });
 
-  it("records ENCRYPTION_UNAVAILABLE and sends nothing", async () => {
-    const { fx, destinationId } = await cafeWithDestination("Keyless café");
+  it("treats a missing key as retryable, sends nothing, and recovers when it comes back", async () => {
+    /*
+     * The gap this closes. A missing environment variable is a deployment condition an operator
+     * corrects in minutes; refusing every queued delivery permanently because of one would turn a
+     * short outage into lost webhooks.
+     */
+    const { fx, destinationId } = await cafeWithDestination("Keyless caf\u00e9");
     const { deliveryId } = await queueTestDelivery(fx.ctx, destinationId);
     const before = receiver.requests.length;
 
     const key = process.env.INTEGRATION_ENCRYPTION_KEY;
     delete process.env.INTEGRATION_ENCRYPTION_KEY;
+    let now = new Date();
     try {
-      await runOnce();
+      await runOnce(now);
+    } finally {
+      process.env.INTEGRATION_ENCRYPTION_KEY = key;
+    }
+
+    const paused = await migratorPrisma().webhookDelivery.findFirstOrThrow({ where: { id: deliveryId } });
+    expect(paused.lastErrorClass).toBe("ENCRYPTION_UNAVAILABLE");
+    expect(paused.lastOutcome).toBe("RETRYABLE");
+    expect(paused.status, "a brief outage must not settle the delivery").toBe("PENDING");
+    expect(paused.nextAttemptAt).not.toBeNull();
+    expect(receiver.requests.length, "nothing may be sent without the key").toBe(before);
+
+    // The operator puts the key back. The next due pass delivers it.
+    now = new Date(now.getTime() + backoffSeconds(1) * 1000 + 1000);
+    await runOnce(now);
+
+    const recovered = await migratorPrisma().webhookDelivery.findFirstOrThrow({ where: { id: deliveryId } });
+    expect(recovered.status).toBe("DELIVERED");
+    expect(recovered.lastErrorClass).toBe("NONE");
+    expect(receiver.requests.length).toBe(before + 1);
+  }, 30_000);
+
+  it("exhausts to FAILED if the key never comes back", async () => {
+    const { fx, destinationId } = await cafeWithDestination("Still keyless caf\u00e9");
+    const { deliveryId } = await queueTestDelivery(fx.ctx, destinationId);
+
+    const key = process.env.INTEGRATION_ENCRYPTION_KEY;
+    delete process.env.INTEGRATION_ENCRYPTION_KEY;
+    let now = new Date();
+    try {
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+        await runOnce(now);
+        now = new Date(now.getTime() + backoffSeconds(attempt) * 1000 + 1000);
+      }
     } finally {
       process.env.INTEGRATION_ENCRYPTION_KEY = key;
     }
 
     const row = await migratorPrisma().webhookDelivery.findFirstOrThrow({ where: { id: deliveryId } });
+    expect(row.status).toBe("FAILED");
+    expect(row.attemptCount).toBe(MAX_ATTEMPTS);
     expect(row.lastErrorClass).toBe("ENCRYPTION_UNAVAILABLE");
-    expect(row.status).toBe("REFUSED");
-    expect(receiver.requests.length).toBe(before);
-    // The event this business recorded is untouched; only the telling failed.
-    expect(await migratorPrisma().integrationEvent.count({ where: { businessId: fx.businessId } })).toBe(0);
+    // Bounded: the cap is the cap, in the database as well as in the code.
+    expect(row.settledAt).not.toBeNull();
+  }, 60_000);
+
+  it("refuses an undecryptable ciphertext permanently, and sends nothing", async () => {
+    /*
+     * A key that IS present and well-formed, against a value that will not decrypt under it: the row
+     * is corrupt, or was written under a key that no longer exists. Waiting cannot fix either, and
+     * retrying would hide it behind five quiet failures.
+     *
+     * The destination is created with ciphertext written under a DIFFERENT key rather than by
+     * editing an existing row \u2014 `webhook_destination_guard` freezes the endpoint, so the row cannot
+     * be tampered with after the fact, which is itself the protection working. A wrong-key
+     * ciphertext exercises exactly the same failure: `decryptSecret` cannot tell the two apart, by
+     * design, because a caller that could would have an oracle.
+     */
+    const cafe = await createStampCafe({ name: "Undecryptable caf\u00e9" });
+    session.userId = cafe.userId;
+    const strangerKey = { INTEGRATION_ENCRYPTION_KEY: randomBytes(32).toString("hex") } as unknown as NodeJS.ProcessEnv;
+
+    const destination = await prisma.webhookDestination.create({
+      data: {
+        businessId: cafe.businessId,
+        name: "Ops",
+        endpointHost: HOST,
+        endpointDigest: randomBytes(32).toString("hex"),
+        endpointCipher: encryptSecret(`https://${HOST}:${receiver.port}/hook`, strangerKey),
+        signingSecretCipher: encryptSecret(randomBytes(32).toString("base64url"), strangerKey),
+        cipherAlgorithm: "AES_256_GCM",
+        cipherKeyVersion: 1,
+        secretIssuedAt: new Date(),
+      },
+      select: { id: true },
+    });
+    await prisma.webhookDestination.update({ where: { id: destination.id }, data: { state: "ENABLED" } });
+
+    const { deliveryId } = await queueTestDelivery(cafe.ctx, destination.id);
+    const before = receiver.requests.length;
+
+    await runOnce();
+
+    const settled = await migratorPrisma().webhookDelivery.findFirstOrThrow({ where: { id: deliveryId } });
+    expect(settled.lastErrorClass).toBe("CIPHERTEXT_INVALID");
+    expect(settled.lastOutcome).toBe("PERMANENT");
+    expect(settled.status).toBe("REFUSED");
+    expect(settled.attemptCount).toBe(1);
+    expect(settled.nextAttemptAt).toBeNull();
+    expect(receiver.requests.length, "an undecryptable destination was contacted").toBe(before);
+  });
+
+  it("leaves the till, the ledger and B7 alone while the key is gone", async () => {
+    const key = process.env.INTEGRATION_ENCRYPTION_KEY;
+    delete process.env.INTEGRATION_ENCRYPTION_KEY;
+    try {
+      const enroll = await import("@/app/api/enroll/route");
+      expect((await enroll.GET()).status).toBe(410);
+      expect((await enroll.POST()).status).toBe(410);
+    } finally {
+      process.env.INTEGRATION_ENCRYPTION_KEY = key;
+    }
   });
 });
 
@@ -429,3 +539,253 @@ describe("a delivery never mutates the event it describes", () => {
     expect(await prisma.webhookDeliveryAttempt.count({ where: { businessId: fx.businessId } })).toBe(1);
   });
 });
+
+describe("who may be dispatched to, and when", () => {
+  /*
+   * One table, agreed by the worker, the service, the screen and the trigger:
+   *
+   *   REVOKED   nothing, ever
+   *   DISABLED  a synthetic test the owner asked for, and nothing else
+   *   ENABLED   everything
+   *
+   * The disabled-test case is the point of a test: checking an address BEFORE turning it on. The
+   * previous version refused it, which quietly broke the button the screen offers.
+   */
+  beforeEach(async () => {
+    await resetDatabase();
+    receiver.reset();
+  });
+
+  it("dispatches a synthetic test to a DISABLED destination", async () => {
+    const { fx, destinationId } = await cafeWithDestination("Disabled test caf\u00e9");
+    await setDestinationState(fx.ctx, destinationId, "DISABLED");
+    const { deliveryId } = await queueTestDelivery(fx.ctx, destinationId);
+    const before = receiver.requests.length;
+
+    await runOnce();
+
+    const row = await migratorPrisma().webhookDelivery.findFirstOrThrow({ where: { id: deliveryId } });
+    expect(row.status).toBe("DELIVERED");
+    expect(receiver.requests.length).toBe(before + 1);
+    // And it carried the synthetic envelope, not a real event.
+    expect(JSON.parse(receiver.requests.at(-1)!.body).eventType).toBe("TEST");
+  });
+
+  it("refuses a real event queued for a destination that was disabled before dispatch", async () => {
+    const { fx, destinationId } = await cafeWithDestination("Cutover caf\u00e9");
+    const eventId = await realEventFor(fx);
+    const deliveryId = (
+      await prisma.webhookDelivery.create({
+        data: {
+          businessId: fx.businessId,
+          destinationId,
+          integrationEventId: eventId,
+          nextAttemptAt: new Date(),
+        },
+        select: { id: true },
+      })
+    ).id;
+
+    // The owner switches it off between queueing and dispatch.
+    await setDestinationState(fx.ctx, destinationId, "DISABLED");
+    const before = receiver.requests.length;
+
+    await runOnce();
+
+    const row = await migratorPrisma().webhookDelivery.findFirstOrThrow({ where: { id: deliveryId } });
+    expect(row.lastErrorClass).toBe("DESTINATION_NOT_ELIGIBLE");
+    expect(row.status).toBe("REFUSED");
+    expect(receiver.requests.length, "a disabled destination received a real event").toBe(before);
+  });
+
+  it("refuses a test to a REVOKED destination", async () => {
+    const { fx, destinationId } = await cafeWithDestination("Revoked caf\u00e9");
+    const { deliveryId } = await queueTestDelivery(fx.ctx, destinationId);
+    await setDestinationState(fx.ctx, destinationId, "REVOKED");
+    const before = receiver.requests.length;
+
+    await runOnce();
+
+    const row = await migratorPrisma().webhookDelivery.findFirstOrThrow({ where: { id: deliveryId } });
+    expect(row.lastErrorClass).toBe("DESTINATION_NOT_ELIGIBLE");
+    expect(row.status).toBe("REFUSED");
+    expect(receiver.requests.length).toBe(before);
+  });
+});
+
+describe("two passes cannot dispatch the same delivery", () => {
+  beforeEach(async () => {
+    await resetDatabase();
+    receiver.reset();
+  });
+
+  it("sends exactly one request when two passes run at the same time", async () => {
+    /*
+     * The gap this closes. The previous design read due rows with `findMany`, sent them, and only
+     * then wrote the attempt — so two overlapping passes both read the same row and both sent.
+     *
+     * The claim is now one atomic `UPDATE ... FOR UPDATE SKIP LOCKED ... RETURNING`, so the second
+     * pass steps over a row the first is taking rather than duplicating it.
+     */
+    const { fx, destinationId } = await cafeWithDestination("Race caf\u00e9");
+    const { deliveryId } = await queueTestDelivery(fx.ctx, destinationId);
+    const before = receiver.requests.length;
+
+    const [a, b] = await Promise.all([runOnce(), runOnce()]);
+
+    expect(a.claimed + b.claimed, "both passes claimed the same row").toBe(1);
+    expect(receiver.requests.length - before, "the receiver got it twice").toBe(1);
+
+    const row = await migratorPrisma().webhookDelivery.findFirstOrThrow({ where: { id: deliveryId } });
+    expect(row.attemptCount).toBe(1);
+    expect(row.status).toBe("DELIVERED");
+
+    // Exactly one attempt record, and no lease left behind.
+    const attempts = await migratorPrisma().webhookDeliveryAttempt.findMany({ where: { deliveryId } });
+    expect(attempts).toHaveLength(1);
+    expect(row.claimToken).toBeNull();
+    expect(row.leaseExpiresAt).toBeNull();
+  });
+
+  it("splits a batch between two passes rather than duplicating it", async () => {
+    const { fx, destinationId } = await cafeWithDestination("Batch caf\u00e9");
+    for (let i = 0; i < 4; i += 1) await queueTestDelivery(fx.ctx, destinationId);
+    const before = receiver.requests.length;
+
+    const [a, b] = await Promise.all([runOnce(), runOnce()]);
+
+    expect(a.claimed + b.claimed).toBe(4);
+    expect(receiver.requests.length - before).toBe(4);
+    const rows = await migratorPrisma().webhookDelivery.findMany({ where: { businessId: fx.businessId } });
+    expect(rows.every((r) => r.attemptCount === 1)).toBe(true);
+    expect(await migratorPrisma().webhookDeliveryAttempt.count({ where: { businessId: fx.businessId } })).toBe(4);
+  });
+
+  it("does not pick up a row somebody else is holding", async () => {
+    const { fx, destinationId } = await cafeWithDestination("Held caf\u00e9");
+    const { deliveryId } = await queueTestDelivery(fx.ctx, destinationId);
+
+    // A live lease, as a crashed worker would have left behind moments ago.
+    const now = new Date();
+    await migratorPrisma().webhookDelivery.update({
+      where: { id: deliveryId },
+      data: {
+        claimedAt: now,
+        leaseExpiresAt: new Date(now.getTime() + LEASE_SECONDS * 1000),
+        claimToken: randomUUID(),
+      },
+    });
+
+    const summary = await runOnce(now);
+    expect(summary.claimed).toBe(0);
+    expect(await migratorPrisma().webhookDeliveryAttempt.count({ where: { deliveryId } })).toBe(0);
+  });
+
+  it("takes a row again once its lease expires, so a crash strands nothing", async () => {
+    /*
+     * Crash recovery. A worker that dies holding a claim leaves the row exactly as it was; the lease
+     * is what makes it work again rather than waiting for somebody to notice.
+     */
+    const { fx, destinationId } = await cafeWithDestination("Crashed caf\u00e9");
+    const { deliveryId } = await queueTestDelivery(fx.ctx, destinationId);
+
+    const crashedAt = new Date();
+    await migratorPrisma().webhookDelivery.update({
+      where: { id: deliveryId },
+      data: {
+        claimedAt: crashedAt,
+        leaseExpiresAt: new Date(crashedAt.getTime() + LEASE_SECONDS * 1000),
+        claimToken: randomUUID(),
+      },
+    });
+
+    // Before the lease expires: nothing.
+    expect((await runOnce(new Date(crashedAt.getTime() + 1000))).claimed).toBe(0);
+
+    // After it: the row is work again.
+    const later = new Date(crashedAt.getTime() + (LEASE_SECONDS + 5) * 1000);
+    const summary = await runOnce(later);
+    expect(summary.claimed).toBe(1);
+
+    const row = await migratorPrisma().webhookDelivery.findFirstOrThrow({ where: { id: deliveryId } });
+    expect(row.status).toBe("DELIVERED");
+    expect(row.attemptCount).toBe(1);
+    expect(row.claimToken).toBeNull();
+  });
+
+  it("writes nothing when the lease was lost mid-flight", async () => {
+    /*
+     * A worker slow enough to lose its lease must not trample whoever took the row next. Every write
+     * carries the claim token, so a stale one affects zero rows and writes no attempt.
+     */
+    const { fx, destinationId } = await cafeWithDestination("Slow caf\u00e9");
+    const { deliveryId } = await queueTestDelivery(fx.ctx, destinationId);
+
+    await runDueDeliveries({
+      lookup: localResolver(),
+      addressPolicy: allowReceiver,
+      ca: receiver.ca,
+      // Between the claim and the write, somebody else re-claims the row.
+      send: async () => {
+        await migratorPrisma().webhookDelivery.update({
+          where: { id: deliveryId },
+          data: { claimToken: randomUUID() },
+        });
+        return { outcome: "DELIVERED" as const, errorClass: "NONE" as const, httpStatus: 200 };
+      },
+    });
+
+    const row = await migratorPrisma().webhookDelivery.findFirstOrThrow({ where: { id: deliveryId } });
+    expect(row.attemptCount, "a stale claim wrote an attempt").toBe(0);
+    expect(row.status).toBe("PENDING");
+    expect(await migratorPrisma().webhookDeliveryAttempt.count({ where: { deliveryId } })).toBe(0);
+  });
+});
+
+/**
+ * A real `IntegrationEvent` for this caf\u00e9, written the way Prompt 1's trigger requires.
+ *
+ * The event's `occurredAt` must equal the redemption's `recordedAt`, which is true only inside one
+ * transaction \u2014 so the redemption and the event are created together, as the service does it.
+ */
+async function realEventFor(fx: StampCafeFixture): Promise<string> {
+  const customer = await enrolCustomer(fx, { phone: uniqueSyrianPhone(), firstName: "\u0644\u064a\u0644\u0649" });
+  const salt = newCodeSalt();
+  const promotion = await prisma.promotion.create({
+    data: {
+      businessId: fx.businessId,
+      name: `Offer ${Math.random().toString(36).slice(2, 8)}`,
+      normalizedName: Math.random().toString(36).slice(2, 8),
+      benefitDescription: "A free espresso",
+      codeDigest: codeDigest(salt, fx.businessId, "AUTUMN10"),
+      codeSalt: salt,
+    },
+    select: { id: true },
+  });
+  await prisma.promotion.update({ where: { id: promotion.id }, data: { state: "ACTIVE" } });
+
+  return prisma.$transaction(async (tx) => {
+    const redemption = await tx.promotionRedemption.create({
+      data: {
+        businessId: fx.businessId,
+        promotionId: promotion.id,
+        entry: "REDEEMED",
+        customerCardId: customer.customerCardId,
+        customerBusinessProfileId: customer.customerBusinessProfileId,
+        method: "COUNTER_TYPED_CODE",
+      },
+      select: { id: true },
+    });
+    const event = await tx.integrationEvent.create({
+      data: {
+        businessId: fx.businessId,
+        envelopeVersion: 1,
+        eventType: "PROMOTION_REDEMPTION_RECORDED",
+        entityType: "PROMOTION_REDEMPTION",
+        entityId: redemption.id,
+      },
+      select: { id: true },
+    });
+    return event.id;
+  });
+}

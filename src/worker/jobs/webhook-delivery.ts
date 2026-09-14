@@ -24,7 +24,8 @@ export const WEBHOOK_DELIVERY_QUEUE = "integrations.webhook.deliver";
 export const WEBHOOK_DELIVERY_CRON = "* * * * *";
 
 export interface WebhookDeliveryResult {
-  attempted: number;
+  /** How many due rows this pass CLAIMED. Renamed with the lease: a claim is what is countable. */
+  claimed: number;
   delivered: number;
   retrying: number;
   refused: number;

@@ -190,6 +190,60 @@ test.describe("the owner sets one up", () => {
   });
 });
 
+test.describe("a disabled destination can be tested, and receives nothing else", () => {
+  test("offers the test button while disabled, and says so", async ({ page }) => {
+    /*
+     * The point of a test is checking an address BEFORE turning it on, so the button is offered on
+     * a disabled destination — the envelope it sends carries no customer data. The screen, the
+     * service, the worker and the database trigger all agree on that, and this is the screen's half.
+     */
+    await page.setViewportSize(DESKTOP);
+    const cafe = await createStampCafe({ name: "Disabled test caf\u00e9" });
+    await signIn(page, await emailOf(cafe.userId));
+    await page.goto("/en/business/integrations");
+
+    await addDestination(page, "Ops");
+    await expect(page.getByTestId("webhook-secret")).toBeVisible({ timeout: 30_000 });
+    await page.getByTestId("webhook-secret-done").click();
+
+    const [row] = await scoped(cafe.businessId).destinations();
+    expect(row.state).toBe("DISABLED");
+
+    // Both statements on screen at once: nothing is sent to it, and you may still test it.
+    await expect(page.getByTestId(`webhook-disabled-${row.id}`)).toContainText(/Nothing is sent/i);
+    await expect(page.getByTestId(`webhook-test-${row.id}`)).toBeVisible();
+
+    await page.getByTestId(`webhook-test-${row.id}`).click();
+    await expect(page.getByTestId("webhooks-message")).toContainText(/no customer data/i, { timeout: 30_000 });
+
+    const deliveries = await scoped(cafe.businessId).deliveries();
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0].isTest).toBe(true);
+    await shot(page, "desktop-en-webhooks-disabled-test");
+  });
+
+  test("offers nothing at all once revoked", async ({ page }) => {
+    await page.setViewportSize(DESKTOP);
+    const cafe = await createStampCafe({ name: "Revoked nothing caf\u00e9" });
+    await signIn(page, await emailOf(cafe.userId));
+    await page.goto("/en/business/integrations");
+
+    await addDestination(page, "Ops");
+    await expect(page.getByTestId("webhook-secret")).toBeVisible({ timeout: 30_000 });
+    await page.getByTestId("webhook-secret-done").click();
+    const [row] = await scoped(cafe.businessId).destinations();
+
+    await page.getByTestId(`webhook-revoke-${row.id}`).click();
+    await page.getByTestId("webhook-confirm-yes").click();
+    await expect(page.getByTestId(`webhook-state-${row.id}`)).toHaveText("Revoked", { timeout: 30_000 });
+
+    // Neither real nor test: there is no control left to press.
+    await expect(page.getByTestId(`webhook-test-${row.id}`)).toHaveCount(0);
+    await expect(page.getByTestId(`webhook-enable-${row.id}`)).toHaveCount(0);
+    await expect(page.getByTestId(`webhook-rotate-${row.id}`)).toHaveCount(0);
+  });
+});
+
 test.describe("who may see it", () => {
   test("a manager sees the event history and no webhook section", async ({ page }) => {
     const cafe = await createStampCafe({ name: "Manager café" });

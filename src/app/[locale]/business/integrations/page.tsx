@@ -73,6 +73,7 @@ export default async function IntegrationsPage({ params }: { params: Promise<{ l
         pending: row.pending,
         delivered: row.delivered,
         failed: row.failed,
+        lastErrorClass: row.lastErrorClass,
       }))
     : [];
 
