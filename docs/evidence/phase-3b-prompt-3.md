@@ -444,3 +444,80 @@ Migration 16 was amended, so its checksum changed. The **disposable test databas
 scratch, which is the only place the old checksum existed. **Staging is untouched and was never
 contacted**: migration 16 has never been applied there, migration 15 remains exactly as deployed,
 and nothing in this correction reaches a running environment.
+
+---
+
+## 14. Release gate — the audit of the whole Phase 3B release
+
+Full matrix: **`docs/PHASE-3B-RELEASE-GATE.md`**. Audited `338023e`, against the code, the tests,
+the database rules, the Compose topology and the docs rather than against the previous prompts'
+claims about them.
+
+**Three findings, all fixed and red-proved.**
+
+### 14.1 HIGH — one tenant could set every other tenant's delivery latency
+
+`queueTestDelivery` had no bound; a probe queued fifty and every one was accepted. On its own a row
+count — but `claimDue` takes ten rows a minute **across every business**, ordered by when they
+became due, and a test delivery is created due **immediately**. One owner's loop therefore put an
+unbounded number of their own rows at the front of a queue every tenant shares.
+
+Stated precisely: nothing was exposed, no other tenant's delivery was marked failed, and a delivery
+that is never claimed consumes no attempt. What the caller gained was **control over how long every
+other business's webhooks wait** — without limit, and with no access beyond their own owner session.
+
+Closed in both layers. The service refuses a second test while one is waiting
+(`409 WEBHOOK_TEST_PENDING`, both locales). **Migration 17** adds the same rule to
+`walaaplus_webhook_delivery_guard`, so it also holds against a direct writer and against two
+concurrent callers that both pass the service's `count`. Outstanding test deliveries are now bounded
+by the number of destinations, itself bounded at five.
+
+**Red-proved in both directions**, which is what makes "defence in depth" a fact rather than a
+phrase: removing the database rule turned 3 tests red while the service-level ones stayed green;
+removing the service check turned a different 3 red while the database ones stayed green.
+
+### 14.2 LOW — the batch-size rationale computed from a constant that no longer exists
+
+`BATCH_SIZE`'s comment said "ten requests at the transport's five-second timeout is under a minute".
+There is no transport module since Prompt 3, and the worker's per-delivery ceiling is
+`GATEWAY_TIMEOUT_MS` = 15 s — so the worst case is about **150 s**, not under a minute. The
+conclusion (inside the 300 s lease) still held, so nothing misbehaved; but anyone tuning `BATCH_SIZE`
+or `LEASE_SECONDS` would have computed from a wrong number. Corrected, with the consequence stated:
+a full slow batch outlasts the one-minute schedule, which is safe by construction — `singletonKey`,
+`SKIP LOCKED`, and the claim token on every write.
+
+### 14.3 LOW — the stored job result was under-declared
+
+`WebhookDeliveryResult` omitted `skipped`, which the summary does carry into the result pg-boss keeps
+in a table. A count, so nothing leaked; declared, because the type is the description of what is
+kept.
+
+### 14.4 Two claims that were already true, and are now asserted
+
+Both were verified by probe during the audit and neither had a permanent test:
+
+- **the runtime role cannot touch `_prisma_migrations`** — SELECT, DELETE and TRUNCATE all refused
+  with `permission denied`, DROP with `must be owner`. `db-roles.mjs` prints that claim on every
+  deployment and nothing was checking it;
+- **a database refusal does not echo the ciphertext or the plaintext URL.** Prisma's message carries
+  the call-site source and our own trigger sentence, not the row. That is a property of Prisma's
+  error formatting, so an upgrade could change it.
+
+### 14.5 Migration 17, and why it is a function replacement
+
+A partial unique index would have expressed 14.1's rule more tersely and was rejected deliberately:
+**an index is validated against rows that already exist.** Migration 16 was being deployed to staging
+as this was written, and if anyone had queued two tests for one destination first, the index would
+have failed to build and stopped the deployment on data nobody created wrongly. A trigger rule
+constrains only what is written from now on — it cannot fail on existing data, takes no table lock
+and rewrites nothing. Any existing duplicate pending tests settle normally; no new pair can be made.
+
+Additive: one `CREATE OR REPLACE FUNCTION`, no table touched, migrations 15 and 16 not amended. The
+guard's body was sliced out of migration 16 by script rather than retyped — a diff shows 26 added
+lines and zero removed.
+
+### 14.6 What was not tested
+
+No staging, no real merchant endpoint, no provider account, no device, no POS or wallet, and no
+external network path. No outbound request left this machine. Freebuff supplies staging evidence
+separately.

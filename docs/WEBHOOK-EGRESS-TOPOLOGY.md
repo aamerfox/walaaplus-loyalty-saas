@@ -149,7 +149,8 @@ Those codes describe *the caller's request to the gateway*; none of them describ
 | Outbound request timeout | 5 s, connect + response | Unchanged from Prompt 2. A slower receiver is a retry |
 | Response bytes read | 2048, then the socket is destroyed | Nothing is kept anyway |
 | Concurrent dispatches in flight | 4 | A one-vCPU host is shared. Over the limit → `BUSY`, retryable, nothing sent |
-| Requests the worker sends per run | ≤ `BATCH_SIZE` (10), sequentially | Unchanged: the runner was already sequential |
+| Requests the worker sends per run | ≤ `BATCH_SIZE` (10), sequentially | Unchanged: the runner was already sequential. **Global**, not per tenant — see R8 |
+| Test deliveries waiting per destination | **1** | Migration 17. An unbounded test queue was one tenant's lever on every other tenant's latency |
 
 ---
 
@@ -300,6 +301,17 @@ not need it.
 - **R5 — in both staging files the worker still has no route out, and that is now correct.** It
   reaches the gateway over `webhook-control`. If `webhook-egress` is not running, delivery is
   `GATEWAY_UNAVAILABLE` and retries; it does not fail permanently and does not lose the queue.
+- **R8 — delivery throughput is a GLOBAL ceiling, not a per-tenant one.** `claimDue` takes
+  `BATCH_SIZE` (10) rows per minute across every business on the deployment — roughly 600 an hour —
+  ordered by `nextAttemptAt`, which is first-come rather than fair between tenants. A busy business
+  therefore delays a quiet one's webhooks, within the limits of how much business actually happens.
+  The release gate closed the one way a tenant could do this *deliberately* (an unbounded test
+  queue — see `docs/PHASE-3B-RELEASE-GATE.md` §2, F1); what remains is ordinary contention. If a
+  deployment outgrows it, the honest fix is a larger batch or per-tenant fairness in `claimDue`, not
+  a longer lease.
+- **R9 — nothing prunes deliveries or attempts.** A delivery row lives for every (event ×
+  enabled destination) pair and keeps up to five attempt rows. Bounded in practice by business
+  activity and by the five-attempt cap; there is no retention job.
 
 ---
 

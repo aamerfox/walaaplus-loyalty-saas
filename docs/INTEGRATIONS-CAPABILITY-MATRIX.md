@@ -422,6 +422,9 @@ answers question 1 and 2 above for this one purpose and for no other.
 | Absent or malformed | webhook configuration and delivery fail closed; **every other workflow is unaffected** |
 | Rotation | writes a new key version; version *n* rows stay readable. The re-encryption tool does not exist yet (**D29**) |
 
+**The Phase 3B release-gate audit of this whole feature is `docs/PHASE-3B-RELEASE-GATE.md`** — the
+verified capability and security matrix, the three findings it produced, and the residual risks.
+
 **It must never be committed, logged, rendered, printed in an error, or embedded in a test fixture.**
 `src/server/env.ts` prints variable NAMES only, and the crypto module's errors name the variable and
 never the value. No value for it exists anywhere in this repository, and none was generated for any
