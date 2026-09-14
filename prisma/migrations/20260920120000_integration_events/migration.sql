@@ -31,12 +31,17 @@
 -- mis-delivered. The trigger refuses any version this migration does not know about, so a row can
 -- never claim a version nothing produces.
 --
--- ## No backfill
+-- ## No backfill, enforced rather than intended
 --
 -- Every redemption and void recorded before this migration has no event, on purpose. A backfilled
--- row would assert that a decision to publish was taken at a moment when it was not — and
--- `occurredAt` is assigned by the trigger from the server clock precisely so nobody can date one
--- into the past. See `docs/INTEGRATIONS-CAPABILITY-MATRIX.md` §7.
+-- row would assert that a decision to publish was taken at a moment when it was not.
+--
+-- `occurredAt` is assigned by the trigger from the server clock, so nobody can date one into the
+-- past. That alone is not enough: a writer could still manufacture an event TODAY for a redemption
+-- from last month, dated today. So the trigger also requires the event's `occurredAt` to equal the
+-- redemption's `recordedAt` — and because both are `now()`, which is the transaction's start time,
+-- that is true exactly when the two rows were written in the same transaction. See the note beside
+-- the rule, and `docs/INTEGRATIONS-CAPABILITY-MATRIX.md` §7.
 
 -- ── Enums ────────────────────────────────────────────────────────────────────
 
@@ -167,6 +172,37 @@ BEGIN
     IF redemption."entry" IS DISTINCT FROM expected_entry THEN
       RAISE EXCEPTION 'IntegrationEvent: % names a % row', NEW."eventType", redemption."entry"
         USING ERRCODE = 'check_violation';
+    END IF;
+
+    /*
+     * WRITTEN WITH THE ACTION, proved rather than trusted.
+     *
+     * Everything above establishes that the redemption exists, is this business's, and is the kind
+     * the event type claims. None of it establishes WHEN the event was written — so a direct writer
+     * could pick any old redemption that has no event and manufacture one for it, which is exactly
+     * the backfill this phase refuses to do. The service is careful; the next writer might be a
+     * script somebody runs on a Friday.
+     *
+     * Both timestamps are assigned by triggers from `now()`, which in PostgreSQL is the
+     * TRANSACTION's start time and is identical for every statement inside one. So:
+     *
+     *   same transaction  → the event's occurredAt IS the redemption's recordedAt, and this passes;
+     *   later transaction → a different now(), and this refuses.
+     *
+     * Neither side can be chosen by the caller: `PromotionRedemption.recordedAt` is overwritten by
+     * `walaaplus_validate_redemption`, and `occurredAt` is overwritten at the top of this function.
+     * A writer cannot imitate a same-transaction insert by supplying a matching time, because the
+     * value it supplies is discarded before it is read.
+     *
+     * The residual window is one millisecond: the columns are TIMESTAMP(3), so a second transaction
+     * beginning within the same millisecond as the first would compare equal. That closes the
+     * backfill this rule exists for — an OLD redemption can never be matched — and it is written
+     * down rather than glossed.
+     */
+    IF NEW."occurredAt" IS DISTINCT FROM redemption."recordedAt" THEN
+      RAISE EXCEPTION 'IntegrationEvent: an event must be written in the same transaction as the thing it describes'
+        USING ERRCODE = 'check_violation',
+              HINT = 'Call emitIntegrationEvent inside the transaction that performed the action. Events are never backfilled.';
     END IF;
 
     RETURN NEW;
