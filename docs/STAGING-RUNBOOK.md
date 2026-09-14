@@ -78,7 +78,12 @@ openssl rand -base64 48   # NEXTAUTH_SECRET             (never goes in a URL; ba
 openssl rand -hex 32      # POSTGRES_PASSWORD           (the migrator/owner role)
 openssl rand -hex 32      # APP_DB_PASSWORD             (the restricted runtime role)
 openssl rand -hex 32      # INTEGRATION_ENCRYPTION_KEY  (optional; webhooks only)
+openssl rand -hex 32      # WEBHOOK_GATEWAY_SECRET      (optional; webhooks only)
 ```
+
+**The last two must be two different values.** One protects destination URLs and signing secrets at
+rest; the other authenticates the worker to the egress gateway on an internal hop. Pasting the same
+value into both makes one compromise open two doors.
 
 The fourth is optional in a precise sense. Leave it blank and the stack starts and runs normally —
 enrolment, stamps, points, redemptions, the scanner, the till. What fails, closed, is webhook
@@ -135,6 +140,8 @@ file. Ownership of these values is owner decision B5.
 | `APP_DB_USER`, `APP_DB_PASSWORD` | `.env.staging` | Restricted runtime role. Defaults to the name `walaaplus_app` |
 | `NEXTAUTH_SECRET` | `.env.staging` | Minimum 32 characters |
 | `INTEGRATION_ENCRYPTION_KEY` | `.env.staging` | **Optional.** 32 bytes, hex or base64. Reaches `web` **and** `worker`, both, and no other service. Blank is a supported state: only webhooks fail, closed |
+| `WEBHOOK_GATEWAY_SECRET` | `.env.staging` | **Optional**, and a **different value** from the one above. 32 bytes, hex or base64. Reaches `worker` **and** `webhook-egress`, both, and no other service — not `web`. Blank is a supported state: delivery retries and sends nothing |
+| `WEBHOOK_GATEWAY_URL`, `WEBHOOK_EGRESS_PORT` | **the compose file** | Not secrets. A service name, and a port inside a container. Do not put them in the env file |
 | `DATABASE_URL`, `MIGRATE_DATABASE_URL`, `NEXTAUTH_URL`, `TRUST_PROXY_HEADERS`, `NODE_ENV`, `WORKER_HEALTH_PORT` | **`docker-compose.staging.yml`** | Built from the above. Do not also put them in the env file |
 
 Every one of them is validated at startup by `src/server/env.ts`. A missing or malformed value
@@ -154,10 +161,36 @@ printing anything:
 ```bash
 docker compose -f docker-compose.staging-cohost.yml --env-file .env.staging config \
   | grep -c INTEGRATION_ENCRYPTION_KEY    # expect 2: web and worker
+docker compose -f docker-compose.staging-cohost.yml --env-file .env.staging config \
+  | grep -c WEBHOOK_GATEWAY_SECRET        # expect 2: worker and webhook-egress
 ```
 
 Never run `docker compose config` without that pipe on a terminal someone can see or a log someone
 keeps — it resolves and prints every value in the file.
+
+### The webhook egress gateway
+
+Webhook delivery does not leave the `worker`. It cannot: that container is on internal networks
+only, by design, because it holds the encryption key and every decrypted destination URL and signing
+secret. The request is made by a fifth service, **`webhook-egress`**, which is the only thing in the
+stack attached to a routable network and which holds no database credential, no encryption key and
+no signing secret.
+
+What that means for a deployment:
+
+- it comes up with the rest of the stack; there is nothing extra to run;
+- it **publishes no host port**, so nothing on the host — the system Caddy, OpenClaw/OpenBot, ROAD8,
+  a neighbour's container — can address it. Only `worker` can, over `webhook-control`;
+- it has **no healthcheck**, on purpose: the only thing it answers is the dispatch contract, and a
+  health route would be a second contract for a prober's benefit. Check it with
+  `docker compose -f … ps webhook-egress` and read its log line, which says `listening` and whether
+  a secret is configured — by name, never a value;
+- if it is down, delivery records `GATEWAY_UNAVAILABLE`, **retries, and loses nothing**;
+- the host must allow **outbound 443 from the Docker bridge**, which it already does for image
+  pulls. There is no inbound rule, no new port, no DNS record and no certificate to arrange.
+
+The full topology, the dispatch contract and the residual risks are in
+`docs/WEBHOOK-EGRESS-TOPOLOGY.md`. Read it before turning webhooks on.
 
 ---
 

@@ -451,13 +451,19 @@ path, fails closed. `tests/unit/compose-exposure.test.ts` fails the gate if eith
 service stops receiving it, if any other service starts receiving it, if the form becomes required,
 or if a literal value ever appears in place of the interpolation.
 
-**One thing the key does not do: give the worker a route.** In both staging files the `worker`
-service is attached to the `backend` network alone, and that network is `internal: true` — it has no
-gateway, so there is no path to any external host from that container in either direction. The key
-lets the worker *decrypt* a destination; it does not let it *reach* one, and outbound delivery from
-those files' worker will fail at the network layer however correct the key is. That is left exactly
-as it is: attaching the worker to a routed network is an exposure decision for the owner, taken
-deliberately and reviewed on its own terms, not a side effect of wiring a secret.
+**One thing the key does not do: give the worker a route** — and it never will. The `worker`
+service is attached to internal networks only, in every compose variant: `backend` for the database
+and, since Prompt 3, `webhook-control` for the egress gateway. Neither has a gateway of its own, so
+there is no path to any external host from that container in either direction. The key lets the
+worker *decrypt* a destination; the request itself is made by a separate service that holds no key
+at all.
+
+That separation is deliberate and is the whole of Prompt 3. The process that holds
+`INTEGRATION_ENCRYPTION_KEY`, `DATABASE_URL`, every decrypted destination URL and every decrypted
+signing secret has **no route to the Internet**; the process with the route holds **none of those
+things**. The topology, the dispatch contract, the second SSRF enforcement point, the new
+`WEBHOOK_GATEWAY_SECRET` and the residual risks are written out in
+**`docs/WEBHOOK-EGRESS-TOPOLOGY.md`**, which is the document to read before deploying webhooks.
 
 ---
 
