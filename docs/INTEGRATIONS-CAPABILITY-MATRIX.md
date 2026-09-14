@@ -222,6 +222,21 @@ a retry then delivers a second copy of something already processed. `X-Walaaplus
 across every attempt and across every destination, and a receiver that keys on it is correct. One
 that does not is the receiver's own problem, stated in advance rather than discovered.
 
+**The claim and the lease.** A delivery is taken atomically — one
+`UPDATE … WHERE id IN (SELECT … FOR UPDATE SKIP LOCKED) RETURNING` — so two workers, or two
+overlapping passes of one worker, cannot both dispatch the same row. The claim carries an expiry, so
+a worker that **crashes** holding one does not strand it: once the lease passes, the row is due
+again and another pass takes it. Every write afterwards is conditional on the claim token, so a
+worker slow enough to lose its lease cannot overwrite whoever took the row next.
+
+That expiry is also exactly where at-least-once comes from, and it is worth saying out loud: a
+process that dies **after** the request reached the receiver but **before** the outcome was written
+will retry. A socket and a database transaction do not commit together, and nothing in a lease can
+make them. The receiver de-duplicates; that is the contract.
+
+The lease itself holds a business id, two timestamps and a uuid. **No URL, no body, no secret, no
+response and no error text** — a claim is a claim on a row, not a record of what was attempted.
+
 ### Retries
 
 Bounded exponential backoff, and **only for failures that could plausibly succeed later**:
@@ -234,7 +249,21 @@ Bounded exponential backoff, and **only for failures that could plausibly succee
 | a 3xx redirect | no — a misconfiguration, and following it is the bypass |
 | TLS failure | no — needs the owner to fix a certificate, not time |
 | **unsafe URL or unsafe resolved address** | **never** — retrying an SSRF attempt is attempting it again |
-| the encryption key missing or malformed | no — fail closed, and a retry cannot fix a deployment |
+| the destination disabled or revoked before dispatch | no — the owner's decision is not a transient condition |
+| **the environment key missing or malformed** | **yes**, bounded — see below |
+| a stored value that will not decrypt under a present, well-formed key | no — waiting cannot make a row decrypt |
+
+**Two failures that look alike and are not.** A missing or malformed `INTEGRATION_ENCRYPTION_KEY` is
+a deployment condition an operator corrects in minutes. Refusing every queued delivery permanently
+because a variable was briefly unset would turn a five-minute outage into lost webhooks — so it is
+**retryable**, bounded by the same cap as anything else, and settles `FAILED` if nobody fixes it.
+
+A ciphertext that will not decrypt under a key that *is* present is tampered, or was written under a
+key that no longer exists. No amount of waiting changes that, and retrying would hide a corrupted
+destination behind five quiet failures. **Permanent.**
+
+**Neither sends anything**, and the database enforces both: an attempt row recording an unavailable
+key as permanent is refused, and one recording a decryption failure as retryable is refused.
 
 A timeout or a network error is **never** recorded as delivered. Attempts are capped; the delivery
 then rests at `FAILED` and is visible to the owner.
@@ -245,12 +274,43 @@ A destination **begins disabled** and receives nothing until the owner explicitl
 that, the owner may send **one fixed synthetic test envelope** — no customer, no card, no real
 event — through the same signing, the same SSRF checks and the same transport limits.
 
+One table, and the worker, the service, the screen and the database trigger all agree on it:
+
+| destination state | a real `IntegrationEvent` | an owner-triggered synthetic test |
+|---|---|---|
+| `DISABLED` | **never** | **yes** — that is what a test is for: checking an address before turning it on |
+| `ENABLED` | yes | yes |
+| `REVOKED` | **never** | **never** |
+
+The disabled-test row is the one worth being explicit about. It is safe because the envelope
+describes nothing real — a constant entity id, `eventType: "TEST"`, no customer and no card — and it
+is necessary because the alternative is an owner enabling a live destination in order to find out
+whether the address works.
+
 A test delivery is never triggered automatically, never by a schedule, and never by another user's
 action. It is audited by row id, without the URL and without the secret.
 
 **What verification deliberately is not**: there is no challenge-response handshake in which the
 receiver echoes a token. That is a real design worth having and it needs the receiver to implement
 something; today the owner reads a status and decides.
+
+### The delivery-state cutover, and the boundary it cannot cross
+
+The destination's state is re-read **under the claim, immediately before dispatch**. A destination
+disabled or revoked while a delivery sat in the queue sends nothing, and the attempt is recorded as
+`DESTINATION_NOT_ELIGIBLE` — permanent, because an owner's decision is not a transient condition.
+
+**What that cannot do is unsend a request already on the wire.** If the owner's disable commits after
+the delivery has handed its body to the socket, the receiver gets it. The window is milliseconds and
+it is unavoidable: a TCP connection and a database transaction do not commit together. Nothing in
+this product promises otherwise, and an owner who needs a guarantee that a specific event never
+arrives has to arrange it at the receiver.
+
+The same is true of **signing-secret rotation**. A request already in flight was signed with the old
+secret and will verify against it; a receiver that switches to the new secret at the moment the owner
+rotates may reject that one request. The owner is told to update the receiver in the same sitting,
+and the honest description is: rotation takes effect for every request that has not yet been signed,
+not for every request that has not yet arrived.
 
 ### Key rotation
 

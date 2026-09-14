@@ -5,8 +5,10 @@
 | | |
 |---|---|
 | Code, migration and tests | `770f324` |
-| Documentation | the commit carrying this file |
-| **Deploy this** | the tip of `rebuild/phase-0-foundation` |
+| Documentation | `9695e17` |
+| Review fixes (migration, code, tests) | `76edaee` — see §13 |
+| Review fixes (documentation) | the commit carrying this file |
+| **Deploy this** | the tip of `rebuild/phase-0-foundation`. **Not `9695e17`** — see §13 |
 | Migration | `20260921120000_webhook_destinations`, the **15th** |
 | `master` | untouched at `b9ee686`, and absent from the `deploy` remote |
 
@@ -124,8 +126,12 @@ returns 202. A source scan asserts `transport.ts` is the only file under `src/se
 client and that nothing under `src/app/` imports it or the runner.
 
 Retries: network/timeout/429/5xx retried, 4xx and 3xx and TLS refused, **unsafe address never
-retried**, missing key never retried. Five attempts, 1 min → 5 → 25 → ~2 h. A timeout or network
-error is **never** recorded as delivered, and the database refuses a row that claims otherwise.
+retried**, and — after §13.3 — a **missing environment key retried** while an **undecryptable
+ciphertext is not**. Five attempts, 1 min → 5 → 25 → ~2 h. A timeout or network error is **never**
+recorded as delivered, and the database refuses a row that claims otherwise.
+
+Deliveries are **claimed under a lease** rather than merely read, so two passes cannot dispatch the
+same row and a crashed worker strands nothing — §13.1.
 
 ---
 
@@ -190,9 +196,9 @@ through `tail`, so the failing test's name was not captured — my mistake.
 
 It did not reproduce in: three subsequent full `vitest run`s (1365 passed each), the gate's own
 integration pass, or three consecutive targeted runs of the three new webhook suites (78 passed
-each). **I cannot name it**, and I am not claiming four clean runs when the first was not. The most
-plausible candidate is a timing-sensitive delivery test — the timeout case waits on a 5-second
-transport timeout — but that is a hypothesis, not a diagnosis.
+each). At the time I could not name it and said so. **It is now diagnosed** — see §13.8: it was machine
+starvation from a concurrently running Docker-building gate, not a product defect, and it reproduced
+and was confirmed in the next round.
 
 ### 9b. The raw-capability scan
 
@@ -296,10 +302,178 @@ template touched — it documents the name, with an empty value.
 
 ---
 
-## 13. Which SHA to deploy
+## 13. Review hardening — three operational gaps
 
-The tip of `rebuild/phase-0-foundation` — the documentation commit carrying this file, which contains
-`770f324`. The final report names the exact hash; a file cannot name the commit it is part of.
+`9695e17` was reviewed and three gaps in delivery were found. All three are fixed. Migration 15 had
+not reached staging, so `20260921120000_webhook_destinations` was **amended**; the count stays at
+**15**, and no earlier migration, `master`, `public/`, Caddy, DNS, TLS, firewall, compose
+configuration or non-webhook behaviour was touched.
+
+### 13.1 The claim was a read, so two passes could both send
+
+`claimDue` used `findMany`, dispatched, and only then wrote the attempt. Two workers — or two
+overlapping passes of one worker, which a slow batch makes likely — could read the same row before
+either wrote, and both would send. The receiver got the webhook twice and the attempt history
+disagreed with itself.
+
+**The lease.** Three columns (`claimedAt`, `leaseExpiresAt`, `claimToken`), taken by one statement:
+
+```sql
+UPDATE "WebhookDelivery" SET "claimedAt" = …, "leaseExpiresAt" = …, "claimToken" = …
+ WHERE "id" IN (SELECT "id" FROM "WebhookDelivery"
+                 WHERE "status" = 'PENDING' AND "nextAttemptAt" <= $now
+                   AND ("leaseExpiresAt" IS NULL OR "leaseExpiresAt" <= $now)
+                 ORDER BY "nextAttemptAt" FOR UPDATE SKIP LOCKED LIMIT $n)
+RETURNING "id"
+```
+
+One statement, so there is no window in which a row is chosen but not claimed. `SKIP LOCKED` means a
+second pass steps over rows the first is taking. The `leaseExpiresAt` predicate is what makes a
+**crash** recoverable: a worker that dies holding a claim leaves the row untouched, and once the
+lease passes it is work again.
+
+Every write afterwards carries `AND "claimToken" = $token`. A worker slow enough to lose its lease
+finds zero rows affected, writes **no attempt**, and does not trample whoever took the row next.
+
+Batch size went from 25 to 10, so the worst case (ten requests at the five-second transport timeout)
+sits well inside the five-minute lease.
+
+**At-least-once is unchanged and unavoidable**, and is documented as such: a process that dies after
+the request reached the receiver but before the outcome was written will retry. A socket and a
+database transaction do not commit together.
+
+The lease holds two timestamps and a uuid, constrained to that shape. **No URL, body, secret,
+response or error text.**
+
+### 13.2 The disabled/test matrix disagreed with itself
+
+The screen offered a test button on a disabled destination, the service queued it, the trigger
+allowed it — and the worker refused every non-`ENABLED` dispatch, so it silently never sent. Worse,
+it refused it as `UNSAFE_ADDRESS`, which made "I switched it off" look like an attempted SSRF in the
+owner's history.
+
+One table now, and four layers agree on it:
+
+| destination state | a real `IntegrationEvent` | an owner-triggered synthetic test |
+|---|---|---|
+| `DISABLED` | **never** | **yes** |
+| `ENABLED` | yes | yes |
+| `REVOKED` | **never** | **never** |
+
+A new error class, `DESTINATION_NOT_ELIGIBLE`, separates an ordinary lifecycle refusal from an
+address that was actually dangerous. Tested three ways: disabled-test succeeds, disabled-real is
+refused and the receiver sees nothing, revoked-test is refused.
+
+### 13.3 A brief key outage discarded everything
+
+A missing `INTEGRATION_ENCRYPTION_KEY` was permanent, so every queued delivery was refused for good
+because a variable was unset for five minutes.
+
+| condition | now |
+|---|---|
+| key absent or malformed | **RETRYABLE**, bounded by the normal cap, settling `FAILED` only if nobody fixes it |
+| ciphertext will not decrypt under a key that IS present | **PERMANENT** — waiting cannot make a row decrypt |
+
+Neither sends anything. **The database enforces both directions**: an attempt recording an
+unavailable key as permanent is refused, and one recording a decryption failure as retryable is
+refused.
+
+Tested: a key removed for one pass then restored delivers on the next; a key never restored exhausts
+to `FAILED` at the cap; a destination whose ciphertext was written under a different key is refused
+permanently on the first attempt and the receiver is never contacted.
+
+*On that last test:* it uses a wrong-key ciphertext rather than editing an existing row, because
+`webhook_destination_guard` freezes the endpoint and refuses the edit — which is itself the
+protection working. `decryptSecret` cannot tell the two apart by design, so it exercises the same
+path.
+
+### 13.4 The cutover, and the boundary it cannot cross
+
+The destination's state is re-read **under the claim, immediately before dispatch**. A destination
+disabled or revoked while a delivery sat in the queue sends nothing.
+
+**What that cannot do is unsend a request already on the wire.** If the owner's disable commits after
+the body has gone to the socket, the receiver gets it. The window is milliseconds and it is
+unavoidable. The same is true of signing-secret rotation: a request already in flight was signed with
+the old secret. Both are written into §7a of the matrix rather than promised away.
+
+### 13.5 The owner's wording
+
+The destination row now carries the most recent attempt's category, rendered in operational words
+with **no cryptographic detail**:
+
+- *"Paused: this server is missing a setting it needs before it can send. An administrator can
+  restore it, and anything waiting will be tried again."*
+- *"This destination's saved settings can no longer be read. Create a new destination and remove
+  this one."*
+
+No algorithm, no key version, no mention of which value failed — and the two states the review asked
+to be distinguishable read as clearly different situations.
+
+### 13.6 Every new rule was watched fail
+
+| protection removed | red of 49 |
+|---|---|
+| the three lease CHECKs | 3 |
+| the attempt-count cap CHECK | 1 |
+| "a new delivery is unclaimed" | 1 |
+| "a settled delivery holds no claim" | 1 |
+| "PENDING at the cap is invalid" | 1 |
+| "a permanent class is never FAILED" | 2 |
+| "the three permanent classes are PERMANENT" | 2 |
+| "an unavailable key is RETRYABLE" | 1 |
+
+Each restored and the suite re-run green.
+
+### 13.7 The quality bar, re-run in full
+
+| Check | Result |
+|---|---|
+| `node scripts/gate.mjs` | **PASS 15/15**, 685.5s |
+| `npx playwright test` — run 1 | **120 passed**, 4.0m |
+| `npx playwright test` — run 2 | **120 passed**, 3.9m |
+| `npx vitest run` | **96 files, 1388 tests passed**, 576.5s — see §13.8 |
+| `npm audit` / `--omit=dev` | 0 vulnerabilities each |
+| `node scripts/db-migrate.mjs status` | **15** migrations, up to date |
+| `prisma migrate diff` | unchanged — the same pre-existing `ConsentRecord` naming |
+| `git diff --check` | clean |
+| `git status --porcelain public/` | **0** |
+| Secret / raw-capability / control-byte scans | clean |
+| Screenshot | `desktop-en-webhooks-disabled-test.png` read |
+
+Webhook suites after the fixes: `webhook-crypto` 17, `webhook-address` 22, `webhook-boundary` 15,
+`webhooks` 23, `webhook-delivery` **29**, `webhook-integrity` **49**, `webhooks-ui` **16**.
+
+### 13.8 The earlier flake, finally identified
+
+§9a of this file recorded an unreproduced single-test failure from the previous round that I could
+not name. **It reproduced this round, and it is now diagnosed.**
+
+A full `vitest run` reported `2 failed | 1386 passed` with two tests in
+`customer-card-page.test.ts` showing durations of **70 and 77 minutes**, against a whole-run duration
+of **9378s** — sixteen times the normal 576s. Those are not logic failures; they are a starved event
+loop. A backgrounded gate run (Docker image builds) was still competing for the machine.
+
+Confirmed: that file passes alone three times in ~15s each, and a full run on an idle machine passes
+**1388 of 1388 in 576s**. The earlier unnamed flake was the same cause.
+
+**This is a harness/environment observation, not a product defect**, and it is recorded here so
+nobody re-discovers it as a mystery. It does mean a full Vitest run and a Docker-building gate should
+not be run concurrently on one machine.
+
+---
+
+## 14. Which SHA to deploy
+
+The tip of `rebuild/phase-0-foundation` — the documentation commit carrying this file, which
+contains `770f324`, `9695e17` and the review-fix commit. The final report names the exact hash; a
+file cannot name the commit it is part of.
+
+**`9695e17` must not be deployed.** Nothing in it corrupts data — every row it writes is correct —
+but it can send a webhook twice under overlapping worker passes, it silently never sends the test a
+disabled destination's own screen offers, and it permanently discards every queued delivery if the
+encryption key is briefly unset. The migration it ships is the artefact hardest to correct once
+applied, and it has not been applied anywhere.
 
 `master` is untouched at `b9ee686`. Staging is Freebuff's after independent review, and nothing in
 this report claims a staging, provider, device, POS, wallet or external-network test was performed.

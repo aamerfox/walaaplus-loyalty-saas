@@ -13,9 +13,10 @@ signed POST to a merchant's own server, and every lock the matrix's §7a says it
 
 The owner types an HTTPS URL. It is validated, encrypted and stored **disabled**. When they enable
 it, every subsequent `IntegrationEvent` also writes a `WebhookDelivery` row **in the same
-transaction**. The worker scans for due rows once a minute, decrypts the URL, re-resolves the
-hostname, connects only to an address validated in that instant, posts the signed envelope, and
-records an outcome. Nothing is sent from a request handler; nothing is retried that should not be.
+transaction**. The worker **claims** due rows atomically under a lease, re-reads the destination's
+state, decrypts the URL, re-resolves the hostname, connects only to an address validated in that
+instant, posts the signed envelope, and records an outcome. Nothing is sent from a request handler;
+nothing is retried that should not be.
 
 ---
 
@@ -128,9 +129,13 @@ If the redemption rolls back, so does the event, and so does the obligation to t
 
 Sending a pg-boss message instead would be a second write that could succeed when the first rolled
 back, or fail when it committed — a distributed-transaction problem nobody needs to have. The cost
-is that the worker looks for work rather than being handed it: a `WHERE status = 'PENDING' AND
-nextAttemptAt <= now()` against a partial index, once a minute. That latency is on the owner's
-screen rather than left to be discovered.
+is that the worker looks for work rather than being handed it, once a minute. That latency is on the
+owner's screen rather than left to be discovered.
+
+**The claim is atomic.** One `UPDATE … WHERE id IN (SELECT … FOR UPDATE SKIP LOCKED) RETURNING`
+stamps a lease of three columns, so two workers cannot both take a row and a crashed one strands
+nothing — §9.1. A batch is ten, so the worst case (ten requests at a five-second timeout) sits well
+inside the five-minute lease.
 
 **A destination enabled after an event exists gets no delivery for it** — the same no-backfill rule
 as Prompt 1, one layer out.
@@ -147,10 +152,13 @@ as Prompt 1, one layer out.
 | 3xx redirect | no — a misconfiguration, and following it is the bypass |
 | TLS failure | no — needs a certificate fixed, not time |
 | **unsafe URL or resolved address** | **never** |
-| encryption key missing or malformed | no — a retry cannot fix a deployment |
+| destination disabled or revoked before dispatch | no — the owner's decision is not transient |
+| **environment key missing or malformed** | **yes**, bounded — an operator fixes it in minutes (§9.3) |
+| a stored value that will not decrypt under a present key | no — waiting cannot make a row decrypt |
 
 Five attempts, backing off 1 min → 5 → 25 → ~2 h. A timeout or network error is **never** recorded as
-delivered, and the database refuses a row that claims otherwise.
+delivered, and the database refuses a row that claims otherwise — as it refuses a permanent class
+recorded as retryable, and an unavailable key recorded as permanent.
 
 ---
 
@@ -171,6 +179,10 @@ Seven triggers across three tables. The ones worth naming:
 - `UNSAFE_ADDRESS` **can never be a FAILED delivery** — it is refused, never retried to exhaustion
 - an attempt's number **must follow its delivery's count**, and its outcome and error class must agree
 - attempts are **append-only**; destinations and deliveries are **never deleted**
+- the **lease** is three columns that move together, ordered, with a uuid-shaped token; a new
+  delivery holds none and a settled one holds none
+- the **attempt cap** is a CHECK as well as a code constant, and a delivery left `PENDING` at the cap
+  is refused — it would be a row the worker picks up forever
 
 ### Two findings from writing the tests
 
@@ -220,7 +232,74 @@ No permission was added or changed: `EDIT_INTEGRATIONS` already existed and is h
 
 ---
 
-## 9. A pre-existing defect found on the way
+## 9. Review hardening — three operational gaps
+
+Found reviewing `9695e17`, before anything was deployed. Migration 15 had not reached staging, so it
+was **amended**; the count stays at 15.
+
+### 9.1 The claim was a read
+
+`claimDue` used `findMany`, sent, and only then wrote the attempt. Two workers — or two overlapping
+passes of one worker, which a slow batch makes likely — could read the same row before either wrote,
+and both would send. The receiver saw the webhook twice and the attempt history disagreed with
+itself.
+
+Now: a lease of three columns (`claimedAt`, `leaseExpiresAt`, `claimToken`), taken by a single
+`UPDATE … WHERE id IN (SELECT … FOR UPDATE SKIP LOCKED) RETURNING`. One statement, so there is no
+window in which a row is chosen but not claimed. The lease expires, so a crashed worker strands
+nothing. Every write afterwards carries `AND "claimToken" = $token`, so a worker that lost its lease
+writes nothing rather than trampling whoever took the row next.
+
+Batch size dropped from 25 to 10 so the worst-case pass (ten requests at a five-second timeout) sits
+comfortably inside the five-minute lease.
+
+**At-least-once is unchanged and unavoidable**: a process that dies after the request reached the
+receiver but before the outcome was written will retry.
+
+### 9.2 The disabled/test matrix disagreed with itself
+
+The screen offered a test button on a disabled destination, the service queued it, the trigger
+allowed it — and the worker refused every non-`ENABLED` dispatch, so it silently never sent. Worse,
+it refused it as `UNSAFE_ADDRESS`, which made "I switched it off" look like an attempted SSRF in the
+owner's history.
+
+Now there is one table (§7a of the matrix) and four layers agree on it. A new error class,
+`DESTINATION_NOT_ELIGIBLE`, separates an ordinary lifecycle refusal from an address that was
+actually dangerous.
+
+### 9.3 A brief key outage discarded everything
+
+A missing `INTEGRATION_ENCRYPTION_KEY` was permanent, so every queued delivery was refused for good
+because a variable was unset for five minutes.
+
+Now: **unavailable key → retryable**, bounded by the normal cap, settling `FAILED` only if nobody
+fixes it. **Undecryptable ciphertext under a present key → permanent**, because waiting cannot make a
+row decrypt. Neither sends anything, and the database enforces both directions — an attempt
+recording an unavailable key as permanent is refused, and one recording a decryption failure as
+retryable is refused.
+
+The owner's screen says which is which in operational words: *"Paused: this server is missing a
+setting it needs before it can send"* versus *"This destination's saved settings can no longer be
+read"*. No algorithm, no key version, no mention of which value failed.
+
+### 9.4 Each new rule was watched fail
+
+| protection removed | red of 49 |
+|---|---|
+| the three lease CHECKs | 3 |
+| the attempt-count cap CHECK | 1 |
+| "a new delivery is unclaimed" | 1 |
+| "a settled delivery holds no claim" | 1 |
+| "PENDING at the cap is invalid" | 1 |
+| "a permanent class is never FAILED" | 2 |
+| "the three permanent classes are PERMANENT" | 2 |
+| "an unavailable key is RETRYABLE" | 1 |
+
+Each restored and the suite re-run green.
+
+---
+
+## 10. A pre-existing defect found on the way
 
 The widened control-character scan found a literal **backspace byte** in
 `tests/integration/customer-card-page.test.ts`, sitting where a word-boundary escape was meant. The
