@@ -430,3 +430,168 @@ describe("a promotion's identity is frozen and it is never removed", () => {
     }
   });
 });
+
+describe("the recorded moment belongs to the server", () => {
+  /*
+   * `recordedAt` is what every window check reads, so a writer that chooses it chooses whether the
+   * promotion was running. `walaaplus_validate_redemption` overwrites it with the server's clock
+   * before anything else looks at it, which is the only way the rule survives a second writer.
+   */
+  let mine: World;
+
+  beforeEach(async () => {
+    await resetDatabase();
+    mine = await build("Clock café");
+    session.userId = mine.cafe.userId;
+  });
+
+  const YEAR = 365 * 24 * 60 * 60 * 1000;
+
+  function closeToNow(stamped: Date): boolean {
+    return Math.abs(stamped.getTime() - Date.now()) < 60_000;
+  }
+
+  it("ignores a timestamp the caller supplied, in both directions", async () => {
+    for (const supplied of [new Date(Date.now() - YEAR), new Date(Date.now() + YEAR)]) {
+      const row = await prisma.promotionRedemption.create({
+        data: redeemed(mine, { recordedAt: supplied }),
+        select: { id: true, recordedAt: true },
+      });
+      expect(row.recordedAt.getTime(), String(supplied)).not.toBe(supplied.getTime());
+      expect(closeToNow(row.recordedAt), String(row.recordedAt)).toBe(true);
+      // Clear the way for the next iteration; the promotion has no limit, but be explicit.
+      expect(row.id).toBeTruthy();
+    }
+  });
+
+  it("cannot be backdated into a promotion that has already ended", async () => {
+    const ended = await build("Ended café", { endsAt: new Date(Date.now() - 86_400_000) });
+    await expect(
+      prisma.promotionRedemption.create({
+        // A moment when the promotion really was running. The row is still refused, because the
+        // trigger replaces this with now() before it compares.
+        data: redeemed(ended, { recordedAt: new Date(Date.now() - 2 * 86_400_000) }),
+      }),
+    ).rejects.toThrow(REFUSED);
+  });
+
+  it("cannot be future-dated into a promotion that has not started", async () => {
+    const later = await build("Later café", { startsAt: new Date(Date.now() + 86_400_000) });
+    await expect(
+      prisma.promotionRedemption.create({
+        data: redeemed(later, { recordedAt: new Date(Date.now() + 2 * 86_400_000) }),
+      }),
+    ).rejects.toThrow(REFUSED);
+  });
+
+  it("stamps a withdrawal too", async () => {
+    // A backdated void would be a falsified withdrawal: the same problem wearing the other hat.
+    const first = await prisma.promotionRedemption.create({ data: redeemed(mine), select: { id: true } });
+    const voided = await prisma.promotionRedemption.create({
+      data: redeemed(mine, {
+        entry: "VOIDED",
+        voidsRedemptionId: first.id,
+        recordedAt: new Date(Date.now() - YEAR),
+      }),
+      select: { recordedAt: true },
+    });
+    expect(closeToNow(voided.recordedAt)).toBe(true);
+  });
+
+  it("still accepts an ordinary redemption inside a real window", async () => {
+    // The control: server time is not a way of refusing everything.
+    const open = await build("Open café", {
+      startsAt: new Date(Date.now() - 86_400_000),
+      endsAt: new Date(Date.now() + 86_400_000),
+    });
+    const row = await prisma.promotionRedemption.create({ data: redeemed(open), select: { recordedAt: true } });
+    expect(closeToNow(row.recordedAt)).toBe(true);
+  });
+});
+
+describe("the canonical name is the database's to decide", () => {
+  /*
+   * Uniqueness per business and the merchant's own list both read `normalizedName`. A writer that
+   * could set it independently of `name` could hide a duplicate from the unique index, or leave a
+   * list two rows nobody can tell apart.
+   *
+   * `promotion_guard` computes it from the name and ASSIGNS it, rather than comparing: PostgreSQL
+   * and JavaScript do not agree about U+00A0 or about dotted capital I, so a comparison would
+   * refuse names a merchant can legitimately type. Assignment cannot, and a supplied value is never
+   * consulted.
+   */
+  let cafe: StampCafeFixture;
+
+  beforeEach(async () => {
+    await resetDatabase();
+    cafe = await createStampCafe({ name: "Naming café" });
+    session.userId = cafe.userId;
+  });
+
+  async function make(name: string, normalizedName: string, extra: Record<string, unknown> = {}) {
+    const salt = newCodeSalt();
+    return prisma.promotion.create({
+      data: {
+        businessId: cafe.businessId,
+        name,
+        normalizedName,
+        benefitDescription: "A free espresso",
+        codeDigest: codeDigest(salt, cafe.businessId, `CODE${Math.random().toString(36).slice(2, 8)}`),
+        codeSalt: salt,
+        ...extra,
+      },
+      select: { id: true, name: true, normalizedName: true },
+    });
+  }
+
+  it("computes the canonical name on insert, whatever the caller sent", async () => {
+    const row = await make("  Autumn   Offer ", "something-else-entirely");
+    expect(row.normalizedName).toBe("autumn offer");
+  });
+
+  it("recomputes it when a manager renames a live promotion", async () => {
+    const row = await make("Autumn Offer", "autumn offer");
+    const renamed = await prisma.promotion.update({
+      where: { id: row.id },
+      // The name changes and the canonical name is deliberately left stale. The trigger fixes it.
+      data: { name: "Winter  Offer" },
+      select: { name: true, normalizedName: true },
+    });
+    expect(renamed.name).toBe("Winter  Offer");
+    expect(renamed.normalizedName).toBe("winter offer");
+  });
+
+  it("refuses a canonical name set on its own, without the name", async () => {
+    const row = await make("Autumn Offer", "autumn offer");
+    const after = await prisma.promotion.update({
+      where: { id: row.id },
+      data: { normalizedName: "a name this promotion does not have" },
+      select: { normalizedName: true },
+    });
+    // Not an error on a live row — corrected, which is the invariant. The row cannot end up
+    // carrying a canonical name that is not its own name.
+    expect(after.normalizedName).toBe("autumn offer");
+  });
+
+  it("refuses the same edit on an expired promotion, out loud", async () => {
+    const row = await make("Autumn Offer", "autumn offer");
+    await prisma.promotion.update({ where: { id: row.id }, data: { state: "EXPIRED" } });
+    await expect(
+      prisma.promotion.update({
+        where: { id: row.id },
+        data: { normalizedName: "a name this promotion does not have" },
+      }),
+    ).rejects.toThrow(REFUSED);
+    await expect(
+      prisma.promotion.update({ where: { id: row.id }, data: { name: "Renamed after the fact" } }),
+    ).rejects.toThrow(REFUSED);
+  });
+
+  it("cannot hide a duplicate behind a mismatched canonical name", async () => {
+    // The consequence that makes this a security rule rather than a tidiness one.
+    await make("Autumn Offer", "autumn offer");
+    await expect(make("autumn    offer", "a completely different string")).rejects.toThrow(
+      /Unique constraint|duplicate key/i,
+    );
+  });
+});

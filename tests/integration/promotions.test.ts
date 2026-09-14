@@ -22,7 +22,7 @@ import { POST as promotionsRoute } from "@/app/api/staff/promotions/route";
 import { AuditAction } from "@/server/audit/audit";
 import { prisma } from "@/server/db";
 import { codeDigest } from "@/server/promotions/codes";
-import { listPromotions } from "@/server/promotions/promotions";
+import { listPromotions, promotionCreateLockKey } from "@/server/promotions/promotions";
 import { listCardRedemptions, redeemCoupon } from "@/server/promotions/redemption";
 import {
   createStaff,
@@ -642,5 +642,106 @@ describe("nothing public was added", () => {
     const offenders = files.filter((file) => forbidden.test(readFileSync(file, "utf8")));
     expect(offenders, `these must not reach a provider or a queue:\n${offenders.join("\n")}`).toEqual([]);
     expect(files.length).toBeGreaterThanOrEqual(3);
+  });
+});
+
+describe("two managers creating the same code at the same moment", () => {
+  /*
+   * The unique index on `(businessId, codeDigest)` CANNOT catch this. Each attempt mints its own
+   * 32-byte salt, so the same code hashes to two different digests and the index sees two unrelated
+   * rows. The only thing standing between a merchant and two live promotions answering to one code
+   * is the advisory lock `createPromotion` takes before it reads the existing salts.
+   *
+   * If both rows were created, redemption would match whichever candidate it reached first — a
+   * coupon that works or does not depending on insertion order, which is the worst kind of bug to
+   * be told about by a customer.
+   */
+  beforeEach(async () => {
+    await resetDatabase();
+  });
+
+  /** How many attempts to fire at once. More than two, so the pool has a reason to overlap them. */
+  const ATTEMPTS = 6;
+
+  it("ends with one promotion however many attempts arrive at once", async () => {
+    /*
+     * An OUTCOME check, and honestly labelled as one: this passed even with the lock removed,
+     * because Prisma's transactions did not interleave far enough to reproduce the race on this
+     * machine. A race that only sometimes reproduces is a test that only sometimes checks anything,
+     * so the proof that the lock is real is the deterministic test below; this one is here because
+     * the invariant it states — one code, one promotion, whatever arrives — is the thing a merchant
+     * actually cares about, and it would catch a regression that broke it by any route.
+     */
+    const cafe = await createStampCafe({ name: "Race café" });
+    session.userId = cafe.userId;
+
+    const results = await Promise.all(
+      Array.from({ length: ATTEMPTS }, (_, i) =>
+        promotions({
+          action: "create",
+          businessId: cafe.businessId,
+          name: `Race offer ${i}`,
+          benefitDescription: "A free espresso",
+          code: "RACE2026",
+        }),
+      ),
+    );
+
+    const created = results.filter((r) => r.status === 201);
+    const refused = results.filter((r) => r.status === 409);
+    expect(created).toHaveLength(1);
+    expect(refused).toHaveLength(ATTEMPTS - 1);
+    // The same refusal as any other duplicate: it does not say which field collided.
+    for (const r of refused) expect(JSON.stringify(r.body)).toMatch(/name or code/i);
+
+    const stored = await migratorPrisma().promotion.findMany({ where: { businessId: cafe.businessId } });
+    expect(stored, "one code, one promotion").toHaveLength(1);
+
+    // And the one that survived is the one whose code actually works.
+    const [row] = stored;
+    expect(row.codeDigest).toBe(codeDigest(row.codeSalt, cafe.businessId, "RACE2026"));
+  });
+
+  it("waits on a lock somebody else is holding, rather than reading past it", async () => {
+    /*
+     * The deterministic half. The test takes the very lock `createPromotion` takes, holds it, and
+     * watches a create sit there: no interleaving to hope for, and it fails immediately if the
+     * service stops taking the lock or takes a different one.
+     */
+    const cafe = await createStampCafe({ name: "Held café" });
+    session.userId = cafe.userId;
+    const key = promotionCreateLockKey(cafe.businessId);
+
+    let finished = false;
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    // A separate connection, held open, with the lock taken.
+    const holding = migratorPrisma().$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(${key}::bigint)`;
+      await held;
+    });
+    // Give the holder a moment to actually acquire it before the create starts.
+    await new Promise((r) => setTimeout(r, 250));
+
+    const creating = promotions({
+      action: "create",
+      businessId: cafe.businessId,
+      name: "Blocked offer",
+      benefitDescription: "A free espresso",
+      code: "BLOCK123",
+    }).then((r) => {
+      finished = true;
+      return r;
+    });
+
+    await new Promise((r) => setTimeout(r, 750));
+    expect(finished, "the create read past a lock somebody else was holding").toBe(false);
+
+    release();
+    await holding;
+    expect((await creating).status).toBe(201);
   });
 });

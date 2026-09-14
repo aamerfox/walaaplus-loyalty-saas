@@ -1,4 +1,5 @@
 import { MembershipRole, Permission, Prisma, PromotionState, RedemptionEntry } from "@prisma/client";
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import { AuditAction, recordAudit } from "../audit/audit";
 import { prisma } from "../db";
@@ -35,9 +36,46 @@ export const MAX_PROMOTIONS_PER_BUSINESS = 200;
 const MAX_NAME = 80;
 const MAX_BENEFIT = 200;
 
-/** "Autumn offer", "autumn offer" and "  Autumn  offer " are one promotion, as for segments. */
+/**
+ * "Autumn offer", "autumn offer" and "  Autumn  offer " are one promotion, as for segments.
+ *
+ * **This value is advisory.** `walaaplus_promotion_guard` recomputes it from the name on every
+ * insert and update and overwrites whatever the application sent, so the column is canonical even
+ * if this function and PostgreSQL disagree — and they can: PostgreSQL's `\s` does not match U+00A0,
+ * which arrives whenever a merchant pastes a name out of a word processor, and the two take
+ * different views of dotted capital I. The whitespace class here is written out to match
+ * PostgreSQL's rather than relying on JavaScript's wider one, and `toLowerCase` is used rather than
+ * `toLocaleLowerCase` so a server running under a Turkish locale cannot quietly produce a different
+ * answer from the database.
+ */
 export function normalizePromotionName(name: string): string {
-  return name.trim().replace(/\s+/g, " ").toLocaleLowerCase();
+  return name.replace(/[ \t\n\r\f\v]+/g, " ").trim().toLowerCase();
+}
+
+/**
+ * The advisory-lock key that serialises promotion CREATION for one business.
+ *
+ * Two managers creating the same code at the same moment both read "no duplicate", both mint their
+ * own salt, and both insert — and the unique index on `(businessId, codeDigest)` cannot see it,
+ * because two salts produce two digests. That is the direct cost of salting, and a lock is what
+ * pays it.
+ *
+ * **The key is derived from the business alone, never from the code.** Locking per code would mean
+ * a number derived from a short human-chosen secret reaching PostgreSQL, where it is visible in
+ * `pg_locks` and in any statement log for as long as it is held; sixty-four bits of a hash over a
+ * six-character code is not a secret. Locking per business gives up nothing worth having: creating
+ * a promotion is a manager pressing a button a handful of times a year, so the contention this adds
+ * is not measurable, and the serialisation it buys is strictly wider than the one required.
+ *
+ * The key is ephemeral and is never stored in any column.
+ */
+const CREATE_LOCK_NAMESPACE = "walaaplus:promotion-create:v1";
+
+export function promotionCreateLockKey(businessId: string): bigint {
+  return createHash("sha256")
+    .update(`${CREATE_LOCK_NAMESPACE}:${businessId}`, "utf8")
+    .digest()
+    .readBigInt64BE(0);
 }
 
 /** Owner and manager only. A promotion is a commercial decision, not counter work. */
@@ -162,39 +200,57 @@ export async function createPromotion(ctx: TenantContext, input: CreatePromotion
     throw new ValidationError("A promotion cannot end before it starts");
   }
 
-  const existing = await prisma.promotion.findMany({
-    where: { businessId: ctx.businessId },
-    select: { codeSalt: true, codeDigest: true },
-    take: MAX_PROMOTIONS_PER_BUSINESS,
-  });
-  if (existing.length >= MAX_PROMOTIONS_PER_BUSINESS) {
-    throw new ConflictError(`A business may keep at most ${MAX_PROMOTIONS_PER_BUSINESS} promotions`);
-  }
-
-  /*
-   * Duplicate codes, caught by walking the existing salts — because a per-promotion salt means the
-   * unique index on `(businessId, codeDigest)` CANNOT catch one. Two promotions with the same code
-   * hash differently, and redemption would then match whichever candidate it happened to reach
-   * first, which is a coupon that works or does not depending on insertion order.
-   *
-   * That is the price of the salt, and it is paid here rather than discovered at a till. The index
-   * stays as a backstop against the impossible case of a repeated salt.
-   *
-   * **Every** promotion is checked, including expired ones. Reusing an expired promotion's code
-   * would make every copy already in the world start working again for a different offer, which is
-   * precisely what making EXPIRED terminal exists to prevent.
-   */
-  if (existing.some((row) => digestsMatch(row.codeDigest, codeDigest(row.codeSalt, ctx.businessId, data.code)))) {
-    throw new ConflictError("That name or code is already in use", ConflictCode.NAME_TAKEN);
-  }
-
   const salt = newCodeSalt();
   try {
     const created = await prisma.$transaction(async (tx) => {
+      /*
+       * Everything that decides whether this promotion may exist happens AFTER this line.
+       *
+       * The duplicate check has to read every existing salt and hash the candidate against each of
+       * them, which means it is a read followed by a decision followed by a write — and two
+       * managers submitting the same code at the same moment would both read "no duplicate" and
+       * both write. The unique index cannot catch that, because their salts differ and so do their
+       * digests. A lock is the only thing that can, and it has to be taken before the read rather
+       * than around the write.
+       *
+       * `pg_advisory_xact_lock` releases on commit or rollback, so no path leaks it. See
+       * `promotionCreateLockKey` for why the key names the business and not the code.
+       */
+      // Called in FROM rather than in SELECT: the function returns `void`, and Prisma cannot
+      // deserialise a void column.
+      await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(${promotionCreateLockKey(ctx.businessId)}::bigint)`;
+
+      const existing = await tx.promotion.findMany({
+        where: { businessId: ctx.businessId },
+        select: { codeSalt: true, codeDigest: true },
+        take: MAX_PROMOTIONS_PER_BUSINESS,
+      });
+      if (existing.length >= MAX_PROMOTIONS_PER_BUSINESS) {
+        throw new ConflictError(`A business may keep at most ${MAX_PROMOTIONS_PER_BUSINESS} promotions`);
+      }
+
+      /*
+       * Duplicate codes, caught by walking the existing salts — because a per-promotion salt means
+       * the unique index on `(businessId, codeDigest)` CANNOT catch one. Two promotions with the
+       * same code hash differently, and redemption would then match whichever candidate it happened
+       * to reach first, which is a coupon that works or does not depending on insertion order.
+       *
+       * That is the price of the salt, and it is paid here rather than discovered at a till. The
+       * index stays as a backstop against the impossible case of a repeated salt.
+       *
+       * **Every** promotion is checked, including expired ones. Reusing an expired promotion's code
+       * would make every copy already in the world start working again for a different offer, which
+       * is precisely what making EXPIRED terminal exists to prevent.
+       */
+      if (existing.some((row) => digestsMatch(row.codeDigest, codeDigest(row.codeSalt, ctx.businessId, data.code)))) {
+        throw new ConflictError("That name or code is already in use", ConflictCode.NAME_TAKEN);
+      }
+
       const promotion = await tx.promotion.create({
         data: {
           businessId: ctx.businessId,
           name: data.name,
+          // Advisory; `promotion_guard` recomputes it. See `normalizePromotionName`.
           normalizedName: normalizePromotionName(data.name),
           benefitDescription: data.benefitDescription,
           codeDigest: codeDigest(salt, ctx.businessId, data.code),

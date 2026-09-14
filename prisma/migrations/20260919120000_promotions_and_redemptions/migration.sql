@@ -128,7 +128,10 @@ CREATE TABLE "PromotionRedemption" (
     "voidsRedemptionId" TEXT,
     -- Free text from whoever voided one. Never a code, a phone number or a name.
     "reason" TEXT,
-    "recordedAt" TIMESTAMP(3) NOT NULL,
+    -- When this happened, ACCORDING TO THE SERVER. The default is a convenience so a caller need
+    -- not supply one; `walaaplus_validate_redemption` overwrites whatever arrives, because a
+    -- caller-chosen event time is a caller-chosen answer to "was this promotion running then?".
+    "recordedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "recordedByUserId" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
@@ -180,9 +183,31 @@ CREATE TRIGGER promotion_no_truncate
   BEFORE TRUNCATE ON "Promotion"
   FOR EACH STATEMENT EXECUTE FUNCTION walaaplus_promotion_no_removal();
 
+-- The canonical form of a promotion name: whitespace collapsed, trimmed, lower-cased.
+--
+-- This exists so the RELATIONSHIP between "name" and "normalizedName" is the database's to enforce.
+-- Uniqueness per business and the merchant's own list both depend on it, and a direct writer that
+-- could set one without the other could hide a duplicate from the unique index.
+CREATE OR REPLACE FUNCTION walaaplus_normalize_promotion_name(candidate TEXT) RETURNS TEXT
+LANGUAGE sql STABLE AS $$
+  SELECT lower(btrim(regexp_replace(candidate, '\s+', ' ', 'g')))
+$$;
+
 CREATE OR REPLACE FUNCTION walaaplus_promotion_guard() RETURNS trigger
 LANGUAGE plpgsql AS $$
+DECLARE
+  canonical TEXT;
 BEGIN
+  -- Computed from the name on every write, and ASSIGNED rather than compared.
+  --
+  -- Assignment is the stronger rule and it is also the safe one. Comparing would mean PostgreSQL's
+  -- lower() and \s had to agree with JavaScript's for every name a merchant can type, and they do
+  -- not: PostgreSQL's \s does not match U+00A0, which arrives every time somebody pastes a name out
+  -- of a word processor, and the two disagree about dotted capital I. Comparing would reject those
+  -- names; assigning cannot, and a caller's value is never consulted, so it cannot be set
+  -- independently of the name either.
+  canonical := walaaplus_normalize_promotion_name(NEW."name");
+
   IF TG_OP = 'INSERT' THEN
     -- A promotion is born as a draft. Creating one already ACTIVE would skip the only moment a
     -- merchant reads back what they typed before a code goes out.
@@ -190,6 +215,7 @@ BEGIN
       RAISE EXCEPTION 'Promotion: a new promotion starts as a draft'
         USING ERRCODE = 'check_violation';
     END IF;
+    NEW."normalizedName" := canonical;
     RETURN NEW;
   END IF;
 
@@ -224,8 +250,14 @@ BEGIN
 
   -- An expired promotion is finished, including its settings. Editing the window or the limits of
   -- one would change what a closed record says happened.
+  --
+  -- `normalizedName` is checked here against the value that ARRIVED, before it is replaced below,
+  -- so an attempt to edit only the canonical name of a finished promotion is refused out loud
+  -- rather than silently corrected.
   IF OLD."state" = 'EXPIRED' AND (
        NEW."name" IS DISTINCT FROM OLD."name"
+    OR NEW."normalizedName" IS DISTINCT FROM OLD."normalizedName"
+    OR canonical IS DISTINCT FROM OLD."normalizedName"
     OR NEW."benefitDescription" IS DISTINCT FROM OLD."benefitDescription"
     OR NEW."startsAt" IS DISTINCT FROM OLD."startsAt"
     OR NEW."endsAt" IS DISTINCT FROM OLD."endsAt"
@@ -236,6 +268,7 @@ BEGIN
       USING ERRCODE = 'check_violation';
   END IF;
 
+  NEW."normalizedName" := canonical;
   RETURN NEW;
 END
 $$;
@@ -286,6 +319,23 @@ DECLARE
   used_customer INTEGER;
   target       "PromotionRedemption"%ROWTYPE;
 BEGIN
+  /*
+   * The moment is the server's, and only the server's.
+   *
+   * Everything below that asks "was this promotion running then?" reads `recordedAt`, so a caller
+   * that chooses it chooses the answer: a row dated last month redeems a promotion that ended last
+   * week, and a row dated next year redeems one that has not started. Overwriting here closes that
+   * for the service AND for any direct writer, which is the only way it stays closed.
+   *
+   * `now()` is the transaction's start time, so a redemption and the audit row written beside it
+   * agree. `AT TIME ZONE 'UTC'` is explicit because the column is a bare TIMESTAMP(3) holding UTC:
+   * an implicit cast would be right only while the session's TimeZone happens to be UTC.
+   *
+   * This is deliberately not conditional on the entry kind. A backdated VOIDED row would be a
+   * falsified withdrawal, which is the same problem wearing the other hat.
+   */
+  NEW."recordedAt" := (now() AT TIME ZONE 'UTC');
+
   SELECT * INTO promo FROM "Promotion" WHERE "id" = NEW."promotionId";
   IF NOT FOUND THEN
     RAISE EXCEPTION 'PromotionRedemption: the promotion does not exist' USING ERRCODE = 'check_violation';

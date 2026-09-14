@@ -704,7 +704,9 @@ model PromotionRedemption {
   voidsRedemptionId         String?
   /// Free text from whoever voided one. Never a code, a phone number or a name.
   reason                    String?
-  recordedAt                DateTime
+  /// Assigned by the database. `walaaplus_validate_redemption` overwrites whatever arrives,
+  /// so this default only spares a caller from inventing a value it is not allowed to choose.
+  recordedAt                DateTime                @default(now())
   recordedByUserId          String?
   createdAt                 DateTime         @default(now())
 

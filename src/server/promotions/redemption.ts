@@ -124,6 +124,14 @@ export async function redeemCoupon(ctx: TenantContext, input: RedeemCouponInput)
       });
       if (!promotion || promotion.state !== PromotionState.ACTIVE) return { outcome: "NOT_ACCEPTED" as const };
 
+      /*
+       * The window, checked here so a cashier gets a refusal rather than a database error.
+       *
+       * This is NOT where the rule lives. `walaaplus_validate_redemption` stamps `recordedAt` with
+       * the server's own clock and re-checks the window against it, so the answer does not depend
+       * on this process's idea of the time, and a writer that skips this service gets the same
+       * answer. Nothing below passes a timestamp.
+       */
       const now = new Date();
       if (promotion.startsAt && now < promotion.startsAt) return { outcome: "NOT_ACCEPTED" as const };
       if (promotion.endsAt && now >= promotion.endsAt) return { outcome: "NOT_ACCEPTED" as const };
@@ -151,7 +159,6 @@ export async function redeemCoupon(ctx: TenantContext, input: RedeemCouponInput)
           customerCardId: card.id,
           customerBusinessProfileId: card.customerBusinessProfileId,
           method: RedemptionMethod.COUNTER_TYPED_CODE,
-          recordedAt: now,
           recordedByUserId: ctx.userId,
         },
         select: { id: true },
@@ -308,7 +315,6 @@ export async function voidRedemption(
         method: existing.method,
         voidsRedemptionId: existing.id,
         reason: trimmed ?? null,
-        recordedAt: new Date(),
         recordedByUserId: ctx.userId,
       },
     });
