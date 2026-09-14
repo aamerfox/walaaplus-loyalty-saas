@@ -10,8 +10,9 @@
 | Review fixes — lease, test matrix, encryption (documentation) | `9282fa2` |
 | Review fix — dispatch boundary (code, tests) | `35b6ab2` — see §14 |
 | Review fix — dispatch boundary (documentation) | `609f21e` |
-| Accuracy correction — dispatch-boundary wording, no behaviour change | the commit carrying this file — see §15 |
-| **Deploy this** | the tip of `rebuild/phase-0-foundation`. **Not `9695e17`, not `9282fa2`** |
+| Accuracy correction — dispatch-boundary duration claim removed, no behaviour change | `a839ded` — see §15 |
+| Accuracy correction — dispatch-boundary consistency claim corrected, no behaviour change | the commit carrying this file — see §16 |
+| **Deploy this** | the tip of `rebuild/phase-0-foundation`. **Not `9695e17`, not `9282fa2`, not `a839ded`** |
 | Migration | `20260921120000_webhook_destinations`, the **15th** |
 | `master` | untouched at `b9ee686`, and absent from the `deploy` remote |
 
@@ -535,21 +536,28 @@ useful than pretending all five depend on the fix.
 
 ### 14.5 The boundary that remains
 
-A request already dispatched cannot be reliably cancelled by an owner action that commits after
-`loadForDispatch` has returned for that delivery. **This is stated as a boundary, not a duration**:
-an earlier version of this text said "microseconds", which overclaimed how fast the gap between the
-read and the socket sending actually is — decryption, URL re-validation, signing, DNS resolution and
-the TLS handshake all happen in that gap, and DNS or a slow network can make it take a noticeable
-fraction of a second or longer. What is guaranteed is that a database transaction and a socket cannot
-commit together, so no owner action can be made to apply retroactively to a dispatch already under
-way. Before this fix the same non-cancellable gap covered the rest of the batch, up to most of a
-minute; the per-delivery read narrows it to one delivery's own dispatch time, not to a fixed short
-interval.
+A request already dispatched cannot be reliably cancelled by a later owner action — but "later" is
+decided by PostgreSQL's own read-committed snapshot at the dispatch `SELECT`, not by a Node-level
+moment such as `loadForDispatch` returning. In read-committed, the statement's snapshot is taken when
+it runs; a concurrent owner transaction can still commit after that snapshot but before the result
+reaches the caller. This design makes no ordering guarantee between an owner's write and the dispatch
+read when the two race: whichever state PostgreSQL's snapshot actually gave the `SELECT` is what
+governs that attempt.
 
-The same applies to secret rotation: a delivery whose `loadForDispatch` read happens after the
-rotation commits uses the new secret; one whose read happened before the rotation was already
-holding the old ciphertext and signs with the old secret. Stated in §7a of the matrix, and not
-promised away.
+**This is stated as a boundary, not a duration**: an earlier version of this text said
+"microseconds", which overclaimed how fast the gap between the read and the socket sending actually
+is — decryption, URL re-validation, signing, DNS resolution and the TLS handshake all happen in that
+gap, and DNS or a slow network can make it take a noticeable fraction of a second or longer. What is
+guaranteed is that a database transaction and a socket cannot commit together, so no owner action can
+be made to apply retroactively to a dispatch already under way — not that the read and the write are
+ever serialized with each other. Before this fix the same non-cancellable gap covered the rest of the
+batch, up to most of a minute; the per-delivery read removes that batch-length staleness without
+claiming serialization between an owner update and the dispatch read.
+
+The same applies to secret rotation: a delivery whose dispatch read observes the rotation uses the
+new secret; one whose read did not — because it ran first, or raced with the rotation and the
+snapshot did not include it — was already holding the old ciphertext and signs with the old secret.
+Stated in §7a of the matrix, and not promised away.
 
 ### 14.6 The quality bar, re-run in full
 
@@ -584,12 +592,15 @@ resolution and the TLS handshake in particular can each take a meaningful fracti
 longer under a slow or degraded network.
 
 **No behaviour changed.** This is a wording correction across five comments/docs sites. The
-replacement statement is a boundary, not a duration: a disable, revoke or rotation committed
-**before** `loadForDispatch` returns is observed and changes what happens; one committed **after**
-is not, and the attempt already under way cannot be reliably cancelled — because a database
-transaction and a socket cannot commit together, not because the gap is short. Secret rotation is
-corrected the same way: it applies to a delivery whose signing-secret read has not yet happened, not
-to one that has not yet "arrived" or been "signed".
+replacement statement is a boundary, not a duration: a disable, revoke or rotation whose commit is
+**visible to the dispatch read's own PostgreSQL snapshot** is observed and changes what happens. If
+the owner's write and the dispatch `SELECT` race, there is no ordering guarantee in this design —
+whichever state that snapshot actually gave the `SELECT` governs the attempt. Once the read has
+observed a state and the outbound attempt has begun, it cannot be reliably cancelled — because a
+database transaction and a socket cannot commit together, not because the gap is short, and not
+because the owner's write and the read are serialized against one another. Secret rotation is
+corrected the same way: it applies to a delivery whose signing-secret read has not observed the new
+value, not to one that has not yet "arrived" or been "signed".
 
 Two occurrences of the word "microseconds" were left alone because they are unrelated: a
 timing-safe digest comparison in `src/server/promotions/codes.ts`, and a note about test-queue
@@ -600,7 +611,45 @@ migration or schema file changed; lint and typecheck are clean; all 106 webhook 
 both webhook unit suites (66 tests), and the webhook browser suite (16 tests) pass unchanged;
 `git diff --check` is clean; a secret/control-byte scan over the changed files found nothing.
 
-## 16. Which SHA to deploy
+## 16. Accuracy correction — the boundary is PostgreSQL's snapshot, not Node's return time
+
+`a839ded` corrected the duration overclaim ("microseconds") but replaced it with a different
+overclaim: "before/after `loadForDispatch` returns" frames a Node-level function return as the
+database consistency boundary. It is not. In PostgreSQL's READ COMMITTED isolation — what this
+product runs under — a `SELECT`'s statement snapshot is taken when the statement executes; a
+concurrent owner transaction can commit after that snapshot but before the `SELECT`'s result reaches
+the caller as a resolved `Promise`. Node's return time and the database's consistency boundary are
+two different moments, and the earlier text conflated them.
+
+**No behaviour changed.** Corrected across the same five sites the previous round touched — two
+docstrings in `delivery.ts`, the capability matrix's cutover section (both the disable/revoke/rotation
+paragraph and the signing-secret-rotation paragraph), the implementation notes' §9.5, and this file's
+§14.5 and §15 — to state what PostgreSQL actually guarantees:
+
+- each delivery performs one fresh database read immediately before beginning its outbound attempt,
+  in place of the earlier batch snapshot;
+- a state change committed early enough to be **visible to that dispatch read's own statement
+  snapshot** is observed by it;
+- if the owner's write and the dispatch `SELECT` race, this design does not serialize them against
+  each other — there is no ordering guarantee, and whichever state the snapshot actually captured is
+  what governs that attempt;
+- once the read has observed a state and the outbound attempt has begun, a later owner action cannot
+  reliably cancel it;
+- this removes the previous batch-length stale window (up to most of a minute) without claiming
+  serialization between an owner update and the dispatch read.
+
+Secret rotation is corrected the same way: it applies to a delivery whose signing-secret read has not
+observed the new value, not to a flat "read happened" / "read did not happen" split that implied an
+ordering the database does not promise.
+
+Verified: the diff to `delivery.ts` is comments only; no `prisma/` file is touched; lint and
+typecheck are clean; all 106 webhook integration tests and both webhook unit suites (66 tests) pass
+unchanged; `git diff --check` is clean; a secret/control-byte scan over the changed files found
+nothing; a search for the retired phrasing ("before/after `loadForDispatch` returns", "before/after
+this read", "read has returned") returns no matches outside quoted historical text describing what
+earlier commits got wrong.
+
+## 17. Which SHA to deploy
 
 The tip of `rebuild/phase-0-foundation` — the documentation commit carrying this file, which
 contains `770f324`, `9695e17` and the review-fix commit. The final report names the exact hash; a

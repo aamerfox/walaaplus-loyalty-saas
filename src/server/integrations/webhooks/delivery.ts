@@ -183,9 +183,12 @@ async function claimDue(now: Date, limit: number, token: string): Promise<string
  * state was re-read immediately before dispatch. It was not, and a batch read cannot be.
  *
  * So: one read, per delivery, in the loop, returning the CURRENT destination state, the CURRENT
- * ciphertexts and the CURRENT event. A disable, revoke or rotation the owner commits BEFORE this
- * read is observed here and changes what happens next. One committed AFTER this read is not seen by
- * this delivery at all — see the note on `attemptOne` for what that means and does not mean.
+ * ciphertexts and the CURRENT event. A disable, revoke or rotation whose commit is VISIBLE TO THIS
+ * SELECT — under PostgreSQL's read-committed snapshot, which the statement takes when it runs, not
+ * when the Node `Promise` it returns resolves — is observed here and changes what happens next. If
+ * the owner's write and this SELECT race, there is no ordering guarantee in this design: whichever
+ * state PostgreSQL's snapshot gave the SELECT is what this delivery acts on — see the note on
+ * `attemptOne` for what that means and does not mean.
  *
  * ## The claim token is part of the WHERE
  *
@@ -349,22 +352,27 @@ function refuse(errorClass: WebhookErrorClass): SendWebhookResult {
  * A `DispatchRow` read by `loadForDispatch` **for this delivery, in this iteration** — not the
  * batch-claim moment, which is a different and much earlier read when the batch is slow.
  *
- * A destination disabled, revoked or rotated **before that read committed** is honoured here:
- * nothing is sent to it, and a rotated secret decrypts to the new value.
+ * A destination disabled, revoked or rotated **visibly to `loadForDispatch`'s own SELECT** is
+ * honoured here: nothing is sent to it, and a rotated secret decrypts to the new value. That SELECT
+ * runs under PostgreSQL's own read-committed snapshot; if the owner's write and this delivery's read
+ * race, this design makes no promise about which one PostgreSQL orders first — only that whichever
+ * state the SELECT actually observed is the one this delivery acts on.
  *
  * ## The one boundary that remains, stated precisely
  *
- * **Once `loadForDispatch` has returned, this attempt cannot be reliably cancelled by a later owner
- * action.** Everything after that read — decrypting the URL and secret, re-validating the URL's
- * shape, signing the body, resolving the hostname, opening the TCP and TLS connection, and writing
- * the request — runs without checking the database again. None of those steps has a fixed or short
- * duration: DNS resolution and the TLS handshake in particular can each take a meaningful fraction
- * of a second, or longer under a slow or degraded network, so this is not a "microseconds" window.
+ * **Once this delivery's fresh read has observed a state and the outbound attempt has begun, a later
+ * owner action cannot reliably cancel it.** Everything after that read — decrypting the URL and
+ * secret, re-validating the URL's shape, signing the body, resolving the hostname, opening the TCP
+ * and TLS connection, and writing the request — runs without checking the database again. None of
+ * those steps has a fixed or short duration: DNS resolution and the TLS handshake in particular can
+ * each take a meaningful fraction of a second, or longer under a slow or degraded network, so this
+ * is not a "microseconds" window.
  *
  * What holds regardless of how long it takes: a database transaction and a socket cannot commit
  * together, so there is no point at which an owner's disable, revoke or rotation can be made to
- * apply retroactively to an attempt that has already begun. That is the irreducible boundary between
- * the database and the network, not a duration claim. Written down in
+ * apply retroactively to an attempt already under way. That is the irreducible boundary between the
+ * database and the network — a statement about what cannot happen afterwards, not a claim that the
+ * owner's write and the dispatch read are ever serialized with each other. Written down in
  * `docs/INTEGRATIONS-CAPABILITY-MATRIX.md` §7a rather than promised away.
  */
 async function attemptOne(

@@ -328,11 +328,16 @@ the wire. **Four of the five go red** against the restored batch-snapshot implem
 is the disabled-test case, which is allowed either way by design.
 
 The one remaining boundary is unchanged in kind but far narrower in scope: a request already
-dispatched cannot be reliably cancelled by an owner action that commits after `loadForDispatch` has
-returned. That is **not a fixed or short duration** — decryption, URL re-validation, signing, DNS
-resolution and the TLS handshake all happen after the read and before the socket sends, and DNS or a
-slow network can make that take a noticeable fraction of a second or more. The guarantee is the
-boundary itself — a database transaction and a socket cannot commit together — not a promise about
+dispatched cannot be reliably cancelled by a later owner action. What decides whether a disable,
+revoke or rotation was "in time" is **visibility to the dispatch read's own PostgreSQL snapshot**,
+not a Node-level moment such as `loadForDispatch` returning — in read-committed, a concurrent
+owner transaction can commit after that snapshot is taken but before the `SELECT`'s result reaches
+the caller, and this design does not serialize the two against each other. Once the read has
+observed a state and the outbound attempt has begun — decryption, URL re-validation, signing, DNS
+resolution and the TLS handshake all happen after that — it cannot be reliably cancelled. That gap
+is **not a fixed or short duration**: DNS or a slow network can make it take a noticeable fraction of
+a second or more. The guarantee is the boundary itself — a database transaction and a socket cannot
+commit together — not a promise about
 how long it lasts. Before this fix the same non-cancellable gap covered the rest of the batch, up to
 most of a minute; now it covers only one delivery's own dispatch.
 

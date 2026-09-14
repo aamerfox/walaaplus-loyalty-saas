@@ -305,24 +305,31 @@ was slow. An owner could disable the tenth destination and the tenth delivery wo
 state that was true a minute earlier. Fixed, and the tests that prove it interleave a committed
 change between two dispatches in the same batch.
 
-So: a destination disabled or revoked while an earlier delivery was in flight sends nothing, and the
-attempt is recorded as `DESTINATION_NOT_ELIGIBLE` — permanent, because an owner's decision is not a
-transient condition. A signing secret rotated in the same window signs with the **new** value,
-because the ciphertext is read in the same breath as the state.
+So: a destination disabled or revoked so that the change is **visible to a later delivery's own
+dispatch read** sends nothing to it for that delivery, and the attempt is recorded as
+`DESTINATION_NOT_ELIGIBLE` — permanent, because an owner's decision is not a transient condition. A
+signing secret rotated visibly to that same read signs with the **new** value, because the
+ciphertext is read in the same statement as the state.
 
 The read also requires the **claim token**. A row re-claimed by another pass while this one was slow
 comes back empty: no request is made and **no attempt is recorded**, because this pass is no longer
 describing its own work.
 
-**What that cannot do is unsend a request already on the wire.** The rule is precise rather than
-timed: a committed disable, revoke or rotation is observed if it happens **before** the per-delivery
-read (`loadForDispatch`); once that read has returned, the attempt already in progress — decryption,
-URL re-validation, signing, DNS resolution, the TCP/TLS handshake, and the request itself — cannot be
-reliably cancelled by a later owner action. **This is not a short or fixed window.** DNS resolution
-and the TLS handshake in particular can each take a meaningful fraction of a second or more under a
-slow or degraded network, so no duration — "microseconds" or otherwise — is promised. What is
-guaranteed is the boundary itself: a database transaction and a socket cannot commit together, so
-there is no way to make an owner's action apply retroactively to a dispatch already under way.
+**What that cannot do is unsend a request already on the wire.** The rule is about visibility, not
+timing, and PostgreSQL's own consistency model is what decides it — not a Node-level moment such as
+a function returning. Each delivery performs one fresh read (`loadForDispatch`) immediately before
+it begins its outbound attempt, in place of the earlier batch snapshot. A disable, revoke or rotation
+committed early enough to be **visible to that read's own statement snapshot** is observed by it. If
+the owner's commit and the dispatch read race — which this design does not serialize against one
+another — there is no ordering guarantee: whichever state PostgreSQL's snapshot actually gave that
+SELECT is the state this delivery acts on. Once the read has observed a state and the outbound
+attempt has begun — decryption, URL re-validation, signing, DNS resolution, the TCP/TLS handshake,
+and the request itself — it cannot be reliably cancelled by a later owner action. **This is not a
+short or fixed window.** DNS resolution and the TLS handshake in particular can each take a
+meaningful fraction of a second or more under a slow or degraded network, so no duration —
+"microseconds" or otherwise — is promised. What is guaranteed is the boundary itself: a database
+transaction and a socket cannot commit together, so there is no way to make an owner's action apply
+retroactively to a dispatch already under way.
 
 Before the per-delivery read existed, the same non-cancellable gap covered the whole rest of the
 batch — every delivery queued after a slow one, potentially minutes. The per-delivery read narrows
@@ -330,13 +337,14 @@ that gap to one attempt's own dispatch time, but does not make it a fixed or neg
 Nothing in this product promises otherwise, and an owner who needs a guarantee that a specific event
 never arrives has to arrange it at the receiver.
 
-The same boundary applies to **signing-secret rotation**. A rotation committed before a delivery's
-`loadForDispatch` read is used by that delivery; one committed after that read is not — the
-ciphertext, and the secret decrypted from it, were already captured. A receiver that switches to the
-new secret at the instant the owner rotates may reject a request that was already using the old one.
-The owner is told to update the receiver in the same sitting, and the precise description is:
-**rotation applies to every request whose signing secret has not yet been read from the database, not
-to every request that has not yet arrived at the receiver.**
+The same boundary applies to **signing-secret rotation**. A rotation visible to a delivery's
+`loadForDispatch` read is used by that delivery; one that is not — because it raced with, or
+followed, that read — leaves the ciphertext already captured and the old secret already decrypted
+from it. A receiver that switches to the new secret at the instant the owner rotates may reject a
+request that was already using the old one. The owner is told to update the receiver in the same
+sitting, and the precise description is: **rotation applies to every request whose signing-secret
+read has not yet observed the new value, not to every request that has not yet arrived at the
+receiver — and this design does not guarantee which value a read racing with a rotation will see.**
 
 ### Key rotation
 
