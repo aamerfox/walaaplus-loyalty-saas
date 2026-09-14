@@ -137,6 +137,10 @@ stamps a lease of three columns, so two workers cannot both take a row and a cra
 nothing — §9.1. A batch is ten, so the worst case (ten requests at a five-second timeout) sits well
 inside the five-minute lease.
 
+**Each delivery is then read again, on its own, immediately before it is sent** — §9.5. The claim
+says which rows are this pass's; the per-delivery read says what is true about one of them right
+now.
+
 **A destination enabled after an event exists gets no delivery for it** — the same no-backfill rule
 as Prompt 1, one layer out.
 
@@ -296,6 +300,35 @@ read"*. No algorithm, no key version, no mention of which value failed.
 | "an unavailable key is RETRYABLE" | 1 |
 
 Each restored and the suite re-run green.
+
+---
+
+### 9.5 The dispatch read was per batch, and the comment said otherwise
+
+`loadClaimed(ids, token)` ran once for the whole claimed batch, before the loop, and `attemptOne`
+used that snapshot. The comment above it said the destination's state was "re-read under the claim,
+immediately before dispatch". **It was not, and a batch read cannot be.**
+
+With ten claimed and the first slow, an owner could disable or revoke the tenth destination and the
+tenth delivery would still dispatch against a stale `ENABLED` — and sign with a stale secret if they
+had rotated it. The stale window was as long as every earlier delivery took.
+
+Now `loadForDispatch(id, token)` runs **inside the loop, per delivery**, and returns the current
+destination state, the current ciphertexts and the current event. The claim token is in the `WHERE`,
+so a row re-claimed by another pass comes back empty and is skipped with no request and no attempt.
+
+**A second bug fell out of writing the tests.** `UPDATE … RETURNING` emits rows in whatever order it
+updated them — PostgreSQL does not specify it — so the `ORDER BY nextAttemptAt` inside the claim's
+sub-select was choosing *which* rows to take and not the order they came back in. Oldest-first was
+the intent and was not being honoured. The claim is now wrapped in a CTE that orders the ids on the
+way out; without that, an interleaving test cannot be deterministic either.
+
+Five deterministic tests, each claiming two deliveries and committing a change while the first is on
+the wire. **Four of the five go red** against the restored batch-snapshot implementation; the fifth
+is the disabled-test case, which is allowed either way by design.
+
+The one remaining boundary is now microseconds rather than most of a minute: a request already on
+the wire cannot be unsent. That is stated, not promised away.
 
 ---
 

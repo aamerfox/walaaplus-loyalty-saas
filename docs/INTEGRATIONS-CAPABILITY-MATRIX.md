@@ -296,21 +296,41 @@ something; today the owner reads a status and decides.
 
 ### The delivery-state cutover, and the boundary it cannot cross
 
-The destination's state is re-read **under the claim, immediately before dispatch**. A destination
-disabled or revoked while a delivery sat in the queue sends nothing, and the attempt is recorded as
-`DESTINATION_NOT_ELIGIBLE` — permanent, because an owner's decision is not a transient condition.
+The destination's state, its ciphertexts and its event are read **per delivery, in the dispatch
+loop, immediately before that delivery is sent** — not once for the claimed batch.
 
-**What that cannot do is unsend a request already on the wire.** If the owner's disable commits after
-the delivery has handed its body to the socket, the receiver gets it. The window is milliseconds and
-it is unavoidable: a TCP connection and a database transaction do not commit together. Nothing in
-this product promises otherwise, and an owner who needs a guarantee that a specific event never
-arrives has to arrange it at the receiver.
+That distinction is the whole point, and it was wrong once: a batch read is a snapshot, and a
+snapshot taken when ten deliveries were claimed is stale by the time the tenth is sent if the first
+was slow. An owner could disable the tenth destination and the tenth delivery would still go, on a
+state that was true a minute earlier. Fixed, and the tests that prove it interleave a committed
+change between two dispatches in the same batch.
 
-The same is true of **signing-secret rotation**. A request already in flight was signed with the old
-secret and will verify against it; a receiver that switches to the new secret at the moment the owner
-rotates may reject that one request. The owner is told to update the receiver in the same sitting,
-and the honest description is: rotation takes effect for every request that has not yet been signed,
-not for every request that has not yet arrived.
+So: a destination disabled or revoked while an earlier delivery was in flight sends nothing, and the
+attempt is recorded as `DESTINATION_NOT_ELIGIBLE` — permanent, because an owner's decision is not a
+transient condition. A signing secret rotated in the same window signs with the **new** value,
+because the ciphertext is read in the same breath as the state.
+
+The read also requires the **claim token**. A row re-claimed by another pass while this one was slow
+comes back empty: no request is made and **no attempt is recorded**, because this pass is no longer
+describing its own work.
+
+**What that cannot do is unsend a request already on the wire.** The window is between that final
+per-delivery read and the moment the socket accepts the body — microseconds, and irreducible: a TCP
+connection and a database transaction do not commit together. If the owner's disable commits inside
+it, the receiver gets that one request.
+
+That is the **only** remaining gap, and it is worth being precise about how small it now is: before
+the per-delivery read it was as long as every earlier delivery in the batch took, which with ten
+claimed and a five-second timeout each could be most of a minute. Nothing in this product promises
+otherwise, and an owner who needs a guarantee that a specific event never arrives has to arrange it
+at the receiver.
+
+The same is true of **signing-secret rotation**, in the same window and no larger. Every delivery
+whose pre-dispatch read happens after the rotation commits signs with the new secret; a request
+already on the wire was signed with the old one and will verify against it. A receiver that switches
+to the new secret at the instant the owner rotates may reject that one request. The owner is told to
+update the receiver in the same sitting, and the honest description is: **rotation takes effect for
+every request not yet signed, not for every request not yet arrived.**
 
 ### Key rotation
 

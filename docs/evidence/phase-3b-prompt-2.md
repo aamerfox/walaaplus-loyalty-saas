@@ -6,9 +6,11 @@
 |---|---|
 | Code, migration and tests | `770f324` |
 | Documentation | `9695e17` |
-| Review fixes (migration, code, tests) | `76edaee` — see §13 |
-| Review fixes (documentation) | the commit carrying this file |
-| **Deploy this** | the tip of `rebuild/phase-0-foundation`. **Not `9695e17`** — see §13 |
+| Review fixes — lease, test matrix, encryption (migration, code, tests) | `76edaee` — see §13 |
+| Review fixes — lease, test matrix, encryption (documentation) | `9282fa2` |
+| Review fix — dispatch boundary (code, tests) | `35b6ab2` — see §14 |
+| Review fix — dispatch boundary (documentation) | the commit carrying this file |
+| **Deploy this** | the tip of `rebuild/phase-0-foundation`. **Not `9695e17`, not `9282fa2`** |
 | Migration | `20260921120000_webhook_destinations`, the **15th** |
 | `master` | untouched at `b9ee686`, and absent from the `deploy` remote |
 
@@ -389,8 +391,9 @@ path.
 
 ### 13.4 The cutover, and the boundary it cannot cross
 
-The destination's state is re-read **under the claim, immediately before dispatch**. A destination
-disabled or revoked while a delivery sat in the queue sends nothing.
+The destination's state is re-read before dispatch. **As written in `76edaee` that read was per
+BATCH, not per delivery** — a later review found the gap and §14 closes it; what follows describes
+the corrected behaviour.
 
 **What that cannot do is unsend a request already on the wire.** If the owner's disable commits after
 the body has gone to the socket, the receiver gets it. The window is milliseconds and it is
@@ -463,17 +466,122 @@ not be run concurrently on one machine.
 
 ---
 
-## 14. Which SHA to deploy
+## 14. Review hardening — the dispatch boundary
+
+`9282fa2` was reviewed and one gap was found, correctly: the per-delivery cutover §13.4 described
+did not exist. Fixed in **`35b6ab2`**. **No migration and no schema change** — everything needed was
+already on the row, so migration 15 was not amended and the count stays at **15**.
+
+### 14.1 What was wrong
+
+`runDueDeliveries` called `loadClaimed(ids, token)` **once for the whole claimed batch**, before the
+loop. `attemptOne` then worked from that snapshot: `destinationState`, `endpointCipher` and
+`signingSecretCipher` were all as they had been when the batch was claimed.
+
+So the comment above it — *"The destination's state is re-read under the claim, immediately before
+dispatch"* — was **false**, and §13.4 of this file repeated it. A batch read cannot be an immediate
+pre-dispatch read; those are different moments by definition.
+
+The practical consequence: with ten claimed and the first slow, an owner could disable or revoke the
+tenth destination and the tenth delivery would still dispatch on a stale `ENABLED`, and sign with a
+stale secret if they had rotated it. The stale window was as long as every earlier delivery took —
+with a five-second transport timeout each, most of a minute.
+
+### 14.2 What it is now
+
+`loadForDispatch(id, token)` runs **inside the loop, once per delivery, immediately before that
+delivery is sent**, and returns:
+
+- the **current** destination state,
+- the **current** endpoint and signing-secret ciphertexts,
+- the **current** event.
+
+The **claim token is in the `WHERE`**. A row re-claimed by another pass while this one was slow comes
+back `null`: the delivery is skipped, **no request is made and no attempt is recorded**, because this
+pass is no longer describing its own work. The run summary gained a `skipped` count so that is
+visible rather than silent.
+
+The cost is one indexed primary-key read per delivery, against an outbound HTTP request. That is the
+difference between a promise the code keeps and one it only makes.
+
+### 14.3 A second bug, found while writing the tests
+
+`UPDATE … RETURNING` emits rows in whatever order it updated them — PostgreSQL does not specify it.
+So the `ORDER BY "nextAttemptAt"` inside the claim's sub-select was deciding **which** rows to take
+and **not** the order they came back in. Oldest-first was the intent and was not happening.
+
+The claim is now wrapped in a CTE that orders the ids on the way out. It also makes the interleaving
+tests deterministic — without it, which delivery goes first is a coin toss, and a test that depends
+on a coin toss lies when it is green.
+
+### 14.4 The tests
+
+Five, each claiming **two** deliveries and committing a change while the first is on the wire. The
+change is made inside the first delivery's `send`, keyed on the delivery id rather than a counter,
+so it is committed before the second delivery's read **by construction, not by timing**.
+
+| test | proves |
+|---|---|
+| disable the second destination mid-batch | the second sees `DISABLED`; as a synthetic test it is still allowed, which is the rule |
+| revoke the second destination mid-batch | **nothing is sent** — not even a test; `DESTINATION_NOT_ELIGIBLE`, `REFUSED`, one request total |
+| disable a destination with a **real** event queued | no request; `DESTINATION_NOT_ELIGIBLE` |
+| rotate the second destination's secret mid-batch | its request verifies against the **new** secret and not the old |
+| another pass steals the second claim mid-batch | skipped: no request, `attemptCount` 0, no attempt row |
+
+**Red-proved.** Restoring the batch-snapshot loop turns **four of the five red**. The fifth is the
+disabled-test case, which is legitimately allowed under both implementations — and saying so is more
+useful than pretending all five depend on the fix.
+
+### 14.5 The boundary that remains
+
+A request already on the wire cannot be unsent. The window is now between that per-delivery read and
+the moment the socket accepts the body — **microseconds**, where before the fix it was up to most of
+a minute. Irreducible: a TCP connection and a database transaction do not commit together.
+
+The same applies to secret rotation: every delivery whose pre-dispatch read happens after the
+rotation commits signs with the new secret; one already on the wire was signed with the old. Stated
+in §7a of the matrix, and not promised away.
+
+### 14.6 The quality bar, re-run in full
+
+| Check | Result |
+|---|---|
+| `node scripts/gate.mjs` | **PASS 15/15**, 623.0s |
+| `npx playwright test` — run 1 | **120 passed**, 3.6m |
+| `npx playwright test` — run 2 | **120 passed**, 3.2m |
+| `npx vitest run` | **96 files, 1393 tests passed**, 510.8s |
+| `npm audit` / `--omit=dev` | 0 vulnerabilities each |
+| `node scripts/db-migrate.mjs status` | **15** migrations, up to date |
+| `prisma migrate diff` | unchanged — the same pre-existing `ConsentRecord` naming |
+| `git diff --stat` over `prisma/` | **empty** — no migration or schema change this round |
+| `git diff --check` | clean |
+| `git status --porcelain public/` | **0** |
+| Secret / raw-capability / control-byte scans | clean |
+| `INTEGRATION_ENCRYPTION_KEY` value anywhere | **none** |
+
+`webhook-delivery` is now **34** tests.
+
+---
+
+## 15. Which SHA to deploy
 
 The tip of `rebuild/phase-0-foundation` — the documentation commit carrying this file, which
 contains `770f324`, `9695e17` and the review-fix commit. The final report names the exact hash; a
 file cannot name the commit it is part of.
 
-**`9695e17` must not be deployed.** Nothing in it corrupts data — every row it writes is correct —
-but it can send a webhook twice under overlapping worker passes, it silently never sends the test a
-disabled destination's own screen offers, and it permanently discards every queued delivery if the
-encryption key is briefly unset. The migration it ships is the artefact hardest to correct once
-applied, and it has not been applied anywhere.
+**Neither `9695e17` nor `9282fa2` may be deployed.**
+
+`9695e17` can send a webhook twice under overlapping worker passes, silently never sends the test a
+disabled destination's own screen offers, and permanently discards every queued delivery if the
+encryption key is briefly unset.
+
+`9282fa2` fixes those three, and still dispatches later deliveries in a batch against a stale
+destination state — so a destination disabled or revoked while an earlier delivery was in flight
+could still receive one, for up to most of a minute. It also carries a comment and a paragraph in
+this file asserting a cutover that did not exist, which is the worse half: a wrong guarantee written
+down is one somebody relies on.
+
+Neither has been applied anywhere.
 
 `master` is untouched at `b9ee686`. Staging is Freebuff's after independent review, and nothing in
 this report claims a staging, provider, device, POS, wallet or external-network test was performed.
