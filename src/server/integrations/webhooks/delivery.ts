@@ -64,8 +64,29 @@ import { sendWebhook, type SendWebhookResult } from "./gateway";
 /**
  * How many deliveries one pass claims.
  *
- * Ten rather than twenty-five, because the lease has to cover the worst case: ten requests at the
- * transport's five-second timeout is under a minute, comfortably inside the lease below.
+ * Ten rather than twenty-five, because the lease has to cover the worst case - and since Prompt 3
+ * the worst case is longer than it was. This module no longer holds the socket: it hands each
+ * delivery to the egress gateway and waits up to `GATEWAY_TIMEOUT_MS` (15 s), which is deliberately
+ * longer than the gateway's own 5 s outbound timeout plus DNS and a TLS handshake. Ten sequential
+ * deliveries is therefore up to about **150 seconds**, comfortably inside the 300 s lease below.
+ *
+ * (An earlier version of this note said "ten requests at the transport's five-second timeout is
+ * under a minute". That was true of the transport module, which no longer exists, and anyone tuning
+ * this constant or the lease would have computed from the wrong number.)
+ *
+ * A full slow batch therefore outlasts the one-minute schedule, so passes can overlap. That is
+ * safe by construction and not by luck: pg-boss's `singletonKey` stops a second tick starting while
+ * one is running, `FOR UPDATE SKIP LOCKED` steps over rows another pass is taking, and every write
+ * carries the claim token.
+ *
+ * ## What this means for throughput, stated plainly
+ *
+ * Ten per minute is a GLOBAL ceiling - roughly 600 deliveries an hour across every business on the
+ * deployment, not per tenant - and the claim is ordered by `nextAttemptAt`, which is first-come
+ * rather than fair between tenants. `queueTestDelivery` is bounded to one waiting test per
+ * destination for exactly this reason (migration 17); real deliveries are bounded by how much
+ * business actually happens. If a deployment ever outgrows this, the honest fix is a larger batch
+ * or per-tenant fairness in `claimDue`, not a bigger lease.
  */
 export const BATCH_SIZE = 10;
 

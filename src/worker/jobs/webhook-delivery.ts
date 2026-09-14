@@ -26,6 +26,14 @@ export const WEBHOOK_DELIVERY_CRON = "* * * * *";
 export interface WebhookDeliveryResult {
   /** How many due rows this pass CLAIMED. Renamed with the lease: a claim is what is countable. */
   claimed: number;
+  /**
+   * Claimed, then found at dispatch time to be held by somebody else. No request, no attempt.
+   *
+   * Declared because it IS stored: the summary is assigned to this type and handed to
+   * `boss.complete`, which keeps it in a table, so a field missing from the type was a field
+   * missing from the description of what is kept rather than a field that was not kept.
+   */
+  skipped: number;
   delivered: number;
   retrying: number;
   refused: number;

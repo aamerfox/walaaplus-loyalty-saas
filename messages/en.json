@@ -432,6 +432,7 @@
     "errorInvalid": "Check the address and try again.",
     "errorPort": "Webhook endpoints must use HTTPS port 443.",
     "errorTaken": "That name or address is already in use.",
+    "errorTestPending": "A test is already waiting to be sent to this destination. It goes out within about a minute.",
     "historyHint": "One entry per completed offer redemption and per withdrawal, written at the same moment as the action itself. Newest first.",
     "historyTitle": "Recorded events",
     "lastOutcome": "Last attempt",

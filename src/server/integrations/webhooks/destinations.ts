@@ -400,6 +400,36 @@ export async function queueTestDelivery(ctx: TenantContext, destinationId: strin
     throw new ConflictError("A revoked destination cannot be tested");
   }
 
+  /*
+   * One test delivery in flight per destination, and no more.
+   *
+   * Not a nicety. `claimDue` takes ten rows per minute ACROSS EVERY BUSINESS, ordered by when they
+   * became due, and a test delivery is created due immediately - so an owner who called this in a
+   * loop would put thousands of their own rows at the front of a queue every other tenant shares.
+   * Nothing would be exposed and nobody's delivery would be marked failed, but every other
+   * business's webhooks would wait behind them for as long as the caller kept going. One tenant
+   * must not be able to set another tenant's delivery latency.
+   *
+   * A destination that already has a test waiting does not need a second one: the button means
+   * "check this address", and the first press is still checking it. Outstanding test deliveries are
+   * therefore bounded by the number of destinations, which is itself bounded at
+   * MAX_DESTINATIONS_PER_BUSINESS.
+   *
+   * `walaaplus_webhook_delivery_guard` enforces the same rule at INSERT (migration 17), so it holds
+   * against a writer that is not this function.
+   */
+  const waiting = await prisma.webhookDelivery.count({
+    where: {
+      destinationId: existing.id,
+      businessId: ctx.businessId,
+      isTest: true,
+      status: WebhookDeliveryStatus.PENDING,
+    },
+  });
+  if (waiting > 0) {
+    throw new ConflictError("A test is already queued for this destination", ConflictCode.WEBHOOK_TEST_PENDING);
+  }
+
   return prisma.$transaction(async (tx) => {
     const delivery = await tx.webhookDelivery.create({
       data: {

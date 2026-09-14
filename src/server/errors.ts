@@ -75,6 +75,14 @@ export const ConflictCode = {
   CARD_NOT_TRANSACTABLE: "CARD_NOT_TRANSACTABLE",
   /** The group was already reversed, or is itself a reversal. */
   ALREADY_REVERSED: "ALREADY_REVERSED",
+  /**
+   * A destination already has a test delivery waiting to be sent.
+   *
+   * Its own code because the screen has to say something useful: "that name or address is already
+   * in use" is the wrong sentence entirely, and an owner pressing the button twice deserves to be
+   * told their first test is still queued rather than that something went wrong.
+   */
+  WEBHOOK_TEST_PENDING: "WEBHOOK_TEST_PENDING",
 
   /*
    * Phase 1b Prompt 3. The lifecycle refusals a merchant can act on.

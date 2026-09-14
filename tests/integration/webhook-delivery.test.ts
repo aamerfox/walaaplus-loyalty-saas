@@ -753,8 +753,25 @@ describe("two passes cannot dispatch the same delivery", () => {
   });
 
   it("splits a batch between two passes rather than duplicating it", async () => {
+    /*
+     * Four destinations rather than four tests on one. A destination may have only ONE test
+     * delivery waiting - the release gate's F1, enforced by the service and by
+     * `walaaplus_webhook_delivery_guard` - because an unbounded test queue was one tenant's lever
+     * on every other tenant's delivery latency.
+     *
+     * What this test is about is unaffected: it needs four due rows so that two concurrent passes
+     * have something to split, and where they came from does not matter to the claim.
+     */
     const { fx, destinationId } = await cafeWithDestination("Batch caf\u00e9");
-    for (let i = 0; i < 4; i += 1) await queueTestDelivery(fx.ctx, destinationId);
+    await queueTestDelivery(fx.ctx, destinationId);
+    for (let i = 1; i < 4; i += 1) {
+      const extra = await makeDestination(fx, {
+        name: `Batch ${i}`,
+        url: `https://${HOST}:${receiver.port}/hook?b=${i}`,
+      });
+      await setDestinationState(fx.ctx, extra.destination.id, "ENABLED");
+      await queueTestDelivery(fx.ctx, extra.destination.id);
+    }
     const before = receiver.requests.length;
 
     const [a, b] = await Promise.all([runOnce(), runOnce()]);

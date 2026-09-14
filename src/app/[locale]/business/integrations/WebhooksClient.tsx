@@ -131,11 +131,13 @@ export default function WebhooksClient({ businessId, destinations, configured }:
             ? t("errorForbidden")
             : code === "WEBHOOK_PORT_NOT_443"
               ? t("errorPort")
-              : res.status === 400
-                ? t("errorInvalid")
-                : res.status === 409
-                  ? t("errorTaken")
-                  : t("error"),
+              : code === "WEBHOOK_TEST_PENDING"
+                ? t("errorTestPending")
+                : res.status === 400
+                  ? t("errorInvalid")
+                  : res.status === 409
+                    ? t("errorTaken")
+                    : t("error"),
         );
         return null;
       }
