@@ -106,6 +106,27 @@ services:
       # Forwarding headers may be believed HERE and only here, because `proxy` overwrites them
       # and this service is not published to the host. See deploy/Caddyfile.
       TRUST_PROXY_HEADERS: "true"
+      # Webhook URL and signing-secret encryption (Phase 3B Prompt 2).
+      #
+      # `:-` and NOT `:?`, deliberately. An unset key must not stop the till: this product's
+      # core - enrolment, stamps, points, redemptions, the scanner - does not touch webhooks,
+      # and a deployment that configures none should start exactly as it did before the feature
+      # existed. `${INTEGRATION_ENCRYPTION_KEY:-}` resolves to an empty string when the variable
+      # is absent, which src/server/env.ts accepts (it is optional and deliberately unvalidated
+      # there) and src/server/integrations/webhooks/crypto.ts treats the same as unset.
+      #
+      # So an absent or malformed value fails the WEBHOOK PATH closed - configuration and
+      # delivery both refuse, by name, without ever printing the value - and touches nothing
+      # else. There is no plaintext fallback.
+      #
+      # BOTH web and worker need the SAME value: web encrypts a destination's URL and secret
+      # when the owner saves it, the worker decrypts them to sign and deliver. A stack where
+      # only one of them has the key half-works, which is worse than neither having it.
+      #
+      # Given to these two services and to nothing else. `db`, `test-db`, `migrate` and `proxy`
+      # have no use for it; tests/unit/compose-exposure.test.ts fails the gate if one of them
+      # starts receiving it, or if `env_file` ever returns and hands it out wholesale.
+      INTEGRATION_ENCRYPTION_KEY: ${INTEGRATION_ENCRYPTION_KEY:-}
     # NOT published. The app is reachable only through `proxy` on the Compose network: a caller
     # who could reach port 3000 directly could forge X-Forwarded-For and walk past every
     # per-address rate limit.
@@ -133,6 +154,10 @@ services:
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?Set NEXTAUTH_SECRET in .env (openssl rand -base64 48)}
       NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:${WEB_PORT:-8080}}
       WORKER_HEALTH_PORT: 8081
+      # The delivery half of the pair. Same value as `web`, same optional-by-design `:-`, same
+      # fail-closed behaviour when it is absent: the worker's other jobs run normally and only
+      # webhook delivery refuses. See the note on `web`.
+      INTEGRATION_ENCRYPTION_KEY: ${INTEGRATION_ENCRYPTION_KEY:-}
     # NOT published: the health endpoint exists for the container orchestrator, which probes it
     # from inside (see healthcheck below). Publishing it would put an unauthenticated status
     # endpoint on the host for no benefit. To read it by hand:

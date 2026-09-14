@@ -21,8 +21,12 @@
 #
 # WHAT HOLDS WHICH CREDENTIAL:
 #   migrate  MIGRATE_DATABASE_URL (owner role) - the only service that ever receives it
-#   web      DATABASE_URL (restricted runtime role) and the session secret
-#   worker   DATABASE_URL (restricted runtime role)
+#   web      DATABASE_URL (restricted runtime role), the session secret, and the webhook
+#            encryption key
+#   worker   DATABASE_URL (restricted runtime role) and the webhook encryption key
+# INTEGRATION_ENCRYPTION_KEY goes to web and worker and to NOTHING else - not db, not migrate,
+# not proxy - and it is optional at interpolation time, so an environment that configures no
+# webhooks starts unchanged. See the note on `web`.
 # `env_file` is deliberately not used for web and worker. It would hand those containers every
 # variable in the file, migrator password included, to save typing one line. Each service below
 # receives the variables it needs and no others.
@@ -100,6 +104,17 @@ services:
       # address of the connection it received, and this service publishes no port, so no request
       # can reach it without passing through that replacement. See deploy/Caddyfile.staging.
       TRUST_PROXY_HEADERS: "true"
+      # Webhook URL and signing-secret encryption. Per-environment: staging and production must
+      # not share a value, and neither may ever be committed, logged or rendered.
+      #
+      # `:-` and NOT `:?`: an unset key must not stop the application. It resolves to an empty
+      # string, src/server/env.ts accepts that (optional, deliberately unvalidated there), and
+      # src/server/integrations/webhooks/crypto.ts then fails the webhook path closed - webhook
+      # configuration and delivery refuse, everything else runs untouched. No plaintext fallback.
+      #
+      # web and worker need the SAME 32-byte value: web encrypts a destination when it is saved,
+      # the worker decrypts it to sign and deliver. Named in .env.staging.example, with no value.
+      INTEGRATION_ENCRYPTION_KEY: ${INTEGRATION_ENCRYPTION_KEY:-}
     # Container-only. A caller who could reach port 3000 directly would forge X-Forwarded-For and
     # walk past every per-address rate limit in the product.
     expose:
@@ -130,6 +145,16 @@ services:
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?Set NEXTAUTH_SECRET in .env.staging}
       NEXTAUTH_URL: https://${WALAAPLUS_DOMAIN:?Set WALAAPLUS_DOMAIN in .env.staging}
       WORKER_HEALTH_PORT: 8081
+      # The delivery half of the pair; same value as `web`. See the note there.
+      #
+      # NOTE FOR WHOEVER DEPLOYS THIS: the key is what lets the worker DECRYPT a destination. It
+      # is not what lets it REACH one. This service is attached to `backend` alone, and that
+      # network is `internal: true` - it has no gateway, so there is no route to any external
+      # host from here in either direction. Outbound webhook delivery from this file's worker
+      # will therefore fail at the network layer even with a correct key. That is deliberate
+      # today and is NOT changed here: giving this worker a routed network is an exposure
+      # decision for the owner, not a side effect of wiring a secret.
+      INTEGRATION_ENCRYPTION_KEY: ${INTEGRATION_ENCRYPTION_KEY:-}
     # Container-only, and on the internal network only: an unauthenticated status endpoint has no
     # reason to be reachable from the host. Read it by hand with
     #   docker compose -f docker-compose.staging.yml exec worker wget -qO- http://localhost:8081/health

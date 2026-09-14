@@ -179,6 +179,25 @@ describe(".env.staging.example", () => {
   it("names no real domain either", () => {
     expect(stagingEnvTemplate).not.toMatch(REAL_LOOKING_DOMAIN);
   });
+
+  it("documents the webhook encryption key, and says both processes need the same value", () => {
+    /*
+     * The variable a staging deployment was blocked on. It is OPTIONAL — a stack that configures
+     * no webhooks starts fine without it — so it is not in the required list above. But an
+     * operator who cannot find its name in the template will not set it at all, and the failure
+     * that follows is silent from the outside: the application runs, and only webhooks refuse.
+     *
+     * The template must therefore name it, must say the generation command, and must say that web
+     * AND worker receive the same value. Half a stack holding the key is worse than neither half
+     * holding it: destinations save and never deliver.
+     */
+    expect(stagingEnvTemplate).toMatch(/^INTEGRATION_ENCRYPTION_KEY=$/m);
+    expect(stagingEnvTemplate).toContain("openssl rand -hex 32      # INTEGRATION_ENCRYPTION_KEY");
+    expect(stagingEnvTemplate).toMatch(/BOTH web and worker/);
+    expect(stagingEnvTemplate).toMatch(/PER ENVIRONMENT/);
+    // And it must still be true that leaving it blank is a supported state, not a broken one.
+    expect(stagingEnvTemplate).toMatch(/LEAVING IT BLANK IS SUPPORTED/);
+  });
 });
 
 describe("database password guidance", () => {

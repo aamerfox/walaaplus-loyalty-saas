@@ -163,6 +163,13 @@ services:
       # enrolment link - carry the load. tests/unit/compose-exposure.test.ts fails the gate if
       # this ever reads "true" again.
       TRUST_PROXY_HEADERS: "false"
+      # Webhook URL and signing-secret encryption. Per-environment, never committed, never
+      # logged. `:-` and NOT `:?`: an unset key resolves to an empty string and the application
+      # starts normally - only webhook configuration and delivery fail, closed, in
+      # src/server/integrations/webhooks/crypto.ts. On a shared host that matters more than
+      # usual: a missing optional secret must never be the reason this stack fails to come up
+      # beside its neighbours. web and worker need the SAME 32-byte value; nothing else gets it.
+      INTEGRATION_ENCRYPTION_KEY: ${INTEGRATION_ENCRYPTION_KEY:-}
     # THE ONLY PUBLISHED PORT IN THIS FILE, and it is deliberately a literal rather than a
     # variable: an interpolated host IP is one typo away from 0.0.0.0, which would put the
     # application on the public internet beside a proxy that is supposed to be in front of it.
@@ -201,6 +208,14 @@ services:
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?Set NEXTAUTH_SECRET in the env file}
       NEXTAUTH_URL: https://${WALAAPLUS_DOMAIN:?Set WALAAPLUS_DOMAIN in the env file}
       WORKER_HEALTH_PORT: 8081
+      # The delivery half of the pair; same value as `web`. See the note there.
+      #
+      # NOTE FOR WHOEVER DEPLOYS THIS: this service is attached to `backend` alone, which is
+      # `internal: true` and has no gateway. The key lets the worker DECRYPT a destination; it
+      # does not give it a route to one. Outbound delivery from this worker fails at the network
+      # layer regardless of the key. Left as it is on purpose - attaching this worker to a routed
+      # network is an exposure decision for the owner, not a side effect of wiring a secret.
+      INTEGRATION_ENCRYPTION_KEY: ${INTEGRATION_ENCRYPTION_KEY:-}
     # Container-only, and on the internal network only. Read it by hand with
     #   docker compose -f docker-compose.staging-cohost.yml exec worker wget -qO- http://localhost:8081/health
     expose:

@@ -117,6 +117,11 @@ describe("tampering is rejected, not decoded", () => {
 
 describe("a missing or malformed key fails closed", () => {
   it("refuses when the variable is absent or blank", () => {
+    // The EMPTY case is not hypothetical. The compose files pass this variable as
+    // `${INTEGRATION_ENCRYPTION_KEY:-}` so that an unset key cannot stop the till from starting,
+    // and Compose resolves that to an empty string in the container - not to an absent variable.
+    // Blank and absent must therefore mean the same thing here, or "optional at interpolation
+    // time" would quietly become "configured with a zero-length key".
     for (const source of [{}, { INTEGRATION_ENCRYPTION_KEY: "" }, { INTEGRATION_ENCRYPTION_KEY: "   " }]) {
       expect(() => encryptSecret("x", source as unknown as NodeJS.ProcessEnv)).toThrow(EncryptionUnavailableError);
       expect(encryptionAvailable(source as unknown as NodeJS.ProcessEnv)).toBe(false);

@@ -494,3 +494,132 @@ describe.each([
     }
   });
 });
+
+/**
+ * `INTEGRATION_ENCRYPTION_KEY` — the webhook encryption key, and the two services that may hold it.
+ *
+ * A staging deployment was blocked on exactly this. The key was present in the server's
+ * `.env.staging`, and NO compose file passed it into a container. That is not a bug in Compose: a
+ * service receives only the variables its own `environment:` block names, which is the whole reason
+ * `env_file` is banned here. The consequence was that `web` and `worker` came up without the key
+ * and every webhook operation failed closed while the value sat on disk two directories away.
+ *
+ * Named-variable least privilege only works if the naming is complete. This block pins both halves:
+ *
+ *   - both application services, in all three files, receive it BY NAME;
+ *   - nothing else receives it — not the database, not the migrator, not the proxy, not the
+ *     throwaway test database;
+ *   - it stays OPTIONAL at interpolation time (`${VAR:-}`, never `${VAR:?}`), because an unset key
+ *     must not stop the till over a feature the deployment may not be using. Fail-closed lives in
+ *     `src/server/integrations/webhooks/crypto.ts`, at the moment the value is needed, not in
+ *     Compose's interpolation;
+ *   - the file never carries a value, only the interpolation;
+ *   - and wiring it changed no port, no network and no forwarded-header setting.
+ *
+ * No test in this file reads, prints or asserts on a key VALUE. Names and interpolation forms only.
+ */
+const ENCRYPTION_KEY = "INTEGRATION_ENCRYPTION_KEY";
+
+describe.each([
+  ["docker-compose.yml", LOCAL],
+  ["docker-compose.staging.yml", STAGING],
+  ["docker-compose.staging-cohost.yml", COHOST],
+])("%s — the webhook encryption key", (_name, file) => {
+  const compose = load(file);
+  const raw = readFileSync(file, "utf8");
+
+  it("passes it by name to web and to worker", () => {
+    for (const service of ["web", "worker"]) {
+      expect(
+        envNames(compose.services[service]),
+        `${service} must receive ${ENCRYPTION_KEY} by name — without it webhook configuration ` +
+          "and delivery fail closed even when the value is set in the deployment's env file",
+      ).toContain(ENCRYPTION_KEY);
+    }
+  });
+
+  it("passes it to no other service", () => {
+    for (const [name, service] of Object.entries(compose.services)) {
+      if (name === "web" || name === "worker") continue;
+      expect(envNames(service), `${name} has no use for ${ENCRYPTION_KEY}`).not.toContain(ENCRYPTION_KEY);
+      // Not by name, and not smuggled inside another variable's value either.
+      expect(
+        JSON.stringify(service.environment ?? {}),
+        `${name} must not reference ${ENCRYPTION_KEY} at all`,
+      ).not.toContain(ENCRYPTION_KEY);
+    }
+  });
+
+  it("keeps it optional at interpolation time, so an unset key still starts the stack", () => {
+    /*
+     * `${VAR:?message}` is how this file makes a REQUIRED variable fail loudly, and it is the
+     * wrong tool here: the till, enrolment, stamps, points, redemptions and the scanner do not
+     * touch webhooks, so an absent optional secret must not stop them. `${VAR:-}` resolves to an
+     * empty string, which src/server/env.ts accepts and crypto.ts treats exactly as unset.
+     */
+    const lines = raw.split("\n").filter((l) => l.trim().startsWith(`${ENCRYPTION_KEY}:`));
+    expect(lines, "one line per application service").toHaveLength(2);
+    for (const line of lines) {
+      expect(line.trim()).toBe(`${ENCRYPTION_KEY}: \${${ENCRYPTION_KEY}:-}`);
+      expect(line, "must not be required at interpolation time").not.toContain(":?");
+    }
+  });
+
+  it("carries no value of its own, in any form", () => {
+    // The only text after the colon is the interpolation asserted above. A hex or base64 literal
+    // here would be a committed secret; the secret scan would catch it, but not before a push.
+    for (const service of ["web", "worker"]) {
+      const value = envValue(compose.services[service], ENCRYPTION_KEY);
+      expect(value).toBe(`\${${ENCRYPTION_KEY}:-}`);
+      expect(value).not.toMatch(/[0-9a-f]{32}/i);
+    }
+  });
+
+  it("introduces no env file, which is what made naming the variable necessary", () => {
+    for (const [service, def] of Object.entries(compose.services)) {
+      expect(def.env_file, `${service} must not use env_file`).toBeUndefined();
+    }
+  });
+});
+
+describe("wiring the encryption key changed no exposure", () => {
+  /*
+   * A secret arriving in a container is a credential-reach change and must be nothing else. These
+   * three assertions are deliberately whole-file and literal: they restate the complete published
+   * surface, the complete network attachment and the forwarded-header setting of all three stacks,
+   * so a port, a network or a trust flag that changes alongside a future environment edit fails
+   * here even if the tests above still pass.
+   */
+  it("leaves the published ports of all three stacks exactly as they were", () => {
+    expect(bindings(LOCAL).map((b) => `${b.service} ${b.entry}`).sort()).toEqual([
+      "db 127.0.0.1:${POSTGRES_PORT:-5433}:5432",
+      "proxy ${WEB_PORT:-8080}:80",
+      "test-db 127.0.0.1:${TEST_POSTGRES_PORT:-5435}:5432",
+    ]);
+    expect(bindings(STAGING).map((b) => `${b.service} ${b.entry}`).sort()).toEqual([
+      "proxy 443:443",
+      "proxy 80:80",
+    ]);
+    expect(bindings(COHOST).map((b) => `${b.service} ${b.entry}`)).toEqual(["web 127.0.0.1:3100:3000"]);
+  });
+
+  it("leaves every network attachment as it was, internal networks included", () => {
+    for (const file of [STAGING, COHOST]) {
+      const compose = load(file);
+      expect(compose.networks?.backend?.internal).toBe(true);
+      expect(compose.services.db.networks).toEqual(["backend"]);
+      expect(compose.services.migrate.networks).toEqual(["backend"]);
+      // The worker stays on the internal network. The key lets it DECRYPT a destination; it does
+      // not give it a route to one, and this change does not hand it one. Attaching the worker to
+      // a routed network is an exposure decision, not a side effect of wiring a secret.
+      expect(compose.services.worker.networks).toEqual(["backend"]);
+      expect(compose.services.web.networks).toEqual(["backend", "edge"]);
+    }
+  });
+
+  it("leaves the forwarded-header decision of each stack untouched", () => {
+    expect(envValue(load(LOCAL).services.web, "TRUST_PROXY_HEADERS")).toBe("true");
+    expect(envValue(load(STAGING).services.web, "TRUST_PROXY_HEADERS")).toBe("true");
+    expect(envValue(load(COHOST).services.web, "TRUST_PROXY_HEADERS")).toBe("false");
+  });
+});
