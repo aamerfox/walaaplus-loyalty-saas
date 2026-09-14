@@ -203,12 +203,36 @@ down a guarantee that was not quite true — the same standard applies to writin
 that is not true. Two enum values are the honest encoding, and `ALTER TYPE … ADD VALUE` neither
 rewrites a row nor takes a table lock.
 
-Migration **16**, additive only. Migration 15 is untouched; it is already applied on staging.
+**And the database is what enforces both meanings, not the code that writes them.** Migration 16
+redefines the two trigger functions migration 15 created, because those functions enumerate the
+permanent and retryable classes *by name*: a value the enum knows and the triggers do not is a
+value the database has no opinion about. Concretely, `walaaplus_validate_webhook_attempt` now
+refuses an attempt that records `GATEWAY_REJECTED` as anything but permanent or
+`GATEWAY_UNAVAILABLE` as anything but retryable, and `walaaplus_webhook_delivery_guard` refuses a
+delivery that exhausts `GATEWAY_REJECTED` to `FAILED`, settles a retryable class as a permanent
+`REFUSED`, or reaches `FAILED` with one before the five-attempt cap. Every class comparison in
+both functions is made against `::text`, because PostgreSQL will not let a value added by
+`ALTER TYPE … ADD VALUE` be used as an enum literal in the same transaction and Prisma runs each
+migration in one.
+
+Migration **16**, additive only — two enum values and two `CREATE OR REPLACE FUNCTION` statements.
+No table is created, altered, rewritten or locked, and replacing a function body leaves the
+triggers that reference it pointing at the same function. Migration 15 is untouched; it is already
+applied on staging.
 
 Everything else is unchanged: `DELIVERED` only for 2xx, 3xx permanent, 429 retryable, 4xx permanent,
 5xx retryable, `UNSAFE_ADDRESS` permanent, `TIMEOUT`/`NETWORK`/`TLS` as before, and the retry
 schedule, the five-attempt cap, the lease and the append-only attempt history all exactly as
 Prompt 2 left them.
+
+The classes the database constrains are the ones that encode a **decision** — ours or the owner's —
+where recording the opposite would make the history say something false about what was *done*. The
+HTTP and network classes are deliberately left unconstrained: each follows from a status code or an
+error code rather than from a policy a trigger could restate, and a rule asserting
+"`HTTP_SERVER_ERROR` must be retryable" would be re-deriving the same fact from less information.
+`tests/integration/webhook-error-class-integrity.test.ts` holds a declared classification for
+**every** value of the enum, including the reason each unconstrained one is unconstrained, and
+fails if a value is ever added without one.
 
 ---
 

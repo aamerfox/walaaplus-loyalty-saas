@@ -5,7 +5,7 @@
 | Branch | `rebuild/phase-0-foundation` |
 | Baseline | `79a9f7c` — Prompt 2 plus the compose secret-wiring correction (60499) |
 | Capability matrix written first | `docs/WEBHOOK-EGRESS-TOPOLOGY.md` |
-| Migration | **16**, `20260922120000_webhook_egress_gateway_classes` — two enum values, additive. Migration 15 untouched and still applied on staging |
+| Migration | **16**, `20260922120000_webhook_egress_gateway_classes` — two enum values **and the two trigger functions that decide what they mean**, additive. Amended after review; see §12. Migration 15 untouched and still applied on staging |
 | New secret | `WEBHOOK_GATEWAY_SECRET`, per environment, **no value exists in this repository** |
 | Staging | **not deployed.** No external network test, no merchant endpoint, no provider account |
 
@@ -113,7 +113,8 @@ the application.
 
 ## 6. Failure classification, and the one migration
 
-Two new bounded classes, additive:
+Two new bounded classes, additive — **and, after the review correction in §12, two redefined
+trigger functions so the database enforces what they mean**:
 
 | Class | Outcome | When |
 |---|---|---|
@@ -317,3 +318,129 @@ to B7, tenant isolation, Caddy, database isolation, published ports, or any neig
 No staging deployment, no real merchant endpoint, no provider account, no customer data, no card,
 coupon or share token, no external production service, and no Caddy, DNS or firewall change was
 made or tested by this work. Freebuff performs deployment only after independent review.
+
+---
+
+## 12. Review correction — the database did not know what the new classes meant
+
+Found in `3ffa089`, before deployment. The finding was correct and the gap was real.
+
+### 12.1 What was wrong
+
+Migration 16, as first written, added `GATEWAY_UNAVAILABLE` and `GATEWAY_REJECTED` to the enum and
+stopped. But the two trigger functions migration 15 created enumerate the permanent and retryable
+classes **by name**:
+
+- `walaaplus_validate_webhook_attempt` required `PERMANENT` for `UNSAFE_ADDRESS`,
+  `CIPHERTEXT_INVALID` and `DESTINATION_NOT_ELIGIBLE`, and `RETRYABLE` for
+  `ENCRYPTION_UNAVAILABLE`;
+- `walaaplus_webhook_delivery_guard` forbade `FAILED` for those same three permanent classes.
+
+A value the enum knows and the triggers do not is a value the database has **no opinion about**. So
+the restricted runtime role — the role `web` and `worker` actually use — could have written
+`GATEWAY_REJECTED` as `RETRYABLE`, exhausted it to `FAILED`, or recorded `GATEWAY_UNAVAILABLE` as
+`PERMANENT`, and the append-only attempt history would have said something false about work that was
+never done.
+
+The application never writes any of those. **That is the point.** Every other rule in those
+functions is also one the application never breaks; they exist because "the code is currently
+correct" is not a constraint, and an append-only table cannot be corrected afterwards. Shipping two
+classes the code understands and the database does not is the exact drift those triggers exist to
+prevent.
+
+### 12.2 What migration 16 now does
+
+Migration 16 was **amended** — it had not reached staging — and migration 15 was not touched. Both
+functions are reproduced in full and re-created with `CREATE OR REPLACE`. The bodies were **sliced
+out of migration 15 by script rather than retyped**, so "preserve every existing rule exactly" is a
+property of the process; a line-by-line diff of the two versions shows only the edits listed here.
+
+| Rule | Where |
+|---|---|
+| `GATEWAY_REJECTED` must be `PERMANENT` | attempt validator, added to the permanent list |
+| `GATEWAY_REJECTED` can never settle `FAILED` | delivery guard, added to the never-exhausted list |
+| `GATEWAY_UNAVAILABLE` must be `RETRYABLE` | attempt validator, added beside `ENCRYPTION_UNAVAILABLE` |
+| a retryable class can never settle `REFUSED` | delivery guard, **new mirror rule** |
+| a retryable class reaches `FAILED` only at the attempt cap | delivery guard, **new mirror rule** |
+
+**Every error-class comparison is now made against `::text`.** Not a style preference: PostgreSQL
+refuses to let a value added by `ALTER TYPE … ADD VALUE` be used as an enum literal in the same
+transaction, and Prisma runs each migration in one — so a redefined function comparing
+`NEW."errorClass" = 'GATEWAY_REJECTED'` would have made the migration itself unapplyable. Comparing
+the label as text changes no semantics. The `status` and `outcome` enums gain no values here and are
+compared as before.
+
+**One deviation from the literal brief, reported rather than buried.** The two new mirror rules are
+written for **both** database-declared retryable classes — `GATEWAY_UNAVAILABLE` *and*
+`ENCRYPTION_UNAVAILABLE` — not only the new one. Writing a rule for one of two identically
+classified values is the same drift this correction exists to close, the function was being
+redefined anyway, and production code never produces either forbidden combination (`recordAttempt`
+settles `REFUSED` only for a `PERMANENT` outcome and `FAILED` only at `MAX_ATTEMPTS`). No existing
+rule was weakened or altered.
+
+`ALTER TYPE … ADD VALUE` twice plus two `CREATE OR REPLACE FUNCTION`. No table created, altered,
+rewritten or locked; no row changed; replacing a function body leaves the triggers that reference it
+pointing at the same function, so no trigger is dropped or recreated.
+
+### 12.3 The tests
+
+`tests/integration/webhook-error-class-integrity.test.ts`, **14 tests**, every write through the
+**restricted runtime Prisma client** with no service in the way:
+
+| | |
+|---|---|
+| reject | `GATEWAY_REJECTED` recorded retryable |
+| reject | `GATEWAY_REJECTED` recorded delivered (the pre-existing coherence rule, on the new class) |
+| reject | `GATEWAY_REJECTED` exhausted to `FAILED` — below the cap **and** at it |
+| reject | `GATEWAY_UNAVAILABLE` recorded permanent |
+| reject | `GATEWAY_UNAVAILABLE` settled as a permanent `REFUSED` |
+| reject | `GATEWAY_UNAVAILABLE` reaching `FAILED` at 1, 2 and 4 attempts |
+| accept | `GATEWAY_UNAVAILABLE` recorded retryable |
+| accept | `GATEWAY_UNAVAILABLE` reaching `FAILED` at exactly `MAX_ATTEMPTS` |
+| accept | `GATEWAY_REJECTED` as a permanent attempt and a `REFUSED` delivery |
+
+### 12.4 The drift guard
+
+The point of a regression guard here is that **the next enum value must not be able to repeat this**.
+The test file carries a `CLASSIFICATION` table declaring, for *every* value of `WebhookErrorClass`,
+one of `PERMANENT`, `RETRYABLE` or `UNCONSTRAINED` — the last with the reason it is one. Four
+assertions hang off it:
+
+1. the table's keys equal the enum's values **exactly**, so a class added later and not declared
+   fails immediately, with no database needed;
+2. every `PERMANENT` declaration is proved on a **live insert** through the runtime role;
+3. every `RETRYABLE` declaration likewise;
+4. every constrained class is shown to appear inside the **live** function definitions, read back
+   with `pg_get_functiondef` — not the migration file, which could have been edited without being
+   applied, and not the application, which is the thing being checked. *This is the assertion that
+   would have failed on the first version of migration 16: both new classes existed in the enum and
+   neither appeared in either function.*
+
+The HTTP and network classes are `UNCONSTRAINED` deliberately, and the table says why: each follows
+from a status code or an error code rather than from a policy a trigger could restate, and a rule
+asserting "`HTTP_SERVER_ERROR` must be retryable" would re-derive the same fact from less
+information. The constrained classes are the ones encoding a **decision** — ours or the owner's —
+where recording the opposite makes the history false about what was *done*.
+
+### 12.5 Red proofs
+
+Each new classification check was removed **on its own**, the disposable test database was recreated
+so the amended migration reapplied, and the suite was run:
+
+| Check removed | Failed | Positive controls |
+|---|---|---|
+| `GATEWAY_REJECTED` from the attempt permanent list | 2 — "records it as retryable", "enforces every PERMANENT declaration" | green |
+| `GATEWAY_REJECTED` from the never-exhausted list | 1 — "exhausted to FAILED with it" | green |
+| `GATEWAY_UNAVAILABLE` from the must-be-retryable rule | 2 — "records it as permanent", "enforces every RETRYABLE declaration" | green |
+| the whole retryable mirror block | 2 — "settled as a permanent REFUSAL", "FAILED before the attempt cap" | green |
+| a class left undeclared in the `CLASSIFICATION` table | 1 — "declares a classification for every value the enum has" | green |
+
+Every edit was reverted, the database recreated once more, and the suite returned to **14/14**.
+
+### 12.6 Checksum and staging
+
+Migration 16 was amended, so its checksum changed. The **disposable test database** was recreated
+(`docker compose down test-db && up -d --wait test-db`) and all sixteen migrations reapplied from
+scratch, which is the only place the old checksum existed. **Staging is untouched and was never
+contacted**: migration 16 has never been applied there, migration 15 remains exactly as deployed,
+and nothing in this correction reaches a running environment.
