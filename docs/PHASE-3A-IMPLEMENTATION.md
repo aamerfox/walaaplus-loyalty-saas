@@ -391,9 +391,26 @@ each other:
 | the referring card belongs to this business | a cross-tenant referrer |
 | the enrolled card belongs to this business **and** to the stated profile | an attribution recorded against the wrong person |
 | the enrolled profile belongs to this business | a cross-tenant enrolment |
+| the referring card is not the enrolled card | a card referring itself |
+| the referring card's profile is not the enrolled profile | **a customer referring themselves with a second card** |
 | an `ATTRIBUTED` row voids nothing and carries no reason | a record of an arrival dressed as a withdrawal |
 | a `VOIDED` row names one existing `ATTRIBUTED` row, in the same business | withdrawing another business's record, or a void of a void |
 | a `VOIDED` row repeats the link, card, profile and method **exactly** | a decision history that says two different things about one event |
+
+The last of those is the one worth its own paragraph. The same card on both sides is the obvious
+case; a **different** card belonging to the same profile is one person holding two of the business's
+programmes, and it satisfies every other rule in the trigger — both cards are this business's, the
+link belongs to the card it names, the enrolled card belongs to the profile it names. Only the profile
+comparison catches it, and scanning your own second card is a good deal easier than editing a row.
+
+It is checked against the **profile** rather than the underlying customer deliberately.
+`CustomerBusinessProfile` is unique on `(businessId, customerId)`, and the rules above already
+establish that both cards belong to this business — so within one business "same profile" and "same
+customer" are the same statement, and the profile is the one the row already carries. The service's
+own check reads both, and the two agree for that reason rather than by coincidence.
+
+Nothing further is inferred. A shared household, a shared surname or a shared device is not
+self-referral in this schema, and **D19** is not a trigger's to answer.
 
 `BEFORE INSERT` only, and that is sufficient rather than a shortcut: `UPDATE` and `DELETE` are
 already refused outright, so an inserted row is the only row there will ever be, and validating it
@@ -409,14 +426,17 @@ Each failure raises `check_violation` with a message naming the rule. A constrai
 also inserts the two valid shapes, so the rules are known to refuse the wrong rows without refusing
 the right ones.
 
-The suite was confirmed to depend on the trigger: dropping
-`referral_attribution_validate` and re-running turns **13 of its 19 tests red**. The six that stay
-green are the two positive controls, the case a foreign key already covered, the one-void-per-attribution
-index, and the two checks on append-only privileges — none of which the new trigger is responsible
-for. A test that has never been red is a test nobody has checked.
+The suite was confirmed to depend on the trigger, twice over. Dropping
+`referral_attribution_validate` entirely and re-running turns **13 of its 23 tests red**; the ten that
+stay green are the positive controls, the case a foreign key already covered, the
+one-void-per-attribution index, the append-only privilege checks and the service-level refusal — none
+of which the trigger is responsible for. Reinstating the function with **only the two self-referral
+rules removed** turns exactly the two self-referral tests red and leaves their control green. A test
+that has never been red is a test nobody has checked.
 
-Nothing else moved. The migration was amended rather than followed by a second one, because it had
-not reached staging; the count stays at **12**. No column, permission, route, screen, string or asset
+Nothing else moved. The migration was amended rather than followed by a second one — twice, for the
+consistency rules and then for self-referral — because it had not reached staging; the count stays at
+**12**. No column, permission, route, screen, string or asset
 changed, and the runtime role still holds `SELECT` and `INSERT` and nothing else.
 
 ---

@@ -276,6 +276,8 @@ count remains **12**.
 | the referring card belongs to this business | a cross-tenant referrer |
 | the enrolled card belongs to this business **and** to the stated profile | an attribution recorded against the wrong person |
 | the enrolled profile belongs to this business | a cross-tenant enrolment |
+| the referring card is not the enrolled card | a card referring itself |
+| the referring card's profile is not the enrolled profile | a customer referring themselves with a second card |
 | an `ATTRIBUTED` row voids nothing and carries no reason | a record of an arrival dressed as a withdrawal |
 | a `VOIDED` row names one existing `ATTRIBUTED` row, in the same business | withdrawing another business's record, or a void of a void |
 | a `VOIDED` row repeats the link, card, profile and method **exactly** | a decision history that says two different things about one event |
@@ -321,7 +323,7 @@ reports only the two pre-existing `ConsentRecord` name differences.
 | `node scripts/gate.mjs` | **PASS 15/15**, 502.6 s |
 | `npx playwright test` (run 1) | **80 passed**, 2.5 m |
 | `npx playwright test` (run 2) | **80 passed**, 2.5 m |
-| `npx vitest run` | **83 files, 1093 tests, all passed**, 394 s |
+| `npx vitest run` | **83 files, 1097 tests, all passed**, 400 s |
 | `npm audit` / `--omit=dev` | 0 vulnerabilities |
 | `node scripts/db-migrate.mjs status` | **12 migrations**, schema up to date |
 | `prisma migrate diff` | only the two pre-existing `ConsentRecord` name differences |
@@ -345,3 +347,87 @@ rows and nothing else writes to the table today — but it ships a migration who
 single service being the only writer, and a migration is the hardest thing to correct after it has
 been applied. The amended one has not reached staging, which is the only window in which this is a
 one-line change rather than a second migration against live rows.
+
+---
+
+## 13. Self-referral, moved from the service into the database
+
+A second read-only review found the rule that was still only in one place, and it was right.
+
+### What was wrong
+
+`recordCounterReferral` refuses a customer presenting their own invitation, and always did. But an
+insert made through the runtime client — a second service, a backfill script, a console session —
+could still create an otherwise perfectly valid `ATTRIBUTED` row whose referring card belonged to the
+enrolled customer. Every rule added in §12 was satisfied: both cards were the same business's, the
+link belonged to the card it named, and the enrolled card belonged to the profile it named.
+
+This is the same argument as §12, applied to the one rule that was left out of it. A guarantee that
+lives in one service ends the first time somebody writes a second one.
+
+### What changed
+
+Two more checks in `referral_attribution_validate`, added to the **existing, still-unapplied**
+migration. The count remains **12**.
+
+| rule | what it stops |
+|---|---|
+| `referringCustomerCardId` ≠ `enrolledCustomerCardId` | a card referring itself |
+| the referring card's profile ≠ `enrolledProfileId` | a customer referring themselves with a **second card** |
+
+The second is the one worth having. One person holding two of a business's programmes has two cards
+and one profile, so only the profile comparison catches it — and scanning your own second card is a
+good deal easier than editing a row.
+
+It compares **profiles** rather than underlying customers deliberately.
+`CustomerBusinessProfile` is unique on `(businessId, customerId)`, and the earlier rules already
+establish that both cards belong to this business, so within one business "same profile" and "same
+customer" are the same statement. The service reads both; the two agree for that reason, not by
+coincidence.
+
+Nothing further is inferred. A shared household, surname or device is not self-referral in this
+schema — **D19** is the owner's to answer, not a trigger's.
+
+### Proven against the database
+
+Four tests added to `tests/integration/referral-integrity.test.ts`, every insert through `prisma`, the
+restricted runtime client, with no service in the way:
+
+- a card referring **itself**, refused by the database;
+- a **different card under the same profile** — built by creating a second programme and enrolling the
+  same phone into it, so the row is genuinely valid in every other respect — refused by the database;
+- an attribution between **two distinct customers**, which still succeeds;
+- the **service's own refusal**, still returning the same generic `NOT_ACCEPTED` and writing nothing,
+  so the new trigger has not turned a refusal into an error a cashier sees at a till.
+
+**The two new tests were confirmed red without the rules.** The trigger function was reinstated with
+only the two self-referral checks removed; exactly those two tests failed and their control stayed
+green. That is a sharper check than dropping the whole trigger, which would have failed thirteen.
+
+### What did not change
+
+Append-only, cross-tenant, void-integrity, B7 and raw-capability protections are untouched. No column,
+route, screen, string, permission, provider, configuration, asset or dependency. No customer name,
+phone, token, digest, balance, reward or money entered the trigger — it compares two internal ids the
+row already carries.
+
+### Verification after this change
+
+| check | result |
+|---|---|
+| `node scripts/gate.mjs` | **PASS 15/15**, 513.7 s |
+| `npx playwright test` (run 1) | **80 passed**, 2.5 m |
+| `npx playwright test` (run 2) | **80 passed**, 2.4 m |
+| `npx vitest run` | **83 files, 1097 tests, all passed**, 400 s |
+| `npm audit` / `--omit=dev` | 0 vulnerabilities |
+| `node scripts/db-migrate.mjs status` | **12 migrations**, schema up to date |
+| `prisma migrate diff` | only the two pre-existing `ConsentRecord` name differences |
+| `git diff --check` | clean |
+| `public/` | 0 changed files |
+
+### Which SHA to deploy
+
+**Replace `8add1d4`.** Same reasoning as §12: nothing in it loses data, and the service is the only
+writer today — but the migration is the artefact hardest to correct once applied, and it has not
+reached staging yet. This is the last moment at which the rule is one more `IF` in a function rather
+than a second migration reasoning about rows that already exist.
