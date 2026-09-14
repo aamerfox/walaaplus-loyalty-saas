@@ -16,6 +16,8 @@ vi.mock("@/server/auth/session", async (importOriginal) => {
 });
 
 import { prisma } from "@/server/db";
+import { createStampProgram } from "@/server/program/stamp-program";
+import { enrollCustomer } from "@/server/customers/enrollment";
 import { mintShareLink } from "@/server/share/share-links";
 import { createStampCafe, enrolCustomer, resetDatabase, uniqueSyrianPhone, type StampCafeFixture } from "../setup/fixtures";
 
@@ -49,6 +51,8 @@ interface World {
   /** Somebody else, newly enrolled, with no attribution yet. */
   enrolledCardId: string;
   enrolledProfileId: string;
+  /** Their number, so a second card can be issued to the SAME profile. */
+  enrolledPhone: string;
 }
 
 async function build(name: string): Promise<World> {
@@ -56,7 +60,8 @@ async function build(name: string): Promise<World> {
   session.userId = cafe.userId;
 
   const referrer = await enrolCustomer(cafe, { phone: uniqueSyrianPhone(), firstName: "ليلى" });
-  const enrolled = await enrolCustomer(cafe, { phone: uniqueSyrianPhone(), firstName: "Omar" });
+  const enrolledPhone = uniqueSyrianPhone();
+  const enrolled = await enrolCustomer(cafe, { phone: enrolledPhone, firstName: "Omar" });
   const minted = await mintShareLink(cafe.ctx, referrer.customerCardId, "WALLET_PASS");
 
   return {
@@ -66,6 +71,7 @@ async function build(name: string): Promise<World> {
     referrerProfileId: referrer.customerBusinessProfileId,
     enrolledCardId: enrolled.customerCardId,
     enrolledProfileId: enrolled.customerBusinessProfileId,
+    enrolledPhone,
   };
 }
 
@@ -297,6 +303,89 @@ describe("a VOIDED row has to be a faithful account of what it withdraws", () =>
     await prisma.referralAttribution.create({ data: voided() });
     // The pre-existing partial unique index, unaffected by the new trigger.
     await expect(prisma.referralAttribution.create({ data: voided() })).rejects.toThrow();
+  });
+});
+
+describe("nobody invites themselves", () => {
+  let mine: World;
+
+  beforeEach(async () => {
+    await resetDatabase();
+    mine = await build("Self café");
+    session.userId = mine.cafe.userId;
+  });
+
+  it("refuses a card referring itself", async () => {
+    // The obvious shape, and the one a broken loop would produce.
+    await expect(
+      prisma.referralAttribution.create({
+        data: attributed(mine, {
+          referringCustomerCardId: mine.enrolledCardId,
+          referringShareLinkId: (await mintShareLink(mine.cafe.ctx, mine.enrolledCardId, "WALLET_PASS")).id,
+        }),
+      }),
+    ).rejects.toThrow(REFUSED);
+  });
+
+  it("refuses a DIFFERENT card belonging to the same customer", async () => {
+    /*
+     * The case worth having. One person holding two of this business's programmes has two cards and
+     * one profile, so every other rule in the trigger is satisfied: both cards are this business's,
+     * the link belongs to the card it names, and the enrolled card belongs to the profile it names.
+     * Only the profile comparison catches it.
+     *
+     * This is also what somebody would actually reach for — scanning your own second card is a good
+     * deal easier than editing a row.
+     */
+    const second = await createStampProgram(mine.cafe.ctx, {
+      name: "Second card",
+      // A business may run several programmes since Phase 1b; the flag is how a caller says so.
+      allowAdditionalProgram: true,
+      mechanics: { ...mine.cafe.program.mechanics, rewardName: "A second reward" },
+    });
+    const sameCustomerAgain = await enrollCustomer({
+      sourceToken: second.directSourceToken,
+      // The phone of the customer already enrolled, so this lands on the SAME profile.
+      phone: mine.enrolledPhone,
+    });
+    expect(sameCustomerAgain.customerBusinessProfileId).toBe(mine.enrolledProfileId);
+    expect(sameCustomerAgain.customerCardId).not.toBe(mine.enrolledCardId);
+
+    const theirOwnLink = await mintShareLink(mine.cafe.ctx, sameCustomerAgain.customerCardId, "WALLET_PASS");
+
+    await expect(
+      prisma.referralAttribution.create({
+        data: attributed(mine, {
+          referringShareLinkId: theirOwnLink.id,
+          referringCustomerCardId: sameCustomerAgain.customerCardId,
+        }),
+      }),
+    ).rejects.toThrow(REFUSED);
+  });
+
+  it("still accepts an attribution between two distinct customers", async () => {
+    // The control: the rule refuses self-referral without refusing the thing the feature is for.
+    const row = await prisma.referralAttribution.create({ data: attributed(mine), select: { id: true } });
+    expect(row.id).toBeTruthy();
+  });
+
+  it("leaves the service's own refusal working", async () => {
+    /*
+     * Belt and braces, checked rather than assumed. The service refuses a customer presenting their
+     * own invitation before it reaches the database, and answers the same generic value as every
+     * other refusal — so the trigger being added must not have turned that into an error a cashier
+     * sees at a till.
+     */
+    const { recordCounterReferral } = await import("@/server/share/referrals");
+    const ownLink = await mintShareLink(mine.cafe.ctx, mine.enrolledCardId, "WALLET_PASS");
+
+    const outcome = await recordCounterReferral(mine.cafe.ctx, {
+      rawToken: ownLink.rawToken,
+      enrolledCustomerCardId: mine.enrolledCardId,
+      enrolledProfileId: mine.enrolledProfileId,
+    });
+    expect(outcome).toBe("NOT_ACCEPTED");
+    expect(await prisma.referralAttribution.count()).toBe(0);
   });
 });
 

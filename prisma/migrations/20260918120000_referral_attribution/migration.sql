@@ -32,9 +32,10 @@
 -- that each id EXISTS; nothing in a foreign key checks that they AGREE.
 --
 -- So `referral_attribution_validate` runs BEFORE INSERT and refuses a row whose parts contradict
--- each other. The service already declines to build such a row, and that is exactly why the trigger
--- matters: a guarantee that lives only in one service is a guarantee that ends the first time
--- somebody writes a second one, a backfill script, or a console session.
+-- each other, **including one that says a customer invited themselves**. The service already
+-- declines to build such a row, and that is exactly why the trigger matters: a guarantee that lives
+-- only in one service is a guarantee that ends the first time somebody writes a second one, a
+-- backfill script, or a console session.
 --
 -- ## Append-only, with voiding as a second row
 --
@@ -153,6 +154,7 @@ DECLARE
   link_business   TEXT;
   link_card       TEXT;
   ref_business    TEXT;
+  ref_profile     TEXT;
   enr_business    TEXT;
   enr_profile     TEXT;
   profile_business TEXT;
@@ -175,7 +177,8 @@ BEGIN
       USING ERRCODE = 'check_violation';
   END IF;
 
-  SELECT "businessId" INTO ref_business FROM "CustomerCard" WHERE "id" = NEW."referringCustomerCardId";
+  SELECT "businessId", "customerBusinessProfileId" INTO ref_business, ref_profile
+    FROM "CustomerCard" WHERE "id" = NEW."referringCustomerCardId";
   IF ref_business IS DISTINCT FROM NEW."businessId" THEN
     RAISE EXCEPTION 'ReferralAttribution: the referring card belongs to a different business'
       USING ERRCODE = 'check_violation';
@@ -205,7 +208,29 @@ BEGIN
       USING ERRCODE = 'check_violation';
   END IF;
 
-  -- 3. An ATTRIBUTED row is a record of an arrival. It withdraws nothing, so it points at nothing
+  -- 3. Nobody invites themselves.
+  --
+  --    Two shapes, and the second is the one worth having. The same card on both sides is the
+  --    obvious case; a DIFFERENT card belonging to the same profile is the same person holding two
+  --    of this business's programmes, and it is what somebody would actually reach for.
+  --
+  --    Checked against the profile rather than the underlying customer on purpose: within one
+  --    business `CustomerBusinessProfile` is unique on (businessId, customerId), and the checks above
+  --    already establish that both cards belong to THIS business. So "same profile" and "same
+  --    customer" are the same statement here, and the profile is the one this row already carries.
+  --
+  --    Nothing further is inferred. A shared household, a shared surname or a shared device is not
+  --    self-referral in this schema, and deciding otherwise is D19's to make rather than a trigger's.
+  IF NEW."referringCustomerCardId" = NEW."enrolledCustomerCardId" THEN
+    RAISE EXCEPTION 'ReferralAttribution: a card cannot refer itself'
+      USING ERRCODE = 'check_violation';
+  END IF;
+  IF ref_profile IS NOT DISTINCT FROM NEW."enrolledProfileId" THEN
+    RAISE EXCEPTION 'ReferralAttribution: a customer cannot refer themselves'
+      USING ERRCODE = 'check_violation';
+  END IF;
+
+  -- 4. An ATTRIBUTED row is a record of an arrival. It withdraws nothing, so it points at nothing
   --    and explains nothing: a reason on one would be a withdrawal note attached to a record that
   --    was never withdrawn.
   IF NEW."entry" = 'ATTRIBUTED' THEN
@@ -219,7 +244,7 @@ BEGIN
     END IF;
   END IF;
 
-  -- 4. A VOIDED row is a withdrawal OF something, and it has to be a complete, faithful account of
+  -- 5. A VOIDED row is a withdrawal OF something, and it has to be a complete, faithful account of
   --    the row it withdraws. Copying the fields rather than joining for them is what lets one row be
   --    read on its own; this is what makes the copy true.
   IF NEW."entry" = 'VOIDED' THEN
