@@ -47,6 +47,12 @@ process.stdout.write(`e2e-server: serving the standalone build on port ${port}\n
  *
  * An externally supplied value wins, so a developer can point the suite at a fixed key if they ever
  * need to reproduce something.
+ *
+ * WHAT IS DELIBERATELY NOT SET HERE: `WEBHOOK_GATEWAY_SECRET`. The browser suite drives the OWNER's
+ * screens - create a destination, rotate its secret, queue a test delivery - and none of that sends
+ * anything: delivery is the worker's job and the worker is not running. Giving the web process a
+ * dispatch credential it cannot use would contradict the topology every compose file and
+ * `tests/unit/compose-exposure.test.ts` enforce, in the one place a reader might copy from.
  */
 const integrationKey = process.env.INTEGRATION_ENCRYPTION_KEY ?? randomBytes(32).toString("hex");
 

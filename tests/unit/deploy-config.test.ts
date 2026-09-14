@@ -198,6 +198,32 @@ describe(".env.staging.example", () => {
     // And it must still be true that leaving it blank is a supported state, not a broken one.
     expect(stagingEnvTemplate).toMatch(/LEAVING IT BLANK IS SUPPORTED/);
   });
+
+  it("documents the egress gateway secret as a SEPARATE optional value", () => {
+    /*
+     * The failure this guards against is not a missing variable, it is a REUSED one. An operator
+     * who sees two 32-byte hex secrets in the same file and pastes the same value into both has
+     * made a single compromise open two doors: the encryption key protects destination URLs and
+     * signing secrets at rest, the gateway secret authenticates a caller on an internal hop.
+     *
+     * So the template must name it, must give its own generation command, and must say in words
+     * that it is a different value from the other one.
+     */
+    expect(stagingEnvTemplate).toMatch(/^WEBHOOK_GATEWAY_SECRET=$/m);
+    expect(stagingEnvTemplate).toContain("openssl rand -hex 32      # WEBHOOK_GATEWAY_SECRET");
+    expect(stagingEnvTemplate).toMatch(/DIFFERENT values, never one reused|A DISTINCT secret/);
+    expect(stagingEnvTemplate).toMatch(/never be the same value as INTEGRATION_ENCRYPTION_KEY/);
+    // Both processes that need it, named; and blank stated as supported rather than broken.
+    expect(stagingEnvTemplate).toMatch(/BOTH the worker and the webhook-egress service/);
+    expect(stagingEnvTemplate).toMatch(/LEAVING IT BLANK IS SUPPORTED[\s\S]*GATEWAY_UNAVAILABLE/);
+  });
+
+  it("does not turn the gateway's address into a secret", () => {
+    // WEBHOOK_GATEWAY_URL is a service name and a port. It belongs in the "set by compose" list,
+    // not in the secret list, and the template must not invite anyone to generate one.
+    expect(stagingEnvTemplate).toMatch(/WEBHOOK_GATEWAY_URL\s+http:\/\/webhook-egress:8082/);
+    expect(stagingEnvTemplate).not.toMatch(/^WEBHOOK_GATEWAY_URL=/m);
+  });
 });
 
 describe("database password guidance", () => {

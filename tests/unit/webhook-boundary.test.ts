@@ -5,8 +5,17 @@ import { describe, expect, it } from "vitest";
 /**
  * Where outbound HTTP is allowed to live, and where it is not.
  *
- * Prompt 1's rule was "nothing leaves the machine". Prompt 2 opens exactly one door, so the rule
- * becomes a shape: **one module makes requests, the worker calls it, and nothing else can.**
+ * Prompt 1's rule was "nothing leaves the machine". Prompt 2 opened exactly one door, so the rule
+ * became a shape: **one module makes requests, the worker calls it, and nothing else can.**
+ *
+ * Prompt 3 moved the door. The request is now made by a separate service — `src/egress` — that
+ * holds no secrets, and the worker's only remaining client addresses that service over an internal
+ * network at a constant path. So the shape under `src/server` is unchanged in kind and narrower in
+ * fact: one module, and what it can reach is one origin from configuration rather than anywhere.
+ *
+ * This file keeps the application-side half of that rule. The gateway's own half — no database
+ * client, no secrets, no logging, no test seam in production — is
+ * `tests/unit/webhook-egress-boundary.test.ts`.
  *
  * A webhook is a request to somebody else's server. Made from a route handler it would be a
  * cashier's till waiting on a receiver's timeout — which is not a hypothetical failure mode, it is
@@ -35,8 +44,12 @@ function code(text: string): string {
 
 const HTTP_CLIENT = /\bfetch\s*\(|\baxios\b|from\s+"node:https?"|from\s+"node:http"|\bXMLHttpRequest\b|\bWebSocket\b/;
 
-/** The one module allowed to hold an HTTP client, named here so the allowance is explicit. */
-const TRANSPORT = join("src", "server", "integrations", "webhooks", "transport.ts");
+/**
+ * The one module under `src/server` allowed to hold an HTTP client, named here so the allowance is
+ * explicit. It talks to the egress gateway and to nothing else: the origin comes from
+ * configuration and the path is a compile-time constant.
+ */
+const GATEWAY_CLIENT = join("src", "server", "integrations", "webhooks", "gateway.ts");
 
 describe("exactly one module sends an outbound request", () => {
   const serverFiles = filesUnder(join(ROOT, "src", "server"));
@@ -45,11 +58,20 @@ describe("exactly one module sends an outbound request", () => {
     expect(serverFiles.length).toBeGreaterThan(20);
   });
 
-  it("finds an HTTP client in the transport module and nowhere else under src/server", () => {
+  it("finds an HTTP client in the gateway client and nowhere else under src/server", () => {
     const holders = serverFiles
       .filter((f) => HTTP_CLIENT.test(code(readFileSync(f, "utf8"))))
       .map((f) => relative(ROOT, f).replace(/\\/g, "/"));
-    expect(holders).toEqual([TRANSPORT.replace(/\\/g, "/")]);
+    expect(holders).toEqual([GATEWAY_CLIENT.replace(/\\/g, "/")]);
+  });
+
+  it("gives that client one destination, and it is not a merchant's", () => {
+    // The distinction Prompt 3 rests on: this client cannot be pointed at an arbitrary host. The
+    // origin is configuration, the path is a constant, and a destination URL is DATA inside the
+    // body rather than an address this code can be asked to use.
+    const gateway = code(readFileSync(join(ROOT, GATEWAY_CLIENT), "utf8"));
+    expect(gateway).toContain("path: DISPATCH_PATH");
+    expect(gateway).toContain("WEBHOOK_GATEWAY_URL");
   });
 
   it("still finds no HTTP client, queue or timer in the events module", () => {
@@ -80,10 +102,11 @@ describe("nothing a request handler can reach makes a request", () => {
     }
   });
 
-  it("imports neither the transport nor the delivery runner, anywhere", () => {
+  it("imports neither the gateway client nor the delivery runner, anywhere", () => {
     // The structural rule. A route that imported either could send from a request.
     for (const file of appFiles) {
       const text = code(readFileSync(file, "utf8"));
+      expect(text, relative(ROOT, file)).not.toMatch(/webhooks\/gateway/);
       expect(text, relative(ROOT, file)).not.toMatch(/webhooks\/transport/);
       expect(text, relative(ROOT, file)).not.toMatch(/webhooks\/delivery/);
     }
@@ -135,12 +158,17 @@ describe("no secret or response body can reach a store", () => {
     }
   });
 
-  it("keeps the response body out of every return path", () => {
-    const transport = readFileSync(join(ROOT, TRANSPORT), "utf8");
-    // The only thing taken from a response is its status code.
-    expect(transport).toContain("res.statusCode");
-    expect(transport).not.toMatch(/body:\s*(chunks|data|text)/);
-    expect(transport).not.toMatch(/toString\("utf8"\)/);
+  it("keeps the receiver's response out of the worker entirely", () => {
+    /*
+     * Stronger than it was, and for free. The worker no longer sees a receiver's response at all:
+     * what comes back over the internal hop is a bounded classification, and the only thing this
+     * module reads from it is `outcome`, `errorClass` and `httpStatus`. The assertion that the
+     * receiver's body never leaves the socket now lives with the code that holds the socket, in
+     * `tests/unit/webhook-egress-boundary.test.ts`.
+     */
+    const gateway = readFileSync(join(ROOT, GATEWAY_CLIENT), "utf8");
+    expect(gateway).toContain("isDispatchResult");
+    expect(gateway).not.toMatch(/responseBody|res\.headers/);
   });
 });
 

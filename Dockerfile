@@ -27,7 +27,7 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 # Build-time only. Validation happens at RUNTIME start, so no real secret is needed to build.
 ENV NEXT_TELEMETRY_DISABLED=1
-RUN npm run build && npm run build:worker
+RUN npm run build && npm run build:worker && npm run build:egress
 
 # ---------------------------------------------------------------------------
 # Migrator. Runs to completion before web and worker start (docker-compose.yml `migrate`).
@@ -76,3 +76,28 @@ COPY --chown=app:app package.json ./
 USER app
 EXPOSE 8081
 CMD ["node", "dist/worker/index.mjs"]
+
+# ---------------------------------------------------------------------------
+# Webhook egress gateway: the ONE service in this product attached to a routable network.
+#
+# What is deliberately absent from this image, and why each absence is load-bearing:
+#
+#   node_modules      the bundle is self-contained (scripts/build-egress.mjs marks nothing
+#                     external), so there is no Prisma client and no PostgreSQL driver here. This
+#                     process could not open a database connection if it were asked to.
+#   the source tree   one compiled entry point; no TypeScript loader, no scripts, no prisma/.
+#   a database URL    never passed to this service by any compose file.
+#   the encryption    never passed to this service either. It decrypts nothing: the worker signs
+#   key              the body and hands over finished bytes.
+#
+# It publishes no host port in any compose variant. The only thing that can reach it is the worker,
+# over a Docker network with `internal: true`.
+FROM node:24-alpine AS egress
+WORKDIR /app
+ENV NODE_ENV=production
+RUN addgroup -S app && adduser -S app -G app
+COPY --from=build --chown=app:app /app/dist/egress ./dist/egress
+COPY --chown=app:app package.json ./
+USER app
+EXPOSE 8082
+CMD ["node", "dist/egress/index.mjs"]

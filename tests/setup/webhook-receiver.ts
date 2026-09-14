@@ -40,6 +40,9 @@ export interface Receiver {
 /** The hostname the certificate is issued for. Matches the URL the tests configure. */
 export const RECEIVER_HOST = "hooks.test.example.com";
 
+/** Repeated to fill the `/big` response. Distinctive enough to grep a database dump for. */
+export const OVERSIZED_MARKER = "RECEIVER-BODY-MUST-NEVER-ESCAPE-";
+
 /**
  * A self-signed certificate for `RECEIVER_HOST`.
  *
@@ -91,6 +94,8 @@ function selfSigned(): { key: string; cert: string } {
  *   /status/:code  whatever the test asks for
  *   /redirect      302 to the cloud metadata address — the SSRF bypass the transport must refuse
  *   /hang          never answers, so the request times out
+ *   /big           200 with a body far past the read cap, carrying a marker string, so a test can
+ *                  assert the marker reaches nothing — not the gateway's answer, not a column
  */
 export async function startReceiver(): Promise<Receiver> {
   const { key, cert } = selfSigned();
@@ -117,6 +122,14 @@ export async function startReceiver(): Promise<Receiver> {
       if (path === "/redirect") {
         res.writeHead(302, { location: "http://169.254.169.254/latest/meta-data/" });
         res.end();
+        return;
+      }
+      if (path === "/big") {
+        // Well past MAX_RESPONSE_BYTES. The marker is what a test looks for afterwards: if the
+        // gateway ever started returning or recording a response body, this string is how it
+        // would show up.
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true, leak: OVERSIZED_MARKER.repeat(400) }));
         return;
       }
       const status = /^\/status\/(\d{3})$/.exec(path);

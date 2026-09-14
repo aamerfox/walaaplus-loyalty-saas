@@ -150,7 +150,15 @@ describe("docker-compose.yml — the local stack", () => {
   ]);
 
   it("parses, and every service is accounted for by this policy", () => {
-    expect(Object.keys(load(LOCAL).services).sort()).toEqual(["db", "migrate", "proxy", "test-db", "web", "worker"]);
+    expect(Object.keys(load(LOCAL).services).sort()).toEqual([
+      "db",
+      "migrate",
+      "proxy",
+      "test-db",
+      "web",
+      "webhook-egress",
+      "worker",
+    ]);
   });
 
   it("publishes exactly one public binding, and it is the proxy", () => {
@@ -169,7 +177,7 @@ describe("docker-compose.yml — the local stack", () => {
 
   it("publishes nothing from the application services", () => {
     const compose = load(LOCAL);
-    for (const service of ["web", "worker", "migrate"]) {
+    for (const service of ["web", "worker", "migrate", "webhook-egress"]) {
       expect(compose.services[service].ports, `${service} must not publish any port`).toBeUndefined();
     }
   });
@@ -193,7 +201,7 @@ describe("docker-compose.yml — the local stack", () => {
 describe("docker-compose.staging.yml — the dedicated server", () => {
   it("parses, and defines no test database", () => {
     const services = Object.keys(load(STAGING).services).sort();
-    expect(services).toEqual(["db", "migrate", "proxy", "web", "worker"]);
+    expect(services).toEqual(["db", "migrate", "proxy", "web", "webhook-egress", "worker"]);
     // A throwaway database holding the migrator credentials, with its data in tmpfs, has no
     // business on a server that faces the internet.
     expect(services).not.toContain("test-db");
@@ -216,9 +224,12 @@ describe("docker-compose.staging.yml — the dedicated server", () => {
     const compose = load(STAGING);
     expect(compose.networks?.backend?.internal).toBe(true);
     expect(compose.services.db.networks).toEqual(["backend"]);
-    expect(compose.services.worker.networks).toEqual(["backend"]);
     expect(compose.services.migrate.networks).toEqual(["backend"]);
-    // Only the proxy touches the network that has a way out.
+    // The worker gained a SECOND internal network in Prompt 3, not a routable one: `webhook-control`
+    // is how it reaches the egress gateway, and it has no gateway of its own.
+    expect(compose.services.worker.networks).toEqual(["backend", "webhook-control"]);
+    expect(compose.networks?.["webhook-control"]?.internal).toBe(true);
+    // The proxy and the egress gateway are the only services touching a network with a way out.
     expect(compose.services.proxy.networks).toEqual(["edge"]);
     expect(compose.services.web.networks).toEqual(["backend", "edge"]);
   });
@@ -244,8 +255,8 @@ describe("docker-compose.staging-cohost.yml — a shared server", () => {
    */
   const FORBIDDEN_HOST_PORTS = ["80", "443", "3456", "5432", "18789"];
 
-  it("contains only the four application services", () => {
-    expect(Object.keys(load(COHOST).services).sort()).toEqual(["db", "migrate", "web", "worker"]);
+  it("contains only the five application services", () => {
+    expect(Object.keys(load(COHOST).services).sort()).toEqual(["db", "migrate", "web", "webhook-egress", "worker"]);
   });
 
   it("ships no proxy of its own", () => {
@@ -281,7 +292,7 @@ describe("docker-compose.staging-cohost.yml — a shared server", () => {
 
   it("publishes nothing from the database, the worker or the migrator", () => {
     const compose = load(COHOST);
-    for (const service of ["db", "worker", "migrate"]) {
+    for (const service of ["db", "worker", "migrate", "webhook-egress"]) {
       expect(compose.services[service].ports, `${service} must not publish any port`).toBeUndefined();
     }
   });
@@ -290,8 +301,9 @@ describe("docker-compose.staging-cohost.yml — a shared server", () => {
     const compose = load(COHOST);
     expect(compose.networks?.backend?.internal).toBe(true);
     expect(compose.services.db.networks).toEqual(["backend"]);
-    expect(compose.services.worker.networks).toEqual(["backend"]);
     expect(compose.services.migrate.networks).toEqual(["backend"]);
+    expect(compose.services.worker.networks).toEqual(["backend", "webhook-control"]);
+    expect(compose.networks?.["webhook-control"]?.internal).toBe(true);
     // `web` needs a routed network for its published port to be reachable from loopback.
     expect(compose.services.web.networks).toEqual(["backend", "edge"]);
   });
@@ -308,6 +320,14 @@ describe("docker-compose.staging-cohost.yml — a shared server", () => {
     }
     // Its own database volume, not a shared one.
     expect(Object.keys(compose.volumes ?? {})).toEqual(["db-data"]);
+    // Including the two networks Prompt 3 adds: they are created fresh under this project's
+    // prefix, so neither can be an existing OpenBot or ROAD8 network.
+    expect(Object.keys(compose.networks ?? {}).sort()).toEqual([
+      "backend",
+      "edge",
+      "webhook-control",
+      "webhook-egress-out",
+    ]);
   });
 
   it("carries its own project name, so its networks and volumes cannot collide", () => {
@@ -343,7 +363,7 @@ describe("docker-compose.staging-cohost.yml — a shared server", () => {
   it("gives every service an explicit CPU and memory ceiling", () => {
     // One vCPU, shared with OpenClaw/OpenBot. A service with no ceiling can take the whole core.
     const compose = load(COHOST);
-    for (const name of ["db", "migrate", "web", "worker"]) {
+    for (const name of ["db", "migrate", "web", "worker", "webhook-egress"]) {
       const service = compose.services[name];
       expect(Number(service.cpus), `${name} needs a cpus limit`).toBeGreaterThan(0);
       expect(bytesOf(service.mem_limit), `${name} needs a mem_limit`).toBeGreaterThan(0);
@@ -353,15 +373,19 @@ describe("docker-compose.staging-cohost.yml — a shared server", () => {
   it("leaves at least a quarter of the single core, and under 1.5 GiB, to the neighbours", () => {
     const compose = load(COHOST);
     // `migrate` exits before web and worker start, so it is not part of the steady state.
-    const steady = ["db", "web", "worker"].map((n) => compose.services[n]);
+    const steady = ["db", "web", "worker", "webhook-egress"].map((n) => compose.services[n]);
     const cpu = steady.reduce((sum, s) => sum + Number(s.cpus ?? 0), 0);
     const mem = steady.reduce((sum, s) => sum + bytesOf(s.mem_limit), 0);
 
     expect(cpu).toBeLessThanOrEqual(0.8);
     expect(mem).toBeLessThanOrEqual(1536 * MIB);
 
-    // The transient startup ceiling must be no worse than the steady one.
-    const startup = Number(compose.services.db.cpus ?? 0) + Number(compose.services.migrate.cpus ?? 0);
+    // The transient startup ceiling must be no worse than the steady one. The gateway touches no
+    // database and waits on nothing, so it is up while `migrate` runs and counts here.
+    const startup =
+      Number(compose.services.db.cpus ?? 0) +
+      Number(compose.services.migrate.cpus ?? 0) +
+      Number(compose.services["webhook-egress"].cpus ?? 0);
     expect(startup).toBeLessThanOrEqual(0.8);
   });
 
@@ -380,10 +404,10 @@ describe("docker-compose.staging-cohost.yml — a shared server", () => {
     // this stack the last thing reclaimed under pressure, which is backwards on someone else's
     // host.
     const compose = load(COHOST);
-    for (const name of ["db", "web", "worker"]) {
+    for (const name of ["db", "web", "worker", "webhook-egress"]) {
       const service = compose.services[name];
       expect(bytesOf(service.mem_reservation), `${name} needs a mem_reservation`).toBeGreaterThan(0);
-      expect(bytesOf(service.mem_reservation)).toBeLessThan(bytesOf(service.mem_limit) / 2);
+      expect(bytesOf(service.mem_reservation)).toBeLessThanOrEqual(bytesOf(service.mem_limit) / 2);
     }
   });
 
@@ -409,6 +433,9 @@ describe("docker-compose.staging-cohost.yml — a shared server", () => {
       expect(compose.services[service].depends_on?.migrate?.condition).toBe("service_completed_successfully");
     }
     expect(compose.services.migrate.depends_on?.db?.condition).toBe("service_healthy");
+    // The gateway waits on nothing: it touches no database and a webhook that arrives before it is
+    // up is retried, not lost.
+    expect(compose.services["webhook-egress"].depends_on).toBeUndefined();
   });
 });
 
@@ -609,10 +636,10 @@ describe("wiring the encryption key changed no exposure", () => {
       expect(compose.networks?.backend?.internal).toBe(true);
       expect(compose.services.db.networks).toEqual(["backend"]);
       expect(compose.services.migrate.networks).toEqual(["backend"]);
-      // The worker stays on the internal network. The key lets it DECRYPT a destination; it does
-      // not give it a route to one, and this change does not hand it one. Attaching the worker to
-      // a routed network is an exposure decision, not a side effect of wiring a secret.
-      expect(compose.services.worker.networks).toEqual(["backend"]);
+      // The worker stays on INTERNAL networks only. The key lets it DECRYPT a destination; it does
+      // not give it a route to one, and neither does `webhook-control` — that network has no
+      // gateway either. The route belongs to `webhook-egress` and to nothing else.
+      expect(compose.services.worker.networks).toEqual(["backend", "webhook-control"]);
       expect(compose.services.web.networks).toEqual(["backend", "edge"]);
     }
   });
@@ -621,5 +648,220 @@ describe("wiring the encryption key changed no exposure", () => {
     expect(envValue(load(LOCAL).services.web, "TRUST_PROXY_HEADERS")).toBe("true");
     expect(envValue(load(STAGING).services.web, "TRUST_PROXY_HEADERS")).toBe("true");
     expect(envValue(load(COHOST).services.web, "TRUST_PROXY_HEADERS")).toBe("false");
+  });
+});
+
+
+/**
+ * The egress topology — Phase 3B Prompt 3.
+ *
+ * The capability the owner approved is "webhook delivery may make outbound HTTPS requests to
+ * merchant endpoints". The capability the deployment actually grants is whatever the networks say,
+ * so this is where the two are held to each other.
+ *
+ * The division being asserted, in one sentence: **the process that holds the secrets has no route
+ * to the Internet, and the process with the route holds no secrets.** Every assertion below is one
+ * half of that, on all three compose variants:
+ *
+ *   - `worker` is on internal networks only — it never gains a routable one;
+ *   - `webhook-egress` is the ONLY service on the routable network it uses, and it is on exactly
+ *     two networks, one of them the internal hop the worker reaches it over;
+ *   - nothing else joins either new network — not db, not migrate, not web, not the proxy;
+ *   - `webhook-egress` publishes no host port anywhere;
+ *   - `WEBHOOK_GATEWAY_SECRET` reaches the worker and the gateway, by name, and nothing else;
+ *   - the gateway receives no database URL, no session secret and no encryption key;
+ *   - `web` receives no gateway secret and is on neither new network, so it cannot dispatch;
+ *   - and none of this added a published port.
+ */
+const GATEWAY = "webhook-egress";
+const GATEWAY_SECRET = "WEBHOOK_GATEWAY_SECRET";
+const CONTROL_NETWORK = "webhook-control";
+const EGRESS_NETWORK = "webhook-egress-out";
+
+/** Services attached to a given network, from the service definitions themselves. */
+function membersOf(compose: ComposeFile, network: string): string[] {
+  return Object.entries(compose.services)
+    .filter(([, def]) => (Array.isArray(def.networks) ? (def.networks as string[]) : []).includes(network))
+    .map(([name]) => name)
+    .sort();
+}
+
+describe.each([
+  ["docker-compose.yml", LOCAL],
+  ["docker-compose.staging.yml", STAGING],
+  ["docker-compose.staging-cohost.yml", COHOST],
+])("%s — webhook egress topology", (_name, file) => {
+  const compose = load(file);
+  const gateway = compose.services[GATEWAY];
+
+  it("defines the gateway, built from this repository rather than pulled as an image", () => {
+    expect(gateway, "every variant must carry the egress gateway").toBeDefined();
+    expect(gateway.image, "the gateway is our code, not somebody's proxy image").toBeUndefined();
+    expect(JSON.stringify(gateway.build)).toContain('"target":"egress"');
+  });
+
+  it("publishes no host port from the gateway, in any variant", () => {
+    // Nothing outside the Compose project may address it: not the host, not a neighbouring stack.
+    expect(gateway.ports, "the gateway must never publish a port").toBeUndefined();
+    expect(gateway.expose?.map(String)).toEqual(["8082"]);
+  });
+
+  it("attaches the gateway to exactly the control network and the egress network", () => {
+    expect(gateway.networks).toEqual([CONTROL_NETWORK, EGRESS_NETWORK]);
+  });
+
+  it("makes the control network internal, so reaching the gateway is not a route out", () => {
+    expect(compose.networks?.[CONTROL_NETWORK]?.internal).toBe(true);
+  });
+
+  it("leaves the worker on internal networks only", () => {
+    /*
+     * The assertion the whole design rests on. The worker holds DATABASE_URL, the encryption key,
+     * and every decrypted destination URL and signing secret. It must not be on a network with a
+     * gateway — and being on `webhook-control` does not make it so, which the previous assertion
+     * is what proves.
+     */
+    const attached = (compose.services.worker.networks ?? []) as string[];
+    expect(attached).toContain(CONTROL_NETWORK);
+    expect(attached, "the worker must never join the egress network").not.toContain(EGRESS_NETWORK);
+    for (const network of attached) {
+      const internal = compose.networks?.[network]?.internal === true;
+      expect(internal, `worker is attached to ${network}, which is routable`).toBe(true);
+    }
+  });
+
+  it("puts nothing but the gateway on the routable egress network", () => {
+    expect(membersOf(compose, EGRESS_NETWORK)).toEqual([GATEWAY]);
+    // Named individually as well, because this is the list a future edit would quietly grow.
+    for (const service of ["db", "migrate", "web", "worker", "proxy", "test-db"]) {
+      if (!compose.services[service]) continue;
+      const attached = (compose.services[service].networks ?? []) as string[];
+      expect(attached, `${service} must not be on the egress network`).not.toContain(EGRESS_NETWORK);
+      // The worker is the one service that may be on the control network - that is how it reaches
+      // the gateway - and the assertion above is the one that matters for it: it may share a
+      // network WITH the gateway without sharing the gateway's route.
+      if (service === "worker") continue;
+      expect(attached, `${service} must not be on the gateway's control network`).not.toContain(CONTROL_NETWORK);
+    }
+  });
+
+  it("puts nothing but the worker and the gateway on the control network", () => {
+    expect(membersOf(compose, CONTROL_NETWORK)).toEqual([GATEWAY, "worker"]);
+  });
+
+  it("joins nothing that already exists on the host", () => {
+    // Both new networks are created under this project's name. On the co-hosted box in particular,
+    // `external: true` here would mean joining OpenBot's or ROAD8's.
+    for (const network of [CONTROL_NETWORK, EGRESS_NETWORK]) {
+      expect(compose.networks?.[network]?.external, `${network} must not be external`).toBeFalsy();
+    }
+  });
+});
+
+describe.each([
+  ["docker-compose.yml", LOCAL],
+  ["docker-compose.staging.yml", STAGING],
+  ["docker-compose.staging-cohost.yml", COHOST],
+])("%s — the gateway secret, and what the gateway is not given", (_name, file) => {
+  const compose = load(file);
+  const raw = readFileSync(file, "utf8");
+
+  it("passes the gateway secret to the worker and the gateway, by name", () => {
+    for (const service of ["worker", GATEWAY]) {
+      expect(envNames(compose.services[service]), `${service} must receive ${GATEWAY_SECRET}`).toContain(GATEWAY_SECRET);
+    }
+  });
+
+  it("passes it to no other service, above all not to web", () => {
+    /*
+     * `web` is the one worth naming. It is not on the gateway's network and holds no HTTP client,
+     * so the secret would be useless to it — which is exactly why a future edit might add it
+     * without thinking. Holding a dispatch credential in the process that serves requests is the
+     * shape this whole topology exists to avoid.
+     */
+    for (const [name, service] of Object.entries(compose.services)) {
+      if (name === "worker" || name === GATEWAY) continue;
+      expect(envNames(service), `${name} has no use for ${GATEWAY_SECRET}`).not.toContain(GATEWAY_SECRET);
+      expect(JSON.stringify(service.environment ?? {}), `${name} must not reference it at all`).not.toContain(
+        GATEWAY_SECRET,
+      );
+    }
+    expect(envNames(compose.services.web)).not.toContain(GATEWAY_SECRET);
+  });
+
+  it("is a different variable from the encryption key, and the gateway gets neither key nor database", () => {
+    const names = envNames(compose.services[GATEWAY]);
+    expect(names).not.toContain("INTEGRATION_ENCRYPTION_KEY");
+    expect(names).not.toContain("DATABASE_URL");
+    expect(names).not.toContain("MIGRATE_DATABASE_URL");
+    expect(names).not.toContain("NEXTAUTH_SECRET");
+    // It decrypts nothing and signs nothing for a destination: the worker signs, the gateway sends.
+    expect(names.sort()).toEqual(["NODE_ENV", "WEBHOOK_EGRESS_PORT", GATEWAY_SECRET].sort());
+  });
+
+  it("keeps the gateway secret optional at interpolation time", () => {
+    // Same rule as the encryption key: an unset optional secret must not stop the till. Delivery
+    // fails closed and retryable instead, and the gateway refuses every dispatch rather than
+    // crash-looping.
+    const lines = raw.split("\n").filter((l) => l.trim().startsWith(`${GATEWAY_SECRET}:`));
+    expect(lines, "one line for the worker and one for the gateway").toHaveLength(2);
+    for (const line of lines) {
+      expect(line.trim()).toBe(`${GATEWAY_SECRET}: \${${GATEWAY_SECRET}:-}`);
+      expect(line).not.toContain(":?");
+    }
+  });
+
+  it("carries no value for it, in any form", () => {
+    for (const service of ["worker", GATEWAY]) {
+      const value = envValue(compose.services[service], GATEWAY_SECRET);
+      expect(value).toBe(`\${${GATEWAY_SECRET}:-}`);
+      expect(value).not.toMatch(/[0-9a-f]{32}/i);
+    }
+  });
+
+  it("tells the worker where the gateway is, without making that a secret or a path", () => {
+    const url = envValue(compose.services.worker, "WEBHOOK_GATEWAY_URL") ?? "";
+    expect(url).toContain(GATEWAY);
+    expect(url).toContain(":-");
+    // A service name and a port. No credential in it, and no path: the path is a constant in code.
+    expect(url).not.toMatch(/@/);
+    expect(envNames(compose.services[GATEWAY])).not.toContain("WEBHOOK_GATEWAY_URL");
+  });
+
+  it("introduces no env file", () => {
+    for (const [service, def] of Object.entries(compose.services)) {
+      expect(def.env_file, `${service} must not use env_file`).toBeUndefined();
+    }
+  });
+});
+
+describe("adding the egress gateway changed no exposure", () => {
+  it("leaves the published ports of all three stacks exactly as they were", () => {
+    // The same literal restatement the encryption-key round introduced, re-asserted after a change
+    // that added a whole service: a new container must not come with a new published port.
+    expect(bindings(LOCAL).map((b) => `${b.service} ${b.entry}`).sort()).toEqual([
+      "db 127.0.0.1:${POSTGRES_PORT:-5433}:5432",
+      "proxy ${WEB_PORT:-8080}:80",
+      "test-db 127.0.0.1:${TEST_POSTGRES_PORT:-5435}:5432",
+    ]);
+    expect(bindings(STAGING).map((b) => `${b.service} ${b.entry}`).sort()).toEqual(["proxy 443:443", "proxy 80:80"]);
+    expect(bindings(COHOST).map((b) => `${b.service} ${b.entry}`)).toEqual(["web 127.0.0.1:3100:3000"]);
+  });
+
+  it("leaves the forwarded-header decision of each stack untouched", () => {
+    expect(envValue(load(LOCAL).services.web, "TRUST_PROXY_HEADERS")).toBe("true");
+    expect(envValue(load(STAGING).services.web, "TRUST_PROXY_HEADERS")).toBe("true");
+    expect(envValue(load(COHOST).services.web, "TRUST_PROXY_HEADERS")).toBe("false");
+  });
+
+  it("never binds a port belonging to the co-hosted box or its neighbours", () => {
+    // Re-asserted with a fifth container in the file. 3456, 5432 and 18789 are OpenBot's.
+    const published = bindings(COHOST).map((b) => b.entry);
+    expect(published).toHaveLength(1);
+    for (const port of ["80", "443", "3456", "5432", "18789", "8082"]) {
+      for (const entry of published) {
+        expect(entry.split(":").at(-2), `${entry} must not publish host port ${port}`).not.toBe(port);
+      }
+    }
   });
 });

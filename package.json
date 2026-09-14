@@ -6,6 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "build:worker": "node scripts/build-worker.mjs",
+    "build:egress": "node scripts/build-egress.mjs",
     "start": "next start",
     "lint": "eslint . --max-warnings=0",
     "typecheck": "tsc --noEmit",
@@ -24,6 +25,8 @@
     "db:test:down": "docker compose down test-db",
     "worker": "node dist/worker/index.mjs",
     "worker:dev": "tsx watch src/worker/index.ts",
+    "egress": "node dist/egress/index.mjs",
+    "egress:dev": "tsx watch src/egress/index.ts",
     "gate": "node scripts/gate.mjs"
   },
   "dependencies": {

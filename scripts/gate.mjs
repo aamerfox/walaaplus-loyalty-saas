@@ -14,6 +14,7 @@
  *   9. runtime role grants    → scripts/db-roles.mjs creates the restricted role in TEST_DATABASE_URL
  *  10. integration tests      (real PostgreSQL, connected as the RUNTIME role)
  *  11. worker build           (esbuild bundle the worker container runs)
+ *  11a. egress build          (esbuild bundle the webhook egress container runs)
  *  12. production build
  *
  * Playwright end-to-end tests are intentionally excluded; they are slow and belong to
@@ -73,6 +74,9 @@ const steps = [
   },
   { name: "integration tests", cmd: "npx vitest run --project integration" },
   { name: "worker build", cmd: "node scripts/build-worker.mjs" },
+  // The egress gateway is a separate bundle in a separate image. It compiles here so a broken
+  // import is a gate failure rather than something discovered when a container will not start.
+  { name: "egress build", cmd: "node scripts/build-egress.mjs" },
   { name: "production build", cmd: "npx next build" },
   // Builds the `migrate` target and checks INSIDE the image. A staging deployment once died in
   // that container with ERR_MODULE_NOT_FOUND while every source-tree check here was green: the

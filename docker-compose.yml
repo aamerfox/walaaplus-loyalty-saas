@@ -10,7 +10,13 @@
 #
 #   docker compose up -d db          # application database
 #   docker compose up -d test-db     # disposable integration-test database (tmpfs, wiped on stop)
-#   docker compose --profile app up  # migrate (one-shot) -> proxy + web + worker (requires a build)
+#   docker compose --profile app up  # migrate (one-shot) -> proxy + web + worker + webhook-egress
+#
+# NETWORKS (Phase 3B Prompt 3). `worker` is no longer on the routable default network. It sits on
+# two internal ones - `backend`, which it shares with `db`, and `webhook-control`, which it shares
+# with `webhook-egress` and nothing else - so the process holding the encryption key and every
+# decrypted destination URL has no route off this machine. `webhook-egress` is the only service
+# attached to `webhook-egress-out`, and the only one that can reach a merchant endpoint.
 #
 # Only `proxy` is published to the host (WEB_PORT, default 8080). `web` is deliberately NOT:
 # see the note on that service and deploy/Caddyfile.
@@ -33,6 +39,10 @@ services:
     # `worker` and `migrate` reach the database over the Compose network, not through the host.
     ports:
       - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
+    # `default` keeps the published loopback port and web's path to it exactly as they were.
+    # `backend` is internal and exists so `worker` can reach this database WITHOUT being on a
+    # routable network. The database gains no reach from it: internal means no gateway.
+    networks: [default, backend]
     volumes:
       - db-data:/var/lib/postgresql/data
     healthcheck:
@@ -157,6 +167,21 @@ services:
       # The delivery half of the pair. Same value as `web`, same optional-by-design `:-`, same
       # fail-closed behaviour when it is absent: the worker's other jobs run normally and only
       # webhook delivery refuses. See the note on `web`.
+      # Shared secret authenticating this worker to the egress gateway.
+      #
+      # A DIFFERENT secret from INTEGRATION_ENCRYPTION_KEY and never derived from it: that one
+      # protects destination URLs and signing secrets at rest, this one authenticates a caller on
+      # one internal hop. One value doing both would mean recovering it from either place hands
+      # over the other capability too.
+      #
+      # `:-` and NOT `:?`, for the same reason as the encryption key: an unset optional secret
+      # must not stop the till. Absent or malformed, webhook delivery records GATEWAY_UNAVAILABLE,
+      # retries within the normal cap and SENDS NOTHING. Every other workflow is untouched.
+      WEBHOOK_GATEWAY_SECRET: ${WEBHOOK_GATEWAY_SECRET:-}
+      # Not a secret: a service name and a port on an internal network. Only the scheme, host and
+      # port are used - the request path is a compile-time constant in src/.../gateway.ts - so this
+      # cannot be made to fetch an arbitrary path on a host of someone else's choosing.
+      WEBHOOK_GATEWAY_URL: ${WEBHOOK_GATEWAY_URL:-http://webhook-egress:8082}
       INTEGRATION_ENCRYPTION_KEY: ${INTEGRATION_ENCRYPTION_KEY:-}
     # NOT published: the health endpoint exists for the container orchestrator, which probes it
     # from inside (see healthcheck below). Publishing it would put an unauthenticated status
@@ -164,16 +189,65 @@ services:
     #   docker compose exec worker wget -qO- http://localhost:8081/health
     expose:
       - "8081"
+    # NOT on `default`. The worker holds the encryption key and decrypts destination URLs and
+    # signing secrets; giving THAT process general Internet reach is the thing this topology
+    # exists to avoid. Both of these are internal: `backend` reaches the database, and
+    # `webhook-control` reaches the egress gateway. Neither has a route out.
+    networks: [backend, webhook-control]
     depends_on:
       db:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      webhook-egress:
+        # Started, not healthy: it has no healthcheck by design, and a gateway that is not up yet
+        # is a retryable delivery rather than a failed one.
+        condition: service_started
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8081/health || exit 1"]
       interval: 10s
       timeout: 3s
       retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Webhook egress gateway. THE ONLY SERVICE IN THIS FILE WITH A ROUTE TO THE INTERNET.
+  #
+  # It exists so that the process holding the secrets is not the process holding the route. The
+  # worker keeps DATABASE_URL, the encryption key, every decrypted destination URL and every
+  # decrypted signing secret, and has no way out; this service can reach a merchant endpoint and
+  # holds none of those things - no database credential, no encryption key, no signing secret, no
+  # session secret. Its image carries no node_modules, no Prisma client and no PostgreSQL driver.
+  #
+  # It is NOT a proxy. It accepts POST /dispatch, one JSON object with exactly three keys, five
+  # allow-listed headers, https:// on port 443 only, and it builds its own outbound request from
+  # the parts it accepted. CONNECT and Upgrade destroy the socket; an absolute-form request target
+  # is a 400. It answers with a status code and a bounded classification and never with the
+  # receiver's body. See docs/WEBHOOK-EGRESS-TOPOLOGY.md.
+  #
+  # NO PUBLISHED PORT, in any variant. The only thing that can reach it is `worker`, over
+  # `webhook-control`, which is `internal: true`. Nothing on the host, in another Compose project
+  # or on a neighbour's stack has a path to it.
+  #
+  # No healthcheck, deliberately: the only thing it answers is the dispatch contract, and adding a
+  # second route for a prober would widen the contract to make the container look tidier. If it is
+  # down, delivery records GATEWAY_UNAVAILABLE, retries, and loses nothing.
+  webhook-egress:
+    profiles: ["app"]
+    build:
+      context: .
+      target: egress
+    environment:
+      NODE_ENV: production
+      # The same value the worker has. Optional here too: with no secret this service still starts
+      # and answers SECRET_UNAVAILABLE to every dispatch, which is fail-closed - nothing is sent -
+      # rather than crash-looping a container. It receives NO other secret: no DATABASE_URL, no
+      # NEXTAUTH_SECRET and, deliberately, no INTEGRATION_ENCRYPTION_KEY, because it decrypts
+      # nothing.
+      WEBHOOK_GATEWAY_SECRET: ${WEBHOOK_GATEWAY_SECRET:-}
+      WEBHOOK_EGRESS_PORT: 8082
+    expose:
+      - "8082"
+    networks: [webhook-control, webhook-egress-out]
 
   # The public entry point, and the reason the app may believe X-Forwarded-For at all: it
   # replaces that header with the address of the connection it received. Nothing else is
@@ -199,6 +273,23 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+
+networks:
+  # The ordinary bridge the local stack has always used: routable, because `proxy` publishes to the
+  # host and `db`/`test-db` publish to loopback for host tooling.
+  default:
+  # `internal: true` removes the gateway from this network, so a container attached ONLY to
+  # internal networks has no route to anything outside Docker, in either direction. `worker` is
+  # such a container.
+  backend:
+    internal: true
+  # The one path from the worker to the egress gateway. Internal, so being on it grants the worker
+  # a neighbour and not a route.
+  webhook-control:
+    internal: true
+  # Routable, and `webhook-egress` is the only service attached to it. This is the whole of the new
+  # outbound capability, in one line.
+  webhook-egress-out:
 
 volumes:
   db-data:

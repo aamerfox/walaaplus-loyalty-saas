@@ -24,7 +24,12 @@
 #   - its own PostgreSQL in its own container and volume. It never connects to another database
 #     on this host, and it publishes no database port, so nothing else can connect to it either;
 #   - the only host port touched is 127.0.0.1:3100. OpenBot's ports - 3456, 5432, 18789 and any
-#     other - are never bound, and 5432 in particular is never published by this file at all;
+#     other - are never bound, and 5432 in particular is never published by this file at all.
+#     `webhook-egress`, added by Prompt 3, publishes nothing: it is reachable only by `worker`,
+#     over a network with `internal: true`, so no local process - OpenClaw, OpenBot, ROAD8 or
+#     anything else on this host - has a path to it;
+#   - `webhook-egress` is the only service on a routable network, and it is a NEW network under
+#     this project's prefix. It joins nothing that exists and nothing else joins it;
 #   - every service has an explicit CPU and memory ceiling, so this stack cannot starve the
 #     neighbours on a one-vCPU box. See the RESOURCE BUDGET note below.
 #
@@ -39,15 +44,19 @@
 #
 # RESOURCE BUDGET, for a one-vCPU host shared with OpenClaw/OpenBot:
 #
-#   service   cpus    mem_limit   when
-#   db        0.25    384m        always
-#   web       0.35    512m        always
-#   worker    0.15    256m        always
-#   migrate   0.50    512m        startup only, then it exits
+#   service          cpus    mem_limit   when
+#   db               0.25    384m        always
+#   web              0.35    512m        always
+#   worker           0.10    256m        always
+#   webhook-egress   0.05    128m        always
+#   migrate          0.50    512m        startup only, then it exits
 #
-# Steady state is therefore capped at 0.75 vCPU and 1152 MiB, leaving at least a quarter of the
-# single core for the host and its other services. During startup `migrate` runs while `web` and
-# `worker` do not, so the transient ceiling is db + migrate = 0.75 vCPU, the same number.
+# Steady state is therefore capped at 0.75 vCPU and 1280 MiB, leaving at least a quarter of the
+# single core for the host and its other services. Prompt 3 added a fifth container WITHOUT
+# raising that ceiling: the worker's share moved from 0.15 to 0.10 and the gateway took 0.05. The
+# worker is a poll loop that wakes, claims, and hands one bounded request to another process; it
+# was the right place to find the room. During startup `migrate` runs while `web` and `worker` do
+# not, so the transient ceiling is db + migrate + webhook-egress = 0.80 vCPU.
 #
 # These are LIMITS, not reservations: nothing is held back from the neighbours when this stack is
 # idle. `mem_reservation` is set well below each limit so the kernel reclaims from these
@@ -163,6 +172,9 @@ services:
       # enrolment link - carry the load. tests/unit/compose-exposure.test.ts fails the gate if
       # this ever reads "true" again.
       TRUST_PROXY_HEADERS: "false"
+      # NOTE: `web` receives no WEBHOOK_GATEWAY_SECRET and is not on `webhook-control`. It could
+      # not call the gateway if it held one, and it holds no HTTP client at all - asserted
+      # structurally by tests/unit/webhook-boundary.test.ts.
       # Webhook URL and signing-secret encryption. Per-environment, never committed, never
       # logged. `:-` and NOT `:?`: an unset key resolves to an empty string and the application
       # starts normally - only webhook configuration and delivery fail, closed, in
@@ -195,9 +207,12 @@ services:
       context: .
       target: worker
     restart: unless-stopped
-    # The smallest allowance: a compiled pg-boss loop that wakes, polls and sleeps. It has no
-    # request path and no user waiting on it, so it is the right service to squeeze first.
-    cpus: 0.15
+    # The smallest allowance but one: a compiled pg-boss loop that wakes, polls and sleeps. It has
+    # no request path and no user waiting on it, so it is the right service to squeeze first - and
+    # it was squeezed, from 0.15 to 0.10, to pay for the egress gateway without raising the total.
+    # Since Prompt 3 it does less per delivery, not more: it signs a bounded envelope and hands it
+    # to another process rather than holding a TLS connection open itself.
+    cpus: 0.10
     mem_limit: 256m
     mem_reservation: 64m
     environment:
@@ -207,25 +222,43 @@ services:
       # secret must be present even though the worker serves no session.
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?Set NEXTAUTH_SECRET in the env file}
       NEXTAUTH_URL: https://${WALAAPLUS_DOMAIN:?Set WALAAPLUS_DOMAIN in the env file}
+      # Shared secret authenticating this worker to the egress gateway.
+      #
+      # A DIFFERENT secret from INTEGRATION_ENCRYPTION_KEY and never derived from it: that one
+      # protects destination URLs and signing secrets at rest, this one authenticates a caller on
+      # one internal hop. One value doing both would mean recovering it from either place hands
+      # over the other capability too.
+      #
+      # `:-` and NOT `:?`, for the same reason as the encryption key: an unset optional secret
+      # must not stop the till. Absent or malformed, webhook delivery records GATEWAY_UNAVAILABLE,
+      # retries within the normal cap and SENDS NOTHING. Every other workflow is untouched.
+      WEBHOOK_GATEWAY_SECRET: ${WEBHOOK_GATEWAY_SECRET:-}
+      # Not a secret: a service name and a port on an internal network. Only the scheme, host and
+      # port are used - the request path is a compile-time constant in src/.../gateway.ts - so this
+      # cannot be made to fetch an arbitrary path on a host of someone else's choosing.
+      WEBHOOK_GATEWAY_URL: ${WEBHOOK_GATEWAY_URL:-http://webhook-egress:8082}
       WORKER_HEALTH_PORT: 8081
       # The delivery half of the pair; same value as `web`. See the note there.
       #
-      # NOTE FOR WHOEVER DEPLOYS THIS: this service is attached to `backend` alone, which is
-      # `internal: true` and has no gateway. The key lets the worker DECRYPT a destination; it
-      # does not give it a route to one. Outbound delivery from this worker fails at the network
-      # layer regardless of the key. Left as it is on purpose - attaching this worker to a routed
-      # network is an exposure decision for the owner, not a side effect of wiring a secret.
+      # The key lets the worker DECRYPT a destination; it does not give it a route to one, and
+      # that remains true. Since Prompt 3 the request is made by `webhook-egress`, which this
+      # service reaches over `webhook-control` - a network with no gateway of its own.
       INTEGRATION_ENCRYPTION_KEY: ${INTEGRATION_ENCRYPTION_KEY:-}
     # Container-only, and on the internal network only. Read it by hand with
     #   docker compose -f docker-compose.staging-cohost.yml exec worker wget -qO- http://localhost:8081/health
     expose:
       - "8081"
-    networks: [backend]
+    # Two internal networks and no routable one, on a host that belongs to somebody else. `backend`
+    # reaches the database; `webhook-control` reaches the egress gateway. Neither has a gateway, so
+    # this container cannot reach OpenClaw, OpenBot, ROAD8, the host's loopback or the Internet.
+    networks: [backend, webhook-control]
     depends_on:
       db:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      webhook-egress:
+        condition: service_started
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8081/health || exit 1"]
       interval: 15s
@@ -233,15 +266,69 @@ services:
       retries: 5
       start_period: 20s
 
+  # ---------------------------------------------------------------------------
+  # Webhook egress gateway. THE ONLY SERVICE IN THIS FILE WITH A ROUTE TO THE INTERNET.
+  #
+  # It exists so that the process holding the secrets is not the process holding the route. The
+  # worker keeps DATABASE_URL, the encryption key, every decrypted destination URL and every
+  # decrypted signing secret, and has no way out; this service can reach a merchant endpoint and
+  # holds none of those things - no database credential, no encryption key, no signing secret, no
+  # session secret. Its image carries no node_modules, no Prisma client and no PostgreSQL driver.
+  #
+  # It is NOT a proxy. It accepts POST /dispatch, one JSON object with exactly three keys, five
+  # allow-listed headers, https:// on port 443 only, and it builds its own outbound request from
+  # the parts it accepted. CONNECT and Upgrade destroy the socket; an absolute-form request target
+  # is a 400. It answers with a status code and a bounded classification and never with the
+  # receiver's body. See docs/WEBHOOK-EGRESS-TOPOLOGY.md.
+  #
+  # NO PUBLISHED PORT, in any variant. The only thing that can reach it is `worker`, over
+  # `webhook-control`, which is `internal: true`. Nothing on the host, in another Compose project
+  # or on a neighbour's stack has a path to it.
+  #
+  # No healthcheck, deliberately: the only thing it answers is the dispatch contract, and adding a
+  # second route for a prober would widen the contract to make the container look tidier. If it is
+  # down, delivery records GATEWAY_UNAVAILABLE, retries, and loses nothing.
+  webhook-egress:
+    build:
+      context: .
+      target: egress
+    restart: unless-stopped
+    # The smallest allowance in the file. One bundled Node entry point that accepts a bounded JSON
+    # object, opens one TLS connection at a time up to four, reads at most 2 KiB of a response and
+    # throws it away. It parses no schema, loads no client and holds no connection pool.
+    cpus: 0.05
+    mem_limit: 128m
+    mem_reservation: 48m
+    environment:
+      NODE_ENV: production
+      # The same value the worker has. Optional here too: with no secret this service still starts
+      # and answers SECRET_UNAVAILABLE to every dispatch, which is fail-closed - nothing is sent -
+      # rather than crash-looping a container. It receives NO other secret: no DATABASE_URL, no
+      # NEXTAUTH_SECRET and, deliberately, no INTEGRATION_ENCRYPTION_KEY, because it decrypts
+      # nothing.
+      WEBHOOK_GATEWAY_SECRET: ${WEBHOOK_GATEWAY_SECRET:-}
+      WEBHOOK_EGRESS_PORT: 8082
+    expose:
+      - "8082"
+    networks: [webhook-control, webhook-egress-out]
+
 networks:
   # `internal: true` removes this network's gateway, so db, migrate and worker have no route to
-  # the internet in either direction. Both networks are created under this project's name; they
+  # the internet in either direction. Every network here is created under this project's name; they
   # are new networks, not existing ones, because nothing here is declared external.
   backend:
     internal: true
   # `web` needs a routed network for its published port to be reachable from the host's loopback.
   # Nothing else is attached to it.
   edge:
+  # worker <-> webhook-egress, and nothing else. Internal: the worker gains a neighbour, not a
+  # route. This is what keeps the process holding the encryption key unable to reach anything
+  # outside Docker on a host it shares with other people's services.
+  webhook-control:
+    internal: true
+  # The one routable network Prompt 3 adds, with exactly one member. It is created fresh under this
+  # project's prefix, so it is not and cannot be an existing OpenBot or ROAD8 network.
+  webhook-egress-out:
 
 volumes:
   db-data:

@@ -17,7 +17,8 @@ vi.mock("@/server/auth/session", async (importOriginal) => {
 });
 
 import { prisma } from "@/server/db";
-import { addressProblem, type LookupFn } from "@/server/integrations/webhooks/address";
+import { startEgressServer, type EgressServer } from "@/egress/server";
+import { addressProblem, type AddressPolicy, type LookupFn } from "@/server/integrations/webhooks/address";
 import { encryptSecret, signaturesMatch, signPayload } from "@/server/integrations/webhooks/crypto";
 import {
   backoffSeconds,
@@ -32,7 +33,7 @@ import {
   setDestinationState,
 } from "@/server/integrations/webhooks/destinations";
 import { HEADER, TEST_EVENT_ENTITY_PREFIX } from "@/server/integrations/webhooks/envelope";
-import { sendWebhook } from "@/server/integrations/webhooks/transport";
+import { sendWebhook } from "@/server/integrations/webhooks/gateway";
 import { codeDigest, newCodeSalt } from "@/server/promotions/codes";
 import {
   createStampCafe,
@@ -45,38 +46,90 @@ import {
 import { startReceiver, type Receiver } from "../setup/webhook-receiver";
 
 /**
- * Delivery, against a **local HTTPS receiver this test starts and stops**.
+ * Delivery, against a **local HTTPS receiver this test starts and stops**, through a **real egress
+ * gateway running in this process**.
  *
  * Nothing outside this machine is contacted. The certificate is generated in the fixture, the
- * resolver is a function this file supplies, and the port is whatever the OS hands out. There is no
- * real endpoint, no provider, no staging service and no network path beyond loopback.
+ * resolver is a function this file supplies, the gateway is `startEgressServer` on loopback, and
+ * every port is whatever the OS hands out. There is no real endpoint, no provider, no staging
+ * service and no network path beyond loopback.
  *
- * The resolver is the interesting part: the transport refuses a loopback address, correctly and
- * unconditionally, so a test cannot simply point it at `127.0.0.1`. Instead the DNS hook is
- * replaced — which is exactly the seam the production code uses for its rebinding defence, so the
- * tests exercise the real path rather than a bypass.
+ * ## What changed in Prompt 3, and what deliberately did not
+ *
+ * The request is no longer made by the worker. `runDueDeliveries` claims, re-reads, decrypts,
+ * builds the envelope and signs it, then hands the signed bytes to the gateway over HTTP; the
+ * gateway re-validates the address, resolves it under the guard and opens the TLS connection.
+ *
+ * So the DNS seams moved with the code that uses them: they are options of the **gateway** now, not
+ * of the runner. A test that needs a different resolver sets `currentLookup` and the gateway picks
+ * it up on its next dispatch — which keeps every assertion below about the same production path,
+ * just one process further along. Nothing here bypasses the guard: the address policy defaults to
+ * the real rule and is widened only to the one loopback address the receiver is bound to.
  */
 
 let savedKey: string | undefined;
+let savedGatewaySecret: string | undefined;
 let receiver: Receiver;
+let gateway: EgressServer;
+let gatewayUrl: string;
+
+/**
+ * The resolver and policy the in-process gateway uses for the NEXT dispatch.
+ *
+ * Mutable, because the gateway is started once and some tests need it to answer differently. Set
+ * through `withResolver` rather than written directly, so every test states which one it wants.
+ */
+let currentLookup: LookupFn;
+let currentPolicy: AddressPolicy;
 
 beforeAll(async () => {
   savedKey = process.env.INTEGRATION_ENCRYPTION_KEY;
+  savedGatewaySecret = process.env.WEBHOOK_GATEWAY_SECRET;
   process.env.INTEGRATION_ENCRYPTION_KEY = randomBytes(32).toString("hex");
+  // Generated per run, never printed, never written down. Two different values: reusing one would
+  // be the exact mistake .env.staging.example warns about.
+  process.env.WEBHOOK_GATEWAY_SECRET = randomBytes(32).toString("hex");
+
   receiver = await startReceiver();
+  currentLookup = resolverTo(receiver.address);
+  currentPolicy = allowReceiver;
+
+  gateway = await startEgressServer({
+    host: "127.0.0.1",
+    // Indirected through the mutable variables so a test can change the answer between passes.
+    lookup: ((h, o, cb) => currentLookup(h, o, cb)) as LookupFn,
+    addressPolicy: (address) => currentPolicy(address),
+    ca: receiver.ca,
+    /*
+     * The one test seam on the port rule. A receiver cannot bind 443; see `ParseOptions`. The
+     * second entry is a port nothing listens on, so the refused-connection test can prove that a
+     * dead endpoint is the NETWORK's problem - retryable - rather than a contract refusal.
+     */
+    allowedPorts: [receiver.port, receiver.port + 1],
+  });
+  gatewayUrl = `http://127.0.0.1:${gateway.port}`;
 });
 
 afterAll(async () => {
+  await gateway.close();
   await receiver.close();
   if (savedKey === undefined) delete process.env.INTEGRATION_ENCRYPTION_KEY;
   else process.env.INTEGRATION_ENCRYPTION_KEY = savedKey;
+  if (savedGatewaySecret === undefined) delete process.env.WEBHOOK_GATEWAY_SECRET;
+  else process.env.WEBHOOK_GATEWAY_SECRET = savedGatewaySecret;
 });
 
+/** Point the gateway's next dispatch at a particular answer. The policy defaults to the loose one. */
+function withResolver(lookup: LookupFn, policy: AddressPolicy = allowReceiver): void {
+  currentLookup = lookup;
+  currentPolicy = policy;
+}
+
 /**
- * A resolver that answers with a PUBLIC-looking address for the test hostname.
+ * A resolver that answers with a chosen address for the test hostname.
  *
- * The transport then connects to it — except the local receiver is on loopback, so for the tests
- * that actually complete a request the address handed back is the loopback the server is on and the
+ * The gateway then connects to it — except the local receiver is on loopback, so for the tests that
+ * actually complete a request the address handed back is the loopback the server is on and the
  * `lookup` seam is what makes that possible. The SSRF tests use a resolver that answers with a
  * genuinely private address and assert the refusal.
  */
@@ -116,9 +169,10 @@ function allowReceiver(address: string): string | null {
   return addressProblem(address);
 }
 
-/** Run one pass with the test's own resolver, policy and certificate. */
+/** Run one pass against the in-process gateway, resolving to the local receiver. */
 function runOnce(now = new Date()) {
-  return runDueDeliveries({ now, lookup: localResolver(), addressPolicy: allowReceiver, ca: receiver.ca });
+  withResolver(localResolver());
+  return runDueDeliveries({ now, gatewayUrl });
 }
 
 describe("a queued delivery is sent, signed, and recorded", () => {
@@ -287,7 +341,8 @@ describe("SSRF is refused at delivery time, not only at save time", () => {
     const { deliveryId } = await queueTestDelivery(fx.ctx, destinationId);
     const before = receiver.requests.length;
 
-    await runDueDeliveries({ lookup: resolverTo("169.254.169.254"), addressPolicy: allowReceiver, ca: receiver.ca });
+    withResolver(resolverTo("169.254.169.254"));
+    await runDueDeliveries({ gatewayUrl });
 
     const row = await migratorPrisma().webhookDelivery.findFirstOrThrow({ where: { id: deliveryId } });
     expect(row.status).toBe("REFUSED");
@@ -305,7 +360,8 @@ describe("SSRF is refused at delivery time, not only at save time", () => {
       const { deliveryId } = await queueTestDelivery(fx.ctx, destinationId);
       // The REAL policy here, deliberately: `allowReceiver` permits the loopback the receiver is
       // on, which would make 127.0.0.1 pass and prove nothing.
-      await runDueDeliveries({ lookup: resolverTo(address), ca: receiver.ca });
+      withResolver(resolverTo(address), addressProblem);
+      await runDueDeliveries({ gatewayUrl });
       const row = await migratorPrisma().webhookDelivery.findFirstOrThrow({ where: { id: deliveryId } });
       expect(row.lastErrorClass, address).toBe("UNSAFE_ADDRESS");
       expect(row.status, address).toBe("REFUSED");
@@ -315,7 +371,8 @@ describe("SSRF is refused at delivery time, not only at save time", () => {
   it("records the refusal without the address ever reaching a column", async () => {
     const { fx, destinationId } = await cafeWithDestination("Quiet café");
     await queueTestDelivery(fx.ctx, destinationId);
-    await runDueDeliveries({ lookup: resolverTo("169.254.169.254"), addressPolicy: allowReceiver, ca: receiver.ca });
+    withResolver(resolverTo("169.254.169.254"));
+    await runDueDeliveries({ gatewayUrl });
 
     const attempts = await migratorPrisma().webhookDeliveryAttempt.findMany({
       where: { businessId: fx.businessId },
@@ -507,8 +564,9 @@ describe("an unavailable key waits; a corrupt ciphertext does not", () => {
   });
 });
 
-describe("the transport refuses an oversized body before sending", () => {
-  it("never puts more than the cap on the wire", async () => {
+describe("an oversized body is refused before it crosses the hop", () => {
+  it("never puts more than the cap on the wire, and never reaches the gateway", async () => {
+    const before = receiver.requests.length;
     const result = await sendWebhook({
       url: `https://${HOST}:${receiver.port}/hook`,
       signingSecret: "x",
@@ -516,12 +574,13 @@ describe("the transport refuses an oversized body before sending", () => {
       eventId: "e",
       deliveryId: "d",
       attemptNumber: 1,
-      lookup: localResolver(),
-      addressPolicy: allowReceiver,
-      ca: receiver.ca,
+      gatewayUrl,
     });
+    // Permanent, and named as ours rather than the merchant's: a body this size is our defect.
     expect(result.outcome).toBe("PERMANENT");
+    expect(result.errorClass).toBe("GATEWAY_REJECTED");
     expect(result.httpStatus).toBeNull();
+    expect(receiver.requests.length).toBe(before);
   });
 });
 
@@ -726,10 +785,9 @@ describe("two passes cannot dispatch the same delivery", () => {
     const { fx, destinationId } = await cafeWithDestination("Slow caf\u00e9");
     const { deliveryId } = await queueTestDelivery(fx.ctx, destinationId);
 
+    withResolver(localResolver());
     await runDueDeliveries({
-      lookup: localResolver(),
-      addressPolicy: allowReceiver,
-      ca: receiver.ca,
+      gatewayUrl,
       // Between the claim and the write, somebody else re-claims the row.
       send: async () => {
         await migratorPrisma().webhookDelivery.update({
@@ -847,15 +905,14 @@ describe("the dispatch read is per delivery, not per batch", () => {
    * Run one pass, committing `change` while a delivery OTHER than `target` is on the wire.
    *
    * Keyed on the delivery id rather than on a counter, so it cannot depend on which order the claim
-   * happened to return. The real transport still runs for every delivery; the hook only interposes a
+   * happened to return. The real gateway still runs for every delivery; the hook only interposes a
    * committed database change between two dispatches, which is exactly the race being tested.
    */
   function runInterleaved(targetDeliveryId: string, change: () => Promise<void>) {
     let changed = false;
+    withResolver(localResolver());
     return runDueDeliveries({
-      lookup: localResolver(),
-      addressPolicy: allowReceiver,
-      ca: receiver.ca,
+      gatewayUrl,
       send: async (input) => {
         if (!changed && input.deliveryId !== targetDeliveryId) {
           changed = true;

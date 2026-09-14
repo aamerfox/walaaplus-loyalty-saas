@@ -1316,6 +1316,13 @@ enum WebhookErrorClass {
   CIPHERTEXT_INVALID
   /// Permanent. Disabled or revoked before dispatch, or a real event for a destination not enabled.
   DESTINATION_NOT_ELIGIBLE
+  /// **Retryable.** The egress gateway was unreachable, unauthenticated, unconfigured or at its
+  /// concurrency limit. **The dispatch never left this deployment**, so it is not the merchant's
+  /// network and is deliberately not recorded as if it were.
+  GATEWAY_UNAVAILABLE
+  /// Permanent. The gateway refused the dispatch CONTRACT - a malformed URL, an oversized body, a
+  /// header outside the allow-list. A defect on this side; waiting does not fix it.
+  GATEWAY_REJECTED
 }
 
 /// Only AES-256-GCM exists. An enum so a row cannot claim an algorithm nothing here can read.

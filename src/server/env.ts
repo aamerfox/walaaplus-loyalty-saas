@@ -144,6 +144,34 @@ const envSchema = z.object({
    */
   INTEGRATION_ENCRYPTION_KEY: z.string().optional(),
 
+  /**
+   * Shared secret authenticating the worker to the webhook egress gateway.
+   *
+   * **A different secret from `INTEGRATION_ENCRYPTION_KEY`, and never derived from it.** That one
+   * protects destination URLs and signing secrets at rest; this one authenticates a caller on one
+   * internal hop. A single value doing both would mean recovering it from either place hands over
+   * the other capability too.
+   *
+   * Optional and unvalidated here for exactly the reasons above it: a deployment that sends no
+   * webhooks must start normally, and a mistyped value must not take down the till. The authority
+   * is `src/egress/auth.ts`, at the moment the value is needed, and the failure is scoped -
+   * delivery records GATEWAY_UNAVAILABLE, retries within the normal cap, and sends nothing.
+   *
+   * 32 bytes, as 64 hex characters or base64. Per environment. Received by the worker and the
+   * gateway; by nothing else. See `docs/WEBHOOK-EGRESS-TOPOLOGY.md` §6.
+   */
+  WEBHOOK_GATEWAY_SECRET: z.string().optional(),
+
+  /**
+   * Where the egress gateway is, inside the Compose network.
+   *
+   * **Not a secret** - a service name and a port. Optional because the default is the Compose
+   * service address; set it only when the topology differs. Only the scheme, host and port are
+   * used: the request path is a compile-time constant, so this cannot redirect the worker to an
+   * arbitrary path on a host of someone else's choosing.
+   */
+  WEBHOOK_GATEWAY_URL: z.string().optional(),
+
   /*
    * ── No public-enrollment window (finding L-15, closed) ─────────────────────
    *

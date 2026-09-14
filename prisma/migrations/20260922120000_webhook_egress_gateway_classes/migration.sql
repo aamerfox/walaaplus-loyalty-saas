@@ -1,0 +1,39 @@
+-- Phase 3B Prompt 3 — two bounded failure classes for the webhook egress gateway.
+--
+-- WHY THIS MIGRATION EXISTS AT ALL
+--
+-- Prompt 3 says to add a migration only if it is genuinely unavoidable. It is, and the reason is
+-- honesty rather than function.
+--
+-- Delivery now goes through a separate `webhook-egress` service: the worker holds the secrets and
+-- has no route to the Internet, the gateway has the route and holds no secrets. That introduces
+-- failures that belong to OUR infrastructure and not to the merchant's - the gateway is not
+-- running, it refused our authentication, its own secret is unset, it is at its concurrency
+-- limit, or we sent it a request its contract refuses.
+--
+-- Those could be recorded as NETWORK, and everything would still BEHAVE correctly: retryable,
+-- bounded by the five-attempt cap, nothing sent. What would be wrong is the record. The attempt
+-- history is append-only and is shown to the business owner, and NETWORK means "we tried to reach
+-- your endpoint and the network failed". An owner reading that would go and debug an endpoint that
+-- was never contacted, while the actual fault sat in a container they cannot see. Writing a
+-- diagnosis we know to be false into a history that cannot be corrected is not a saving.
+--
+-- So: two values, additive, nothing else.
+--
+--   GATEWAY_UNAVAILABLE   retryable. The dispatch never left this deployment.
+--   GATEWAY_REJECTED      permanent. The gateway refused the CONTRACT - a malformed URL, an
+--                         oversized body, a header outside the allow-list. That is a defect on our
+--                         side and waiting does not fix it.
+--
+-- WHAT THIS DOES NOT DO
+--
+-- No table is created, altered, rewritten or locked. No row changes. No existing value is renamed
+-- or removed, so every row already written keeps its meaning and every existing CHECK, trigger and
+-- grant is untouched. Migration 20260921120000_webhook_destinations is NOT amended: it is applied
+-- on staging and stays exactly as it is.
+--
+-- `ALTER TYPE ... ADD VALUE` is permitted inside a transaction from PostgreSQL 12 onwards provided
+-- the new value is not USED in the same transaction. Nothing here uses it.
+
+ALTER TYPE "WebhookErrorClass" ADD VALUE 'GATEWAY_UNAVAILABLE';
+ALTER TYPE "WebhookErrorClass" ADD VALUE 'GATEWAY_REJECTED';

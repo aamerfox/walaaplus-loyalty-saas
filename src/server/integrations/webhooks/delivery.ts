@@ -9,8 +9,7 @@ import {
 import { prisma } from "../../db";
 import { DecryptionFailedError, decryptSecret, EncryptionUnavailableError } from "./crypto";
 import { canonicalBody, testEnvelope, WEBHOOK_ENVELOPE_VERSION } from "./envelope";
-import { sendWebhook, type SendWebhookResult } from "./transport";
-import type { AddressPolicy, LookupFn } from "./address";
+import { sendWebhook, type SendWebhookResult } from "./gateway";
 
 /**
  * The worker's side of a webhook: **claim** what is due, try it, record what happened.
@@ -52,6 +51,14 @@ import type { AddressPolicy, LookupFn } from "./address";
  *
  * `src/worker/jobs/webhook-delivery.ts` is the only caller, and a source scan asserts nothing under
  * `src/app/` imports this module.
+ *
+ * ## And the request itself is made somewhere else entirely
+ *
+ * Since Prompt 3 this module does not open a socket to a destination. It decrypts, builds the
+ * envelope, **signs it with the destination's own secret**, and hands the signed bytes to the
+ * egress gateway over an internal Docker network that has no route out. The worker keeps the
+ * secrets and no Internet reach; the gateway has the reach and none of the secrets. See
+ * `./gateway.ts` and `docs/WEBHOOK-EGRESS-TOPOLOGY.md`.
  */
 
 /**
@@ -86,10 +93,16 @@ export function backoffSeconds(attemptNumber: number): number {
 export interface DeliveryRunOptions {
   now?: Date;
   limit?: number;
-  /** Injectable for tests; **production passes none of these** — see `AddressPolicy` in `address.ts`. */
-  lookup?: LookupFn;
-  addressPolicy?: AddressPolicy;
-  ca?: string | Buffer;
+  /**
+   * Injectable for tests only.
+   *
+   * The DNS seams this used to carry — `lookup`, `addressPolicy`, `ca` — are gone from here. They
+   * belong to the process that resolves and connects, and that is no longer this one: they are
+   * options of the egress server now. A test that needs to reach a loopback receiver starts a
+   * gateway with them instead of threading them through the runner, which means there is no longer
+   * any parameter on this path that could soften the address rules.
+   */
+  gatewayUrl?: string;
   send?: typeof sendWebhook;
 }
 
@@ -362,11 +375,12 @@ function refuse(errorClass: WebhookErrorClass): SendWebhookResult {
  *
  * **Once this delivery's fresh read has observed a state and the outbound attempt has begun, a later
  * owner action cannot reliably cancel it.** Everything after that read — decrypting the URL and
- * secret, re-validating the URL's shape, signing the body, resolving the hostname, opening the TCP
- * and TLS connection, and writing the request — runs without checking the database again. None of
- * those steps has a fixed or short duration: DNS resolution and the TLS handshake in particular can
- * each take a meaningful fraction of a second, or longer under a slow or degraded network, so this
- * is not a "microseconds" window.
+ * secret, re-validating the URL's shape, signing the body, handing it to the egress gateway, and
+ * the gateway's own resolution, TCP/TLS connection and request — runs without checking the database
+ * again. None of those steps has a fixed or short duration: DNS resolution and the TLS handshake in
+ * particular can each take a meaningful fraction of a second, or longer under a slow or degraded
+ * network, so this is not a "microseconds" window. Prompt 3 added one hop to that list and changed
+ * nothing about the boundary.
  *
  * What holds regardless of how long it takes: a database transaction and a socket cannot commit
  * together, so there is no point at which an owner's disable, revoke or rotation can be made to
@@ -448,8 +462,6 @@ async function attemptOne(
     eventId: envelope.eventId,
     deliveryId: delivery.id,
     attemptNumber: delivery.attemptCount + 1,
-    lookup: options.lookup,
-    addressPolicy: options.addressPolicy,
-    ca: options.ca,
+    gatewayUrl: options.gatewayUrl,
   });
 }
