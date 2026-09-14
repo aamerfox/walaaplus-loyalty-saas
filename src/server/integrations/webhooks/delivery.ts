@@ -95,14 +95,21 @@ export interface DeliveryRunOptions {
 
 export interface DeliveryRunSummary {
   claimed: number;
+  /** Claimed, then found to be held by somebody else at dispatch time. No request, no attempt. */
+  skipped: number;
   delivered: number;
   retrying: number;
   refused: number;
   failed: number;
 }
 
-/** A claimed delivery, with everything it needs and nothing it does not. */
-interface ClaimedDelivery {
+/**
+ * One delivery, read **immediately before it is dispatched**.
+ *
+ * Deliberately not loaded for the batch. A batch read is a snapshot, and a snapshot is wrong by the
+ * time the tenth delivery is sent if the first one was slow — see `loadForDispatch`.
+ */
+interface DispatchRow {
   id: string;
   businessId: string;
   attemptCount: number;
@@ -131,32 +138,66 @@ interface ClaimedDelivery {
  */
 async function claimDue(now: Date, limit: number, token: string): Promise<string[]> {
   const expires = new Date(now.getTime() + LEASE_SECONDS * 1000);
+  /*
+   * The `ORDER BY` inside the sub-select decides WHICH rows are claimed. It does not decide the
+   * order they come back in: `UPDATE ... RETURNING` emits rows in whatever order it updated them,
+   * which PostgreSQL does not specify. So the claim is wrapped in a CTE and the ids are ordered on
+   * the way out.
+   *
+   * That matters twice over. Oldest-first is the intent — a delivery that has waited longest should
+   * go first — and it was not being honoured. And a test that interleaves a change between two
+   * dispatches cannot be deterministic if the dispatch order is not.
+   */
   const rows = await prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
-    UPDATE "WebhookDelivery" AS d
-       SET "claimedAt" = ${now},
-           "leaseExpiresAt" = ${expires},
-           "claimToken" = ${token}
-     WHERE d."id" IN (
-       SELECT c."id"
-         FROM "WebhookDelivery" c
-        WHERE c."status" = 'PENDING'
-          AND c."nextAttemptAt" <= ${now}
-          AND (c."leaseExpiresAt" IS NULL OR c."leaseExpiresAt" <= ${now})
-        ORDER BY c."nextAttemptAt" ASC
-        FOR UPDATE SKIP LOCKED
-        LIMIT ${limit}
-     )
-    RETURNING d."id"
+    WITH claimed AS (
+      UPDATE "WebhookDelivery" AS d
+         SET "claimedAt" = ${now},
+             "leaseExpiresAt" = ${expires},
+             "claimToken" = ${token}
+       WHERE d."id" IN (
+         SELECT c."id"
+           FROM "WebhookDelivery" c
+          WHERE c."status" = 'PENDING'
+            AND c."nextAttemptAt" <= ${now}
+            AND (c."leaseExpiresAt" IS NULL OR c."leaseExpiresAt" <= ${now})
+          ORDER BY c."nextAttemptAt" ASC
+          FOR UPDATE SKIP LOCKED
+          LIMIT ${limit}
+       )
+      RETURNING d."id", d."nextAttemptAt"
+    )
+    SELECT "id" FROM claimed ORDER BY "nextAttemptAt" ASC, "id" ASC
   `);
   return rows.map((r) => r.id);
 }
 
-/** Read what a claimed delivery needs. The destination state here is the **cutover boundary**. */
-async function loadClaimed(ids: string[], token: string): Promise<ClaimedDelivery[]> {
-  if (ids.length === 0) return [];
-  const rows = await prisma.webhookDelivery.findMany({
-    // The token, so a row re-claimed by somebody else between the two statements is not processed.
-    where: { id: { in: ids }, claimToken: token },
+/**
+ * Read one delivery, its destination and its event **at the moment of dispatch**.
+ *
+ * ## Why this is per delivery and not per batch
+ *
+ * The first version of this loaded the whole claimed batch once, before the loop, and every later
+ * delivery used that snapshot. With ten claimed and the first one slow, an owner could disable or
+ * revoke the tenth destination and the tenth delivery would still go out against a stale `ENABLED`
+ * — and against a stale signing secret if they had rotated it. The comment above it claimed the
+ * state was re-read immediately before dispatch. It was not, and a batch read cannot be.
+ *
+ * So: one read, per delivery, in the loop, returning the CURRENT destination state, the CURRENT
+ * ciphertexts and the CURRENT event. Everything `attemptOne` decides with is a value that was true
+ * microseconds before the socket opened.
+ *
+ * ## The claim token is part of the WHERE
+ *
+ * A row no longer held by this token was re-claimed by somebody else — this pass lost its lease
+ * while it was slow. `null` comes back, the caller skips it, and **no request is made and no attempt
+ * is recorded**. Writing one would be this pass describing work that is now another pass's.
+ *
+ * The cost is one indexed primary-key read per delivery. That is nothing against an outbound HTTP
+ * request, and it is the difference between a promise the code keeps and one it only makes.
+ */
+async function loadForDispatch(id: string, token: string): Promise<DispatchRow | null> {
+  const row = await prisma.webhookDelivery.findFirst({
+    where: { id, claimToken: token },
     select: {
       id: true,
       businessId: true,
@@ -169,8 +210,9 @@ async function loadClaimed(ids: string[], token: string): Promise<ClaimedDeliver
       },
     },
   });
+  if (!row) return null;
 
-  return rows.map((row) => ({
+  return {
     id: row.id,
     businessId: row.businessId,
     attemptCount: row.attemptCount,
@@ -185,7 +227,7 @@ async function loadClaimed(ids: string[], token: string): Promise<ClaimedDeliver
     entityType: row.integrationEvent?.entityType ?? null,
     entityId: row.integrationEvent?.entityId ?? null,
     occurredAt: row.integrationEvent?.occurredAt ?? null,
-  }));
+  };
 }
 
 /**
@@ -199,7 +241,7 @@ async function loadClaimed(ids: string[], token: string): Promise<ClaimedDeliver
  * finds zero rows affected and writes no attempt, rather than trampling the state of whoever took
  * the row next.
  */
-async function recordAttempt(delivery: ClaimedDelivery, result: SendWebhookResult, now: Date, token: string): Promise<boolean> {
+async function recordAttempt(delivery: DispatchRow, result: SendWebhookResult, now: Date, token: string): Promise<boolean> {
   const attemptNumber = delivery.attemptCount + 1;
 
   const settled =
@@ -256,16 +298,33 @@ export async function runDueDeliveries(options: DeliveryRunOptions = {}): Promis
   const now = options.now ?? new Date();
   const send = options.send ?? sendWebhook;
   const token = randomUUID();
-  const summary: DeliveryRunSummary = { claimed: 0, delivered: 0, retrying: 0, refused: 0, failed: 0 };
+  const summary: DeliveryRunSummary = { claimed: 0, skipped: 0, delivered: 0, retrying: 0, refused: 0, failed: 0 };
 
   const ids = await claimDue(now, options.limit ?? BATCH_SIZE, token);
-  const claimed = await loadClaimed(ids, token);
-  summary.claimed = claimed.length;
+  summary.claimed = ids.length;
 
-  for (const delivery of claimed) {
+  for (const id of ids) {
+    /*
+     * The read happens HERE, inside the loop, for this one delivery — not once for the batch.
+     *
+     * Everything `attemptOne` decides with is therefore current: the destination's state, its
+     * ciphertexts, and the event. A destination disabled, revoked or rotated while an earlier
+     * delivery in the same batch was in flight is seen as it is now, not as it was when the batch
+     * was claimed.
+     */
+    const delivery = await loadForDispatch(id, token);
+    if (!delivery) {
+      // The lease moved on while this pass was slow. Not ours to send, not ours to record.
+      summary.skipped += 1;
+      continue;
+    }
+
     const result = await attemptOne(delivery, send, options, now);
     const written = await recordAttempt(delivery, result, now, token);
-    if (!written) continue;
+    if (!written) {
+      summary.skipped += 1;
+      continue;
+    }
 
     if (result.outcome === WebhookAttemptOutcome.DELIVERED) summary.delivered += 1;
     else if (result.outcome === WebhookAttemptOutcome.PERMANENT) summary.refused += 1;
@@ -284,18 +343,25 @@ function refuse(errorClass: WebhookErrorClass): SendWebhookResult {
 /**
  * Decrypt, build the body, send. Every failure becomes a classification rather than an exception.
  *
- * ## The cutover, and the boundary it cannot cross
+ * ## What this is given, and when
  *
- * The destination's state is re-read under the claim, immediately before dispatch — so a
- * destination disabled or revoked while a delivery sat in the queue sends nothing.
+ * A `DispatchRow` read by `loadForDispatch` **for this delivery, in this iteration**. Its
+ * destination state, its ciphertexts and its event were all true microseconds ago — not when the
+ * batch was claimed, which is a different and much earlier moment when the batch is slow.
  *
- * What that cannot do is unsend a request already on the wire. If the owner's disable commits after
- * this function has handed the body to the socket, the receiver gets it. The window is milliseconds
- * and it is unavoidable: a TCP connection and a database transaction do not commit together. It is
- * written down in `docs/INTEGRATIONS-CAPABILITY-MATRIX.md` §7a rather than promised away.
+ * So a destination disabled, revoked or rotated while an earlier delivery was in flight is honoured
+ * here: nothing is sent to it, and a rotated secret signs with the new value.
+ *
+ * ## The one boundary that remains, stated plainly
+ *
+ * **A request already on the wire cannot be unsent.** If the owner's disable commits after this
+ * function has handed the body to the socket, the receiver gets it. The window is between the read
+ * a few lines below and the moment the socket accepts the body — microseconds, and irreducible: a
+ * TCP connection and a database transaction do not commit together. Written down in
+ * `docs/INTEGRATIONS-CAPABILITY-MATRIX.md` §7a rather than promised away.
  */
 async function attemptOne(
-  delivery: ClaimedDelivery,
+  delivery: DispatchRow,
   send: typeof sendWebhook,
   options: DeliveryRunOptions,
   now: Date,

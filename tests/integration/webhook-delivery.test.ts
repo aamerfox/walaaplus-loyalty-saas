@@ -25,7 +25,12 @@ import {
   MAX_ATTEMPTS,
   runDueDeliveries,
 } from "@/server/integrations/webhooks/delivery";
-import { createDestination, queueTestDelivery, setDestinationState } from "@/server/integrations/webhooks/destinations";
+import {
+  createDestination,
+  queueTestDelivery,
+  rotateSecret,
+  setDestinationState,
+} from "@/server/integrations/webhooks/destinations";
 import { HEADER, TEST_EVENT_ENTITY_PREFIX } from "@/server/integrations/webhooks/envelope";
 import { sendWebhook } from "@/server/integrations/webhooks/transport";
 import { codeDigest, newCodeSalt } from "@/server/promotions/codes";
@@ -789,3 +794,211 @@ async function realEventFor(fx: StampCafeFixture): Promise<string> {
     return event.id;
   });
 }
+
+describe("the dispatch read is per delivery, not per batch", () => {
+  /*
+   * The gap this closes. `loadClaimed` used to read the whole claimed batch once, before the loop,
+   * and every later delivery used that snapshot. With two claimed and the first one slow, an owner
+   * could disable the second destination and the second delivery would still go out against a stale
+   * `ENABLED` — and against a stale signing secret if they had rotated it.
+   *
+   * Every test here claims TWO deliveries and changes the second's destination while the first is
+   * being sent. That is deterministic: the change happens inside the first delivery's `send`, so it
+   * is committed before the second delivery's read by construction, not by timing.
+   */
+  beforeEach(async () => {
+    await resetDatabase();
+    receiver.reset();
+  });
+
+  /**
+   * Two destinations in one business, both enabled, each with one queued test delivery.
+   *
+   * The claim orders by `nextAttemptAt`, so the first delivery is backdated to make the order
+   * **deterministic**. Without that the two are queued microseconds apart and either can be sent
+   * first — which made the interleaved assertions pass or fail on timing rather than on behaviour,
+   * and is exactly the kind of test that lies when it is green.
+   */
+  async function twoQueued(name: string) {
+    const fx = await createStampCafe({ name });
+    session.userId = fx.userId;
+
+    const made: { destinationId: string; deliveryId: string; signingSecret: string }[] = [];
+    for (const n of [1, 2]) {
+      const created = await createDestination(fx.ctx, {
+        name: `Ops ${n}`,
+        url: `https://${HOST}:${receiver.port}/hook?d=${n}`,
+      });
+      await setDestinationState(fx.ctx, created.destination.id, "ENABLED");
+      const { deliveryId } = await queueTestDelivery(fx.ctx, created.destination.id);
+      made.push({ destinationId: created.destination.id, deliveryId, signingSecret: created.signingSecret });
+    }
+
+    // A minute earlier, so this one is unambiguously first in the claim's ORDER BY.
+    await migratorPrisma().webhookDelivery.update({
+      where: { id: made[0].deliveryId },
+      data: { nextAttemptAt: new Date(Date.now() - 60_000) },
+    });
+
+    return { fx, first: made[0], second: made[1] };
+  }
+
+  /**
+   * Run one pass, committing `change` while a delivery OTHER than `target` is on the wire.
+   *
+   * Keyed on the delivery id rather than on a counter, so it cannot depend on which order the claim
+   * happened to return. The real transport still runs for every delivery; the hook only interposes a
+   * committed database change between two dispatches, which is exactly the race being tested.
+   */
+  function runInterleaved(targetDeliveryId: string, change: () => Promise<void>) {
+    let changed = false;
+    return runDueDeliveries({
+      lookup: localResolver(),
+      addressPolicy: allowReceiver,
+      ca: receiver.ca,
+      send: async (input) => {
+        if (!changed && input.deliveryId !== targetDeliveryId) {
+          changed = true;
+          await change();
+        }
+        return sendWebhook(input);
+      },
+    });
+  }
+
+  it("sends nothing to a destination disabled while an earlier delivery was in flight", async () => {
+    const { fx, first, second } = await twoQueued("Interleave disable caf\u00e9");
+    const before = receiver.requests.length;
+
+    const summary = await runInterleaved(second.deliveryId, async () => {
+      await setDestinationState(fx.ctx, second.destinationId, "DISABLED");
+    });
+
+    expect(summary.claimed).toBe(2);
+
+    const firstRow = await migratorPrisma().webhookDelivery.findFirstOrThrow({ where: { id: first.deliveryId } });
+    expect(firstRow.status, "the first delivery should have gone").toBe("DELIVERED");
+
+    const secondRow = await migratorPrisma().webhookDelivery.findFirstOrThrow({ where: { id: second.deliveryId } });
+    /*
+     * A synthetic test MAY run while disabled — that rule is unchanged and deliberate. What must not
+     * happen is the second delivery using the stale ENABLED snapshot; here it correctly sees
+     * DISABLED and, being a test, is still allowed through. The batch-snapshot bug is proved by the
+     * revoke and rotate cases below, where the two paths differ.
+     */
+    expect(secondRow.attemptCount).toBe(1);
+    expect(receiver.requests.length - before).toBe(2);
+  });
+
+  it("sends nothing — not even a test — to a destination revoked while an earlier delivery was in flight", async () => {
+    const { fx, first, second } = await twoQueued("Interleave revoke caf\u00e9");
+    const before = receiver.requests.length;
+
+    const summary = await runInterleaved(second.deliveryId, async () => {
+      await setDestinationState(fx.ctx, second.destinationId, "REVOKED");
+    });
+
+    expect(summary.claimed).toBe(2);
+
+    const firstRow = await migratorPrisma().webhookDelivery.findFirstOrThrow({ where: { id: first.deliveryId } });
+    expect(firstRow.status).toBe("DELIVERED");
+
+    const secondRow = await migratorPrisma().webhookDelivery.findFirstOrThrow({ where: { id: second.deliveryId } });
+    expect(secondRow.lastErrorClass, "a revoked destination was contacted").toBe("DESTINATION_NOT_ELIGIBLE");
+    expect(secondRow.status).toBe("REFUSED");
+    expect(secondRow.lastHttpStatus).toBeNull();
+
+    // Exactly one request left the process: the first delivery's.
+    expect(receiver.requests.length - before, "the revoked destination received something").toBe(1);
+    const attempts = await migratorPrisma().webhookDeliveryAttempt.findMany({
+      where: { deliveryId: second.deliveryId },
+    });
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0].outcome).toBe("PERMANENT");
+  });
+
+  it("refuses a REAL event queued for a destination disabled mid-batch", async () => {
+    const fx = await createStampCafe({ name: "Interleave real caf\u00e9" });
+    session.userId = fx.userId;
+
+    // One test delivery to keep the batch busy, then a real one to a second destination.
+    const keepBusy = await createDestination(fx.ctx, { name: "Busy", url: `https://${HOST}:${receiver.port}/hook?d=0` });
+    await setDestinationState(fx.ctx, keepBusy.destination.id, "ENABLED");
+    const busy = await queueTestDelivery(fx.ctx, keepBusy.destination.id);
+    await migratorPrisma().webhookDelivery.update({
+      where: { id: busy.deliveryId },
+      data: { nextAttemptAt: new Date(Date.now() - 60_000) },
+    });
+
+    const target = await createDestination(fx.ctx, { name: "Target", url: `https://${HOST}:${receiver.port}/hook?d=1` });
+    await setDestinationState(fx.ctx, target.destination.id, "ENABLED");
+    const eventId = await realEventFor(fx);
+    const realDeliveryId = (
+      await prisma.webhookDelivery.create({
+        data: {
+          businessId: fx.businessId,
+          destinationId: target.destination.id,
+          integrationEventId: eventId,
+          nextAttemptAt: new Date(),
+        },
+        select: { id: true },
+      })
+    ).id;
+
+    const before = receiver.requests.length;
+    const summary = await runInterleaved(realDeliveryId, async () => {
+      await setDestinationState(fx.ctx, target.destination.id, "DISABLED");
+    });
+
+    expect(summary.claimed).toBe(2);
+    const row = await migratorPrisma().webhookDelivery.findFirstOrThrow({ where: { id: realDeliveryId } });
+    expect(row.lastErrorClass, "a disabled destination received a real event").toBe("DESTINATION_NOT_ELIGIBLE");
+    expect(row.status).toBe("REFUSED");
+    expect(receiver.requests.length - before, "only the first delivery should have gone").toBe(1);
+  });
+
+  it("signs with the NEW secret when it was rotated mid-batch", async () => {
+    const { fx, second } = await twoQueued("Interleave rotate caf\u00e9");
+    const oldSecret = second.signingSecret;
+    let newSecret = "";
+
+    await runInterleaved(second.deliveryId, async () => {
+      newSecret = (await rotateSecret(fx.ctx, second.destinationId)).signingSecret;
+    });
+
+    expect(newSecret).not.toBe(oldSecret);
+
+    // The second delivery's request, identified by its own header rather than by position.
+    const request = receiver.requests.find((r) => r.headers[HEADER.deliveryId] === second.deliveryId)!;
+    expect(request, "the second delivery never reached the receiver").toBeDefined();
+    const timestamp = request.headers[HEADER.timestamp] as string;
+    const signature = request.headers[HEADER.signature] as string;
+
+    expect(
+      signaturesMatch(signature, `v1=${signPayload(newSecret, timestamp, request.body)}`),
+      "the request was signed with the secret captured before the rotation",
+    ).toBe(true);
+    expect(signaturesMatch(signature, `v1=${signPayload(oldSecret, timestamp, request.body)}`)).toBe(false);
+  });
+
+  it("skips a delivery re-claimed by somebody else, without a request or an attempt", async () => {
+    const { second } = await twoQueued("Interleave steal caf\u00e9");
+    const before = receiver.requests.length;
+
+    const summary = await runInterleaved(second.deliveryId, async () => {
+      // Somebody else takes the second row while the first is on the wire.
+      await migratorPrisma().webhookDelivery.update({
+        where: { id: second.deliveryId },
+        data: { claimToken: randomUUID() },
+      });
+    });
+
+    expect(summary.claimed).toBe(2);
+    expect(summary.skipped).toBe(1);
+    expect(receiver.requests.length - before).toBe(1);
+
+    const row = await migratorPrisma().webhookDelivery.findFirstOrThrow({ where: { id: second.deliveryId } });
+    expect(row.attemptCount, "a stolen row was attempted anyway").toBe(0);
+    expect(await migratorPrisma().webhookDeliveryAttempt.count({ where: { deliveryId: second.deliveryId } })).toBe(0);
+  });
+});
