@@ -706,3 +706,135 @@ the same green as every other success on that screen.
 `desktop-en-customer-redemptions.png` shows the offers panel on the customer record with its own
 "nothing here was discounted, charged or paid" line — a second place the claim is denied, because the
 customer record is where somebody would go looking for a balance.
+
+---
+
+## 21. Four things found in review, before any of this was deployed
+
+The promotions work was reviewed as a whole before it left this machine. Four defects came out of
+it. The migration had not reached staging, so it was **amended** rather than followed by a second
+one; the count stays at 13.
+
+### 21.1 A file review could not read
+
+`src/server/promotions/codes.ts` and `tests/unit/promotion-codes.test.ts` each held two physical
+U+0000 bytes, used as separators in the digest input.
+
+The separator is right. `sha256(salt ‖ businessId ‖ code)` without one lets salt `"ab"` with code
+`"cd"` hash identically to salt `"a"` with code `"bcd"`, and a NUL is the conventional way to stop
+it. Writing it as a **literal byte in the source** was the mistake: one NUL makes Git classify a
+file as binary, and from then on it does not appear in `git diff`, `git log -p` or `git blame`,
+`git grep` skips it, and a pull request renders it as *"Binary files differ"*.
+
+So of every file in this feature, the one that could not be read during review was the one deciding
+how coupon codes are hashed. That is not a cosmetic problem; it is a review that silently did not
+happen.
+
+Both now use the TypeScript escape `\0`, which compiles to exactly the same byte. To keep the
+encoding change from becoming a behaviour change, the digest of a fixed input is hard-coded in the
+test as the value computed before the rewrite, and a companion assertion proves the escape really is
+one NUL rather than the two-character text.
+
+`tests/unit/source-text-encoding.test.ts` walks `git ls-files` and fails on a physical NUL in any
+reviewed extension, and asks Git itself — via `git diff --numstat`, which prints line counts for text
+and a pair of dashes for binary — whether these two files can be diffed.
+
+### 21.2 A duplicate code that two people could create at once
+
+`createPromotion` read every existing salt, hashed the candidate against each, decided there was no
+duplicate, and only then opened its transaction. Two managers submitting the same code at the same
+moment both read "no duplicate" and both inserted.
+
+**The unique index cannot catch that.** `(businessId, codeDigest)` sees two unrelated rows, because
+each attempt minted its own 32-byte salt and the same code hashed differently under each. That is
+the direct cost of salting, spelled out in §13 — and the check that pays it was not atomic.
+
+The consequence is a coupon that works or does not depending on which candidate redemption reaches
+first, which is the kind of bug a customer reports and nobody can reproduce.
+
+Creation now takes `pg_advisory_xact_lock` as the first statement inside its transaction, and the
+read, the duplicate check, the cap check and the insert all happen behind it. The lock releases on
+commit or rollback, so no path leaks it.
+
+**The key names the business, not the code.** Locking per code would put a number derived from a
+short human-chosen secret into `pg_locks`, where it is readable for as long as the lock is held, and
+into any statement log. Sixty-four bits of a hash over a six-character code is not a secret. Locking
+per business gives up nothing worth having: creating a promotion is a manager pressing a button a
+handful of times a year, so the contention is not measurable, and the serialisation is strictly
+wider than the one required. The key is never stored in any column.
+
+### 21.3 An event time the writer could choose
+
+`recordedAt` is what every window check reads — *"was this promotion running when this happened?"* —
+and it was supplied by the caller. A direct writer could date a row into a promotion that had already
+ended, or into one that had not started, and the trigger would agree with them.
+
+`walaaplus_validate_redemption` now assigns it from the server's clock before anything compares it:
+
+```sql
+NEW."recordedAt" := (now() AT TIME ZONE 'UTC');
+```
+
+`now()` is the transaction's start time, so a redemption and the audit row written beside it agree.
+`AT TIME ZONE 'UTC'` is explicit because the column is a bare `TIMESTAMP(3)` holding UTC; an
+implicit cast would be right only while the session's `TimeZone` happened to be UTC.
+
+It is deliberately not conditional on the entry kind. A backdated `VOIDED` row is a falsified
+withdrawal, which is the same problem wearing the other hat.
+
+The service no longer passes a timestamp at all. It still checks the window itself, so a cashier gets
+a refusal rather than a database error — but that is a message, not the rule.
+
+This closes the door on imported and backdated redemptions for this phase. If a merchant ever needs
+to import history, that is a decision with a policy attached, not a column somebody may set.
+
+### 21.4 A canonical name that could drift from the name
+
+`normalizedName` is what `(businessId, normalizedName)` is unique on, and what the merchant's own
+list is ordered and de-duplicated by. `promotion_guard` froze the identity of a promotion and the
+lifecycle it could walk, but left `normalizedName` free — so a direct writer could set it to anything,
+including on an expired row, and hide a duplicate from the very index that depends on it.
+
+The trigger now computes it from the name and **assigns** it, on every insert and every update.
+
+Assigning rather than comparing is the deliberate choice, and the reason is measured rather than
+assumed. PostgreSQL and JavaScript do not agree about what needs normalising:
+
+| input | JavaScript | PostgreSQL |
+|---|---|---|
+| `\s` matching U+00A0 | matches | does **not** match |
+| `lower("İ")` | `i` + combining dot | `i` |
+
+A merchant pasting a name out of a word processor brings U+00A0 with it every time. A comparison
+would refuse that name with a database error; an assignment cannot, and a supplied value is never
+consulted, so it cannot be set independently either. The rule is stronger and the failure mode is
+gone.
+
+An **expired** promotion still refuses the edit out loud rather than silently correcting it: the
+arriving value is checked against the old one *before* the assignment, so an attempt to rewrite a
+finished promotion's canonical name raises `check_violation` like every other edit to one.
+
+`normalizePromotionName` in the service is now advisory, and says so. It was also changed from
+`toLocaleLowerCase` to `toLowerCase`, so a server running under a Turkish locale cannot quietly
+produce a different answer from the database, and its whitespace class was written out to match
+PostgreSQL's rather than relying on JavaScript's wider one.
+
+### 21.5 Every new test was watched fail
+
+| protection removed | tests that went red |
+|---|---|
+| the escape, replaced by a literal NUL | **3 of 3** in `source-text-encoding` |
+| `NEW."recordedAt" := now()` | **4 of 5**; the fifth is the control, a valid redemption inside a real window |
+| the canonical-name assignment and its expired check | **5 of 5** |
+| the advisory lock | the deterministic lock-contention test |
+
+Each rule was then restored and the suite re-run green.
+
+The six-way concurrent-create test is the one honest exception, and it is labelled as such in the
+file: it **passed with the lock removed**, because Prisma's transactions did not interleave far
+enough to reproduce the race on this machine. A race that only sometimes reproduces is a test that
+only sometimes checks anything, so the proof of the mechanism is a second test that takes the very
+lock `createPromotion` takes, holds it, and asserts the create does not complete until it is
+released. The six-way test is kept because the invariant it states — one code, one promotion,
+whatever arrives — is what a merchant actually cares about, and it would catch a regression that
+broke it by any route.

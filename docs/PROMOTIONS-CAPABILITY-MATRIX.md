@@ -40,7 +40,7 @@ Four buckets, used consistently:
 | Owner-chosen code, stored as a **salted digest** | **Supported now** | See §6. The raw code is never stored, logged, audited, returned or rendered after the request that carries it. |
 | Recovering a forgotten code | **Out of scope — and a real consequence** | Nothing can. The owner chose it and must keep it; otherwise they expire the promotion and make another. Stated in the UI rather than discovered. |
 | Auto-generated codes | **Later business policy** | Would change who is responsible for distributing it. |
-| One code, many promotions | **Out of scope** | Codes are unique per business by digest, so a lookup has one answer. |
+| One code, many promotions | **Out of scope** | Codes are unique per business by digest, so a lookup has one answer. The unique index alone cannot hold this — per-promotion salts make two rows with the same code look unrelated to it — so creation serialises on an advisory lock and re-reads behind it. See §6. |
 | QR or barcode coupons | **Out of scope for now** | A scannable coupon is a capability in an image, and it needs the same treatment `CardShareLink` got — a fragment URL, a revocation path, and its own audit. Worth doing; not by extending a typed-code feature sideways. |
 
 ## 3. Redeeming
@@ -85,6 +85,9 @@ Four buckets, used consistently:
 | The raw code is never stored | **Supported now** | `sha256(salt ‖ businessId ‖ normalised code)`, with a **random 32-byte salt per promotion**. |
 | Precomputation is useless against a stolen database | **Supported now** | The salt is why. A coupon code is short and human-typed — a plain unsalted digest of `AUTUMN10` is a dictionary lookup. A keyed HMAC would be stronger still and needs a secret this phase may not add, so the salt is the honest ceiling here, and it is stated rather than glossed. |
 | Lookup stays tenant-scoped | **Supported now** | Candidate promotions are read for the caller's business only, then compared by digest. Bounded by a promotion cap per business. |
+| Two concurrent creates cannot both take the same code | **Supported now** | `pg_advisory_xact_lock` taken inside the creation transaction, before the duplicate check reads. The unique index cannot do this job: two salts, two digests, one code. **The lock key is derived from the business id alone, never from the code** — an advisory key is visible in `pg_locks` while it is held, and sixty-four bits of a hash over a six-character code is not a secret. Locking per business costs nothing real, because creating a promotion is a manager pressing a button. |
+| The recorded moment is the server's | **Supported now** | The trigger assigns `recordedAt` from `now()` before any window check reads it, for withdrawals as well as redemptions. A caller that chose the moment would choose whether the promotion was running: nothing in this phase may import, backdate or future-date a redemption. |
+| `normalizedName` is always the canonical form of `name` | **Supported now** | The trigger computes it and assigns it on every insert and update, so it cannot be set independently — which is what would let a duplicate hide from the unique index that reads it. Assigned rather than compared: PostgreSQL and JavaScript disagree about U+00A0 and dotted capital I, so a comparison would refuse names a merchant can legitimately type. An expired row refuses the edit outright. |
 | Business, promotion, card and profile must agree | **Supported now** | Trigger, `BEFORE INSERT`. Foreign keys check that ids exist; nothing in a foreign key checks that they agree. |
 | Only an `ACTIVE` promotion may be redeemed | **Supported now** | Trigger. |
 | Limits cannot be exceeded | **Supported now** | Row lock in the service, re-counted by the trigger at insert. |

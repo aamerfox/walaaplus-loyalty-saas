@@ -5,8 +5,10 @@
 | | |
 |---|---|
 | Code, migration and tests | `0f8f00c` |
-| Documentation | the commit carrying this file |
-| **Deploy this** | the tip of `rebuild/phase-0-foundation` |
+| Documentation | `97a4bd8` |
+| Review fixes (code, migration, tests) | `fc4cabf` — see §16 |
+| Review fixes (documentation) | the commit carrying this file |
+| **Deploy this** | the tip of `rebuild/phase-0-foundation`. **Not `97a4bd8`** — see §16 |
 | Migration | `20260919120000_promotions_and_redemptions`, the **13th** |
 | `master` | untouched at `b9ee686` |
 
@@ -226,6 +228,7 @@ Everything below was run locally on this machine, against local PostgreSQL in Do
 | `npx playwright test` — run 1 | **92 passed**, 2.7m |
 | `npx playwright test` — run 2 | **92 passed**, 2.7m |
 | `npx vitest run` | **86 files, 1172 tests passed**, 430.9s |
+| *(re-run after the §16 fixes)* | **87 files, 1188 tests passed**, 433.9s |
 | `npm audit` | 0 vulnerabilities |
 | `npm audit --omit=dev` | 0 vulnerabilities |
 | `node scripts/db-migrate.mjs status` | 13 migrations, schema up to date |
@@ -276,6 +279,8 @@ Seven passes over the repository:
 6. **Client** — `couponInput` is cleared on success and never becomes an `href` or a route.
 7. **Rendered HTML** — the browser suite fetches the promotions page and asserts the digest does not
    appear in it.
+8. **The advisory-lock key** (added in §16) — derived from the business id alone, never from the
+   code, and never written to any column. Only a `bigint` reaches PostgreSQL.
 
 ### 10c. What was NOT tested, and is not claimed
 
@@ -373,21 +378,159 @@ None is blocking. Nothing in the code, the schema or the strings presumes an ans
 
 ## 15. Deviations from the brief
 
-One, and it is a reporting matter rather than a change of scope: the brief asked for a "secret scan"
-and the repository has no dedicated secret-scanning script, so the scan was run as a pattern sweep
-over every changed file (private keys, provider key prefixes, and assigned `secret` / `password` /
-`api_key` literals). It came back clean. §10b is the coupon-specific scan the brief also asked for,
-run separately and in more depth.
+Three, all reported rather than absorbed.
+
+**One.** The brief asked for a "secret scan" and the repository has no dedicated secret-scanning
+script, so the scan was run as a pattern sweep over every changed file (private keys, provider key
+prefixes, and assigned `secret` / `password` / `api_key` literals). It came back clean. §10b is the
+coupon-specific scan the brief also asked for, run separately and in more depth.
+
+**Two (§16.2).** The review brief allowed an advisory-lock key derived from
+`(businessId, normalized code)` provided no raw code was recoverable from it. A key derived from the
+**business id alone** was used instead. It serialises a strict superset of what was asked, costs
+nothing measurable, and removes the code from the question rather than arguing about how recoverable
+a truncated hash of a six-character string is.
+
+**Three (§16.5).** The brief asked that every new test be confirmed red with its protection removed.
+Three of the four were. The six-way concurrent-create test was **not** — it passed with the lock
+removed, because Prisma's transactions did not interleave far enough on this machine. Rather than
+present it as a proof it is not, it is relabelled in the file as an outcome check, and a second,
+deterministic lock-contention test was added that does fail without the fix. That is the test the
+concurrency claim rests on.
 
 Everything else was done as written.
 
 ---
 
-## 16. Which SHA to deploy
+## 16. Review hardening — four defects fixed before deployment
+
+`97a4bd8` was reviewed against `70704f8` and four pre-deployment integrity defects were found. All
+four are fixed in **`fc4cabf`**. The migration had not reached staging, so
+`20260919120000_promotions_and_redemptions` was **amended** rather than followed by a fourteenth;
+the count stays at **13**, and none of the twelve already-deployed migrations was touched.
+
+`docs/PHASE-3A-IMPLEMENTATION.md` §21 carries the reasoning. In short:
+
+### 16.1 Tracked TypeScript that Git called binary
+
+Two files held physical U+0000 bytes as digest separators. One such byte makes Git classify a file
+as binary: it stops appearing in `git diff`, `git log -p` and `git blame`, `git grep` skips it, and
+a pull request shows *"Binary files differ"*. Of every file in this feature the one review could not
+read was `src/server/promotions/codes.ts` — the file deciding how coupon codes are hashed.
+
+Both now use the TypeScript escape, which compiles to the same byte. The digest of a fixed input is
+pinned as a hard-coded hex vector — the value computed *before* the rewrite — so an encoding change
+cannot become a behaviour change, and a companion assertion proves the escape is one NUL rather than
+the two-character text. `tests/unit/source-text-encoding.test.ts` walks `git ls-files`, fails on a
+physical NUL in any reviewed extension, and asks `git diff --numstat` whether these two files diff
+as text.
+
+**Reported precisely:** the commit that fixes this still *shows* as a binary diff, because Git calls
+a diff binary when **either** side contains a NUL and the old side does. Every diff after `fc4cabf`
+is text; `git grep` finds content inside the committed file, and appending a line to it now reports
+`2  0` rather than `-  -`.
+
+### 16.2 Duplicate-code creation was not atomic
+
+The duplicate check read every existing salt and hashed the candidate against each **before**
+opening its transaction. Two managers submitting the same code at once both read "no duplicate" and
+both inserted, and the unique index on `(businessId, codeDigest)` cannot catch it — two salts, two
+digests, one code. The result would be a coupon that works or does not depending on which candidate
+redemption reached first.
+
+Creation now takes `pg_advisory_xact_lock` as the first statement inside its transaction, with the
+read, the duplicate check, the cap check and the insert all behind it.
+
+**The key is derived from the business id alone, never from the code.** An advisory key is visible
+in `pg_locks` while it is held and in any statement log, and sixty-four bits of a hash over a
+six-character code is not a secret. Locking per business costs nothing measurable — creating a
+promotion is a manager pressing a button — and serialises a strict superset of what was required.
+The key is ephemeral and is never stored.
+
+*This is the one place the brief's suggestion was not followed literally.* It allowed a per-code
+advisory key with no recoverable raw code; the per-business key was taken instead because it removes
+the code from the question entirely rather than arguing about how recoverable a truncated hash is.
+
+### 16.3 A caller-chosen event time
+
+`recordedAt` is what every window check reads, and it was the caller's. A direct writer could date a
+row into a promotion that had ended or one that had not started, and the trigger would agree.
+
+`walaaplus_validate_redemption` now assigns it — `NEW."recordedAt" := (now() AT TIME ZONE 'UTC')` —
+before anything compares it, for `VOIDED` rows as well as `REDEEMED` ones, because a backdated
+withdrawal is the same problem wearing the other hat. `AT TIME ZONE 'UTC'` is explicit because the
+column is a bare `TIMESTAMP(3)` holding UTC. The service passes no timestamp at all; its own window
+check remains, as a message rather than as the rule. Nothing in this phase can import, backdate or
+future-date a redemption.
+
+### 16.4 A canonical name that could drift from the name
+
+`promotion_guard` left `normalizedName` free, so a direct writer could set it independently of
+`name` — including on an expired row — and hide a duplicate from the unique index that reads it.
+
+The trigger now computes it from the name and **assigns** it on every insert and update. Assigning
+rather than comparing, and the reason was measured rather than assumed: PostgreSQL's `\s` does not
+match U+00A0 (which arrives whenever a merchant pastes a name out of a word processor) and the two
+languages differ on dotted capital I. A comparison would refuse names a merchant can legitimately
+type; an assignment cannot, and a supplied value is never consulted. An **expired** promotion still
+refuses the edit out loud, because the arriving value is checked against the old one before the
+assignment.
+
+`normalizePromotionName` is now advisory and says so; it also moved from `toLocaleLowerCase` to
+`toLowerCase`, so a server under a Turkish locale cannot quietly disagree with the database.
+
+### 16.5 Every new protection was watched fail
+
+| protection removed | tests that went red |
+|---|---|
+| the escape, replaced by a literal NUL | **3 of 3** in `source-text-encoding` |
+| `NEW."recordedAt" := now()` | **4 of 5**; the fifth is the control — a valid redemption inside a real window |
+| the canonical-name assignment and its expired check | **5 of 5** |
+| the advisory lock | the deterministic lock-contention test |
+
+Each was restored and re-run green.
+
+**One honest exception.** The six-way concurrent-create test **passed with the lock removed** —
+Prisma's transactions did not interleave far enough to reproduce the race on this machine. It is
+labelled in the file as an outcome check rather than a race reproduction, and the proof of the
+mechanism is a second, deterministic test that takes the lock `createPromotion` takes, holds it, and
+asserts the create does not complete until it is released. That one fails immediately without the
+fix.
+
+### 16.6 The quality bar, re-run in full after the fixes
+
+| Check | Result |
+|---|---|
+| `node scripts/gate.mjs` | **PASS 15/15**, 567.3s |
+| `npx playwright test` — run 1 | **92 passed**, 2.8m |
+| `npx playwright test` — run 2 | **92 passed**, 2.7m |
+| `npx vitest run` | **87 files, 1188 tests passed**, 433.9s |
+| `npm audit` / `--omit=dev` | 0 vulnerabilities each |
+| `node scripts/db-migrate.mjs status` | 13 migrations, schema up to date |
+| `prisma migrate diff` | unchanged — the same pre-existing `ConsentRecord` naming difference, §10a |
+| `git diff --check` | clean |
+| `git status --porcelain public/` | 0 |
+| Secret scan over every changed file | clean |
+| Raw-coupon-capability scan | clean, now including the lock key |
+| Physical NUL over all 338 tracked reviewed files | **none** |
+| Screenshots | `desktop-en-promotions.png` and `phone-ar-promotions.png` re-read; no UI changed and none regressed |
+
+New test counts after the fixes: `promotion-codes` 17, `source-text-encoding` 3,
+`promotions` 34, `promotion-integrity` 37, `promotions-ui` 12.
+
+---
+
+## 17. Which SHA to deploy
 
 The tip of `rebuild/phase-0-foundation` — the documentation commit carrying this file, which
-contains `0f8f00c`. The final report names the exact hash; it is not written here because a file
-cannot name the commit it is part of.
+contains `0f8f00c`, `97a4bd8` and `fc4cabf`. The final report names the exact hash; it is not
+written here because a file cannot name the commit it is part of.
+
+**`97a4bd8` must not be deployed.** It ships a migration whose guarantees an ordinary writer can
+step around — a chosen event time and a free-floating canonical name — and a source file review
+cannot read. None of it loses data, and the service writes correct rows today; the point is that a
+migration is the hardest artefact to correct once applied, and it has not been applied anywhere
+yet.
 
 `master` is untouched at `b9ee686`. Staging is Freebuff's after review, and nothing in this report
 claims a staging, device or provider test was performed.
