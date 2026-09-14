@@ -920,6 +920,55 @@ constraints check tenant agreement across business, promotion, card and profile;
 the window; both limits; one-time semantics; and that a void is a faithful copy of the row it
 withdraws. `PromotionRedemption` is append-only at the grant level and `Promotion` cannot be deleted.
 
+### 8A.13 The internal integration event record (Phase 3B Prompt 1)
+
+When a workflow finishes, the product writes one row saying it happened. That is the whole feature.
+
+**Nothing is connected and nothing is sent.** There is no provider account, credential, endpoint,
+subscription, signature, queue, worker, retry or delivery status — and no `fetch`, HTTP client or
+timer anywhere in the module that writes the row. The screen says so in as many words, in both
+languages, because an integrations page with provider names on it is how a product comes to be
+described as integrated with things it has never contacted.
+
+**Two workflows emit**, both already finished and both already safe: a promotion redemption, and its
+withdrawal. The reference product has roughly forty event types. Each addition is a decision about
+what a workflow may tell the outside world — an enrolment event, for instance, would say a named
+card came into existence at a moment, which is a different disclosure from "an offer was recorded"
+(§D28).
+
+**The envelope is minimal and versioned**: the business, the event type, the entity type and its
+internal id, the moment the database assigned, and `envelopeVersion` — which is 1, and 1 is the only
+value that exists. A consumer written against version 1 that meets a version 2 row should stop, not
+guess.
+
+**There is no JSON metadata column.** A free-form bag is where a phone number ends up eventually, not
+through malice but because somebody debugging a failed delivery adds "just the recipient,
+temporarily". Typed columns mean the table has nowhere to put a contact detail, a capability or its
+digest, a coupon code, a secret, a wallet payload or an amount; adding one would take a migration,
+which is a thing a person reviews.
+
+**The event and the action commit together.** `emitIntegrationEvent` takes a transaction client and
+has no other overload, so a caller cannot emit outside the transaction that did the work. A
+redemption that fails leaves no event; an event that fails takes the redemption with it. There is no
+best-effort path, because a best-effort event is one a consumer will eventually be missing without
+knowing.
+
+**Nothing is backfilled.** Redemptions and voids recorded before the migration have no event: a
+backfilled row would assert that a decision to publish was taken at a moment when it was not, and
+`occurredAt` is assigned by the database precisely so nobody can date one into the past.
+
+**The database refuses a row that does not describe something that happened.** The entity must exist,
+belong to the same business, and be the kind the event type claims. The table is append-only at the
+grant level and by trigger, and a unique index on `(eventType, entityId)` makes emission idempotent.
+
+**Owner and manager only.** `VIEW_INTEGRATIONS` — which already existed and which a cashier does not
+hold — plus an explicit role check, because a feed of everything the business has done is not a
+decision to leave to a checkbox. The page returns 404 for a cashier rather than rendering empty.
+
+**Where a credential would live is a decision, not a column** (§D27). No secrets table, no encryption
+key, no environment variable, no deployment change. Every family that could ever be connected, and
+what each would need first, is classified in `docs/INTEGRATIONS-CAPABILITY-MATRIX.md`.
+
 ---
 
 ## 9. Deferred by design

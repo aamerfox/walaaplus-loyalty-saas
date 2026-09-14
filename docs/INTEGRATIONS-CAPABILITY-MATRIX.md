@@ -1,0 +1,209 @@
+# Integrations — capability audit
+
+Written **before** the Phase 3B Prompt 1 implementation and used to constrain it. Every row below was
+decided first; the code that followed builds the "Supported now" column and nothing else.
+
+The shape of this phase in one sentence: **the product records, in its own database, that something
+happened — and nothing leaves the machine.** No provider is contacted, no endpoint is called, no
+credential exists to call one with.
+
+---
+
+## 0. The sentence this document exists to prevent
+
+> *"We integrate with Twilio, SendGrid, Stripe, WhatsApp and your POS."*
+
+A provider logo on a settings screen is not an integration. Neither is a card that says
+**Connect**, a field that accepts an API key, or a row in a features table. An integration is a
+credential somebody obtained, an account somebody pays for, a contract somebody agreed to, a network
+path that reaches the provider, a retry policy for when it does not, and a record of what was
+actually delivered.
+
+This phase has **none** of those, and the product must not imply otherwise. Nothing in this codebase
+after Phase 3B Prompt 1 can send an email, a message, a webhook or a payment, and there is no screen
+that suggests it can.
+
+Four buckets, used consistently:
+
+| bucket | means |
+|---|---|
+| **Supported now** | built in this phase, testable locally, with no provider, credential, account or network |
+| **Foundation now, provider later** | the internal half exists and is real; the provider half needs a credential, an account or a configuration decision nobody has made |
+| **Needs approval, contract or account** | blocked on a provider's review, a legal or commercial decision, or an external account somebody must open and pay for |
+| **Unsuitable / out of scope** | ruled out by B7, by privacy, by sanctions and market reality, or because it would make this phase something else |
+
+---
+
+## 1. What this prompt actually builds
+
+| capability | bucket | notes |
+|---|---|---|
+| A tenant-isolated, append-only **internal event record** | **Supported now** | `IntegrationEvent`. One row per completed promotion redemption and per void. Nothing reads it but an owner or manager, and nothing delivers it. |
+| A **versioned envelope** | **Supported now** | `envelopeVersion` is on every row and is `1`. A future consumer that cannot read a version it does not know is a consumer that fails safely; one that guesses is a consumer that mis-delivers. |
+| Events written **in the same transaction** as the action | **Supported now** | No event for an action that failed, and no action that survives a failed event. Proved by making the event insert throw and asserting the redemption is not there. |
+| Append-only at the **grant** level and the **trigger** level | **Supported now** | Runtime role holds `SELECT`, `INSERT`. Triggers refuse `UPDATE`, `DELETE`, `TRUNCATE` even for the owner. |
+| Semantic integrity enforced **in the database** | **Supported now** | The referenced entity must exist, belong to the same business, and be of the kind the event type claims. A direct writer with no service in the way cannot forge a row. |
+| An owner/manager **read view** | **Supported now** | `/business/integrations`. Internal ids, types and times. **404 for a cashier.** |
+| Anything that leaves the machine | **Out of scope — the defining exclusion** | See §7. |
+
+---
+
+## 2. Email
+
+| family | bucket | notes |
+|---|---|---|
+| **Custom SMTP** | **Needs account and deployment decision** | Needs a host, port, username, password and a TLS mode — five values, four of which are secret. This phase adds **no secrets table, no encryption key and no environment variable**; where those live, and who may see them, is an explicit owner and deployment decision (§8). |
+| **SendGrid** | **Needs account** | API key, verified sender identity, domain authentication (SPF/DKIM records the owner must add to DNS — which this phase may not touch). Availability from the target market is unverified. |
+| **Mailgun** | **Needs account** | Same shape. Region matters: EU and US endpoints are different base URLs and a sending domain belongs to one of them. |
+| **Resend** | **Needs account** | Same shape; simplest of the three to start, and the least proven for high-volume transactional Arabic mail. |
+| Transactional email at all (password reset) | **Foundation now, provider later** | **D3** has been open since Phase 0. The product still has no way to send a password-reset email, and says so rather than shipping a reset flow that silently does nothing. |
+| Marketing email to a segment | **Foundation now, provider later** | The draft, the revisions, the approval and the frozen audience all exist (Phase 2). `src/server/campaigns/delivery.ts` is the named place delivery will arrive and its only implementation refuses. |
+
+**None of these may be started without answering: who owns the account, who pays, which domain
+sends, and where the key is stored.** The last of those is a deployment change this phase may not
+make.
+
+---
+
+## 3. SMS and messaging
+
+| family | bucket | notes |
+|---|---|---|
+| **Twilio SMS** | **Unsuitable for the launch market, as far as is known** | **D2** since Phase 0. Twilio's coverage for Syria is the open question and it has never been verified from inside this project. Building against Twilio before that is answered risks building the wrong adapter entirely. |
+| SMS by any provider | **Needs commercial decision** | A regional aggregator is the likely answer and none has been chosen. Sender-ID registration is a separate, slow, per-country process. |
+| **WhatsApp** (Business Platform) | **Needs Meta approval, contract and account** | A Meta Business account, a verified business, a WhatsApp Business Account, a registered number that is not already on consumer WhatsApp, and **template messages approved by Meta one at a time**. Per-conversation pricing. The product's placeholder grammar is not Meta's; the two would have to be reconciled. |
+| **Facebook Messenger** | **Needs Meta approval and a Page** | Requires a Facebook Page, a Page access token, and App Review for `pages_messaging`. Messenger's 24-hour window rules mean most useful sends are message tags, which are themselves policy-reviewed. Note this is also why Phase 3A shipped no Messenger share button: its web dialog needs a registered app id. |
+| **Telegram Bot** | **Foundation now, provider later** | Genuinely the least encumbered: a bot token from BotFather, no review, no contract. **But it can only message a user who started the chat**, so it is not a channel for reaching customers — it is a channel for reaching *staff*. Worth building for that, honestly labelled. |
+| **Telegram Report Bot** (a daily/weekly digest to the merchant) | **Foundation now, provider later** | The same token, aimed at the owner rather than the customer. This is the single most plausible first outbound integration in the whole document: the recipient is the person who set it up, consent is not in question, and there is no per-message cost. It still needs the token stored somewhere (§8). |
+| Any of the above without routing through the consent contract | **Out of scope** | A message to a customer is a message. The product has one consent scope, `MARKETING`, an append-only history, and a rule that an unknown answer is not a yes. A channel that skipped it would be a side door around it. |
+
+---
+
+## 4. Advertising, analytics and business listings
+
+| family | bucket | notes |
+|---|---|---|
+| **Google Business API** (reviews, posts, hours) | **Needs account and OAuth** | A Google Cloud project, OAuth consent screen verification, and the merchant's own verified Business Profile. The useful capability — soliciting reviews — is a *message to a customer*, so it lands back in §3's consent rule. |
+| **Google Tag Manager** | **Unsuitable / out of scope** | GTM is a container that loads arbitrary third-party JavaScript decided after deployment. On a page that shows a customer's name, card and balance, that is a data-exfiltration vector with a friendly name. `tests/unit/*` already assert no third-party script origin loads on any surface, and the browser suite re-checks it against the page's own origin. |
+| **Meta Ads** (Pixel, Conversions API) | **Unsuitable / out of scope for customer-facing surfaces** | A pixel on a card page reports a customer's visit to Meta. The Conversions API is server-side and would mean sending customer events to Meta from the backend — which is precisely the thing this phase's event model exists to *not* do. If a merchant wants ad attribution, that belongs on their own marketing site, not on a loyalty card. |
+| Any analytics script at all | **Out of scope** | Unchanged from Phase 0. No tracker, no pixel, no session recorder, no error-reporting SaaS. |
+
+---
+
+## 5. Payments
+
+| family | bucket | notes |
+|---|---|---|
+| **Stripe** | **Unsuitable for the launch market** | **E1** since Phase 0: Stripe does not operate in Syria. Agency billing needs an alternative or a foreign legal entity — which is **E3**, a decision with tax and liability attached. |
+| **PayPal** | **Unsuitable for the launch market** | Same reason, same blocking decisions. |
+| Any payment at all | **Needs legal and commercial decision** | **E1–E5**. And note what it would mean for this phase: a payment integration puts money in the product, and every safety argument in `PROMOTIONS-CAPABILITY-MATRIX.md` rests on there being none. A redemption records that a customer is *owed* something; a person hands it over. That stays true. |
+| Storing a card, a token or a customer's payment identifier | **Out of scope** | PCI scope is not something a loyalty product acquires by accident. |
+
+---
+
+## 6. Affiliate, CRM and point of sale
+
+| family | bucket | notes |
+|---|---|---|
+| **FirstPromoter** | **Needs account; and a policy decision first** | Affiliate tracking for the *agency* side, not the merchant's customers. It is also the wrong tool to reach for while **D15** — the referral reward policy — is unanswered: Phase 3A built referral *attribution* and deliberately nothing that credits anybody. Wiring an affiliate platform in would answer D15 by accident. |
+| **LeadConnector / GoHighLevel** | **Needs marketplace approval and an account** | OAuth install, contact sync, custom fields, SSO menu, workflow actions and triggers. A private app first; a public listing is **E7** and needs explicit owner approval. Contact sync means exporting customer records to a third party, which needs the same privacy, retention and authorization contract that **D7** (customer export) has been waiting on. |
+| **POS systems** (Toast, Square, Shopify, Lightspeed, GloriaFood, Altegio, WooCommerce) | **Needs account, approval, and a validated merchant** | Each is a separate marketplace, review process and data model. The reference product exposes accrue and reverse endpoints; ours would have to decide what a POS is allowed to do to an append-only ledger, which is a real design question and not a connector. **At most one validated connector, on demonstrated demand from a real merchant.** |
+| Zapier, Make, Pabbly, Integrately, Albato, KonnectzIT | **Deferred** | All of them are reachable through outbound webhooks. Building six adapters instead of one webhook is how an integrations page becomes a graveyard. |
+
+---
+
+## 7. Outbound webhooks and the public API
+
+| capability | bucket | notes |
+|---|---|---|
+| An internal record that an event happened | **Supported now** | This prompt. `IntegrationEvent`. |
+| An endpoint URL a merchant can register | **Out of scope for this prompt** | A merchant-supplied URL is a server-side request to an address the server was told to trust. SSRF, internal-network reachability, redirect handling and DNS rebinding are all real and none of them is a afternoon's work. |
+| Outbound HTTP of any kind | **Out of scope for this prompt** | There is no `fetch`, no HTTP client, no queue, no worker and no timer under `src/server/integrations/`, and a source scan asserts it. |
+| HMAC request signing | **Foundation later** | The reference product signs with `X-Signature`. That needs a per-subscription secret, which needs somewhere to put a secret (§8). |
+| A retry policy, a dead-letter record, a delivery log | **Foundation later** | The event row is the input to all three. None exists. |
+| A public API with `X-API-Key` | **Out of scope for this prompt** | Keys are secrets; see §8. Also a rate limiter per key, a response envelope, pagination, and versioning. |
+| Event types beyond the two built here | **Out of scope for this prompt** | The reference product has roughly forty. This prompt has **two**, both for a workflow that is already finished and already safe. Adding an event for a workflow is a decision about what that workflow is allowed to tell the outside world. |
+| **Backfilling historical events** | **Out of scope, deliberately** | No event is emitted for any redemption or void that happened before this migration. A backfilled event claims a delivery decision was made at a moment when it was not, and `occurredAt` is assigned by the database precisely so nobody can date one into the past. |
+
+---
+
+## 8. Where a secret would have to live — a decision, not a column
+
+This phase adds **no** secrets table, **no** generic JSON configuration column, **no** master
+encryption key, **no** environment variable and **no** deployment change. That is not an omission; it
+is the point.
+
+Every single family in §2–§6 needs at least one secret. Before any of them can be built, somebody has
+to decide:
+
+1. **Where the ciphertext lives** — a dedicated table with typed columns per provider, or one
+   encrypted blob. (A generic JSON blob is how a phone number ends up in a config column.)
+2. **Where the key lives** — an environment variable on the host, a KMS, or a file mounted by
+   Compose. Each is a deployment change and each has a different answer to "what happens when the
+   host is restored from a backup".
+3. **Who may read a credential back** — the honest answer is nobody, the same as a coupon code: an
+   owner who has lost their API key rotates it at the provider.
+4. **What happens on key rotation**, and whether an old ciphertext must remain decryptable.
+5. **Whether a credential is per business or per platform**, which decides whether a merchant brings
+   their own account or rides on ours — a commercial question, not a technical one.
+
+None of these is guessed here. **Recorded as decision D27.**
+
+---
+
+## 9. What the event row may never contain
+
+Enforced by the schema itself: the table has typed columns and **no free-form JSON**, so there is
+nowhere for any of this to go even by accident. A column-name check in the integrity suite fails if
+one is ever added.
+
+Never, in any event row:
+
+- a phone number, an email address, a customer name or any contact detail
+- a raw QR, share or coupon capability — **or its digest**
+- a wallet payload, pass, serial or device token
+- a coupon code, a promotion code or a normalised form of one
+- a secret, key, token or password of any kind
+- a payment identifier, amount, currency, tax figure or invoice reference
+- a referral reward, a balance, points or stamps — none of which exist to leak
+
+What it does contain: the business, the event type, the entity type and its internal id, the
+occurrence time the **database** assigned, and the envelope version. A consumer that wants detail
+asks for it through an authorized read, which is what keeps the authorization in one place.
+
+---
+
+## 10. Manual gate — before any production integration claim
+
+None of this can be checked by a test on this machine, and none of it is claimed:
+
+- [ ] no provider account has been opened, funded or verified
+- [ ] no credential has been obtained, stored or rotated
+- [ ] no outbound request has been made to any provider, from anywhere
+- [ ] no POS, wallet, payment or messaging system has been contacted
+- [ ] no external network path has been exercised
+- [ ] deliverability, message templates, sender reputation and per-country regulation are entirely
+      unverified
+
+Staging is Freebuff's after review. Nothing in this phase has been deployed.
+
+---
+
+## 11. Roadmap, in the order the gates open
+
+1. **Now** — the internal event record, append-only, tenant-isolated, read by an owner. This prompt.
+2. **Next, and cheapest** — a Telegram report bot to the *merchant*. One token, no review, no
+   per-message cost, and the recipient is the person who configured it. Blocked only on **D27**
+   (where a token lives).
+3. **Then** — outbound webhooks with HMAC signing, once D27 is answered and the SSRF question in §7
+   has a written design behind it.
+4. **Then** — email, once **D3** names a provider and somebody owns the domain and the DNS records.
+5. **Later** — SMS, once **D2** is answered by a provider that actually serves the market.
+6. **Later still** — WhatsApp, once Meta approval is a project somebody has started rather than a
+   line in a table.
+7. **On demonstrated demand only** — one POS connector, for one real merchant, after deciding what a
+   POS may do to an append-only ledger.
+8. **Blocked on commercial and legal decisions** — payments (**E1–E5**), agency listings (**E7**).
+
+Every step after the first needs something this project does not have yet. Saying so is the whole
+purpose of writing the matrix before the code.

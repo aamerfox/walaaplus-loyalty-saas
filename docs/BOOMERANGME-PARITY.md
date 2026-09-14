@@ -3,7 +3,7 @@
 `BOOMERANGME-REFERENCE.md` describes the reference product. This file answers the question a reader
 actually has: **which of those capabilities exist in this codebase today, and where is the rest?**
 
-Updated at Phase 3A Prompt 3. One row per capability, and the "Where" column points at the code so a
+Updated at Phase 3B Prompt 1. One row per capability, and the "Where" column points at the code so a
 claim can be checked rather than believed.
 
 ---
@@ -39,6 +39,7 @@ claim can be checked rather than believed.
 | Revocable share capability | **Built (Phase 3A)** — 256 bits per card, stored as a digest only, carried in a URL fragment so it reaches no server log, revocable and replaceable from the owner UI | `src/server/share/share-links.ts` |
 | Referral attribution | **Built (Phase 3A Prompt 2)** — a staff member at a counter records that a newly enrolled customer presented a valid invitation. Append-only, internal ids only, one per card ever, voidable by an owner or manager. No amount, points, eligibility or expiry: it records an arrival and grants nothing | `src/server/share/referrals.ts` |
 | Promotions and coupons | **Built (Phase 3A Prompt 3)** — an owner writes an offer and a code; a cashier types the code at the till against a card already in front of them and is told, unambiguously, that the offer was recorded for a person to hand over. Draft/active/paused/expired, a start and end time, a global and a per-customer limit. The code is stored as a salted digest and never in the clear. Nothing is calculated, discounted, charged or sent | `src/server/promotions/`, `/business/promotions`, `/api/scanner/coupon` |
+| Internal event record for integrations | **Foundation (Phase 3B Prompt 1)** — an append-only, tenant-isolated row per completed promotion redemption and per withdrawal, written in the same transaction as the action. A minimal versioned envelope: business, event type, entity type and internal id, and the moment the database assigned. **No provider, endpoint, credential, signature, queue or delivery of any kind**, and an owner-only screen that says so | `src/server/integrations/events.ts`, `/business/integrations` |
 | PWA customer card | **Built** — per-card manifest and scope, service worker that caches nothing | `src/app/[locale]/card/` |
 | Arabic-first bilingual UI | **Built** — every string in both locales, RTL structure, an Arabic-capable font stack | `messages/`, `docs/BRAND.md` §3 |
 
@@ -72,6 +73,7 @@ lying to the person reading it.
 | Sharing and attribution | An invitation page, a QR, native share, copy, eight platform links, and a counter action recording that a customer arrived with an invitation | **The reward half.** Nothing is credited, calculated, awarded or paid, and no screen may imply one (D15). Nothing records who *opened* a link either — only that one was presented to a member of staff. No retrospective attribution (D21), no retention rule (D20). Messenger is absent: its web dialog needs a registered Facebook app id |
 | Marketing preference | Append-only history, capture context, actor, reason, the enrolment answer as the first entry, and a strict reading of what counts as permission | No customer-facing preference page and no unsubscribe route — both need a way to prove who is asking, which is the same unsolved problem as B7. No retention or erasure policy is implemented. No per-channel preference: the record says "marketing", not "SMS but not email" |
 | Promotions | A definition, a lifecycle, two limits, a window, a salted code, an atomic till redemption, an append-only void, and database rules that refuse a wrong row without a service in the way | **Distribution and fulfilment.** Nothing gives the customer the code (D22) and nothing confirms the item was actually handed over — the record says a person was owed it. No discount, cash value, tax or invoice, ever. No per-branch or per-day limit (D26), no per-customer codes (D24), no retention rule (D23). A void frees the slot, which is the right default and not always the right answer (D25) |
+| Integrations | An append-only internal event record for two finished workflows, a versioned envelope, database-enforced tenant and semantic integrity, and an owner/manager read view | **Everything that delivers, and everything that connects.** No outbound HTTP, endpoint, subscription, signature, retry, delivery log or public API. No provider account, credential, OAuth or SMTP setting — and no place to put one, which is **D27**. Two event types out of the reference product's ~40, and each addition is **D28**. No backfill: workflows completed before the migration have no event, deliberately |
 | Analytics | Ledger-derived counts, breakdowns, date ranges, a per-branch filter | No cohort or retention view, no rollup table (recomputed per load, bounded — see `docs/evidence/phase-2-prompt-1.md` §5), no revenue or lifetime-value figures because the data to compute them honestly does not exist |
 | Customer record | Identity, every card, balances, pinned versions, branch context, source name, ledger activity | No notes, no tags, no manual adjustment, and no export — export needs its own privacy, retention, authorization and audit contract |
 
@@ -95,7 +97,7 @@ lying to the person reading it.
 | **Wallet pass signing and delivery** — Apple certificate, Google issuer, "Add to Wallet" | 3a / 1.5. See `docs/WALLET-CAPABILITY-MATRIX.md` §5 |
 | **Wallet pass updates** — Apple `webServiceURL` + APNs, Google object PATCH | 3a+, and D16 (device-token retention) |
 | **Wallet notifications, location relevance, Smart Tap / Apple VAS** | D17, D18, and platform approval. No date |
-| **POS, public API, webhooks and integrations** | 3b |
+| **POS, public API, webhooks and integrations** | 3b. *Prompt 1 built the internal event record a webhook would read — and no webhook, no endpoint, no key and no provider. Delivery is blocked on D27 (where a signing secret lives) and on a written answer to the SSRF question a merchant-supplied URL raises; every family is classified in* `docs/INTEGRATIONS-CAPABILITY-MATRIX.md` |
 | **Advanced loyalty card mechanics** — cashback, discount, gift, membership, multipass | 2+. *Coupon is no longer on this line: Phase 3A Prompt 3 shipped it as a counter-recorded entitlement rather than as a card type that computes a discount* |
 | **Agency, white-label, custom domain, billing, affiliate and franchise** | 4 / 5 |
 | **Workflow automation, AI assistance and prospecting** | 4+ |
