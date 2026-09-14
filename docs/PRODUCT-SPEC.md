@@ -866,12 +866,66 @@ exist (§D15).
 
 **Nothing is awarded.** No balance, ledger row, campaign or money changes, and both screens say so.
 
+### 8A.12 Promotions and coupon redemption (Phase 3A Prompt 3)
+
+An owner or manager writes an **offer** — a name only they see, a sentence describing what the
+customer gets, and a **code**. A customer says the code at the counter. A cashier, with that
+customer's card already on screen, types it in and is told the offer was **recorded for manual
+fulfilment**. Then a person hands the thing over.
+
+**Nothing is calculated.** There is no amount, percentage, currency, tax, invoice or total anywhere
+in this feature, and there is no verb that changes money, points, stamps, balances, referral records,
+campaigns or wallet passes, and nothing is sent. A redemption row says a named customer was owed a
+described thing at a recorded moment. Both screens say so in both languages, and the browser suite
+asserts they keep saying so.
+
+**The code is never stored in the clear.** What is kept is
+`sha256(per-promotion salt ‖ businessId ‖ normalised code)`. A coupon code is short and
+human-typed — people say it out loud — so it is low-entropy in a way a 256-bit share capability is
+not, and an unsalted digest column of short codes is a rainbow table away from being plaintext. The
+salt costs something real and it is paid deliberately: the unique index can no longer see that two
+promotions share a code, so creating one compares the candidate against every existing salt instead.
+The raw code is not logged, audited, returned, rendered or stored after the request that carried it.
+
+**Lifecycle.** `DRAFT → ACTIVE ↔ PAUSED`, and any of the three → `EXPIRED`, which is terminal. A
+promotion is always created as a draft, whatever the caller asks for. Its identity and its code are
+frozen from the first insert.
+
+**Limits.** A global total and a per-customer total, each optional and each positive. Both are
+enforced inside the redemption transaction under a row lock on the promotion, and again by a trigger
+that recounts from the table — so a service that one day forgets the lock still cannot exceed them.
+Limits are global and per customer only: there is no per-branch and no per-day cap (§D26).
+
+**One generic refusal.** Unknown, malformed, expired, not yet started, paused, still a draft,
+exhausted globally, exhausted for this customer, already used, or another tenant's — every one of
+them answers identically. A cashier learns nothing from a refusal, which is the point when the secret
+is four characters long. **An unusable coupon never fails the staff workflow it was typed into.**
+
+**Voiding** is owner or manager only and additive: the `REDEEMED` row stays and a `VOIDED` row is
+written beside it, carrying an optional reason. A void here **returns** the customer's entitlement —
+voided rows count toward no limit — which is the opposite of a referral void, and deliberately so:
+a mistyped coupon should be usable again, whereas re-attributing a referral later would be
+retrospective attribution. What a void should mean when the item was already handed over is §D25.
+
+**Who may do what.** Cashiers redeem. They may not create, edit, pause, activate, expire or void, and
+the promotions screen returns 404 for them rather than an empty page. Owners and managers do
+everything else. No one may read a code back.
+
+**Nothing public was added.** No coupon lookup, no redemption page, no QR claim flow, no phone
+lookup, and B7 is byte-identical. How a customer comes to know the code is the merchant's own
+business today (§D22).
+
+**The database refuses a wrong row without a service in the way.** Two triggers and a set of
+constraints check tenant agreement across business, promotion, card and profile; the active state and
+the window; both limits; one-time semantics; and that a void is a faithful copy of the row it
+withdraws. `PromotionRedemption` is append-only at the grant level and `Promotion` cannot be deleted.
+
 ---
 
 ## 9. Deferred by design
 
 Not in the MVP, sequenced in [PHASE-PLAN.md](PHASE-PLAN.md):
 
-Cashback · discount · multipass · coupon · gift · membership · paid subscriptions · Apple and Google Wallet passes · geo-push · referrals · promotions · mini-games · RFM · advanced segments · workflow builder · email, SMS and WhatsApp campaigns · two-way inbox · POS integrations · public API · API keys · outbound webhooks · MCP server · GoHighLevel · agency white-label · franchise · billing · Employee Sales · AI onboarding · partner directory · managed service.
+Cashback · discount · multipass · gift · membership · paid subscriptions · Apple and Google Wallet passes · geo-push · referral REWARDS · mini-games · RFM · advanced segments · workflow builder · email, SMS and WhatsApp campaigns · two-way inbox · POS integrations · public API · API keys · outbound webhooks · MCP server · GoHighLevel · agency white-label · franchise · billing · Employee Sales · AI onboarding · partner directory · managed service.
 
 The ledger, identity, authorization and template models are designed so that none of these requires replacing the core.

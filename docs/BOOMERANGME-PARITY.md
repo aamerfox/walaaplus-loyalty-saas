@@ -3,7 +3,7 @@
 `BOOMERANGME-REFERENCE.md` describes the reference product. This file answers the question a reader
 actually has: **which of those capabilities exist in this codebase today, and where is the rest?**
 
-Updated at Phase 3A Prompt 2. One row per capability, and the "Where" column points at the code so a
+Updated at Phase 3A Prompt 3. One row per capability, and the "Where" column points at the code so a
 claim can be checked rather than believed.
 
 ---
@@ -38,6 +38,7 @@ claim can be checked rather than believed.
 | Customer-facing sharing | **Built (Phase 3A)** — a public invitation page with a QR of its own link, native share, copy, and eight platform links that need no SDK and no account. Arabic and English | `/share`, `src/app/[locale]/share/` |
 | Revocable share capability | **Built (Phase 3A)** — 256 bits per card, stored as a digest only, carried in a URL fragment so it reaches no server log, revocable and replaceable from the owner UI | `src/server/share/share-links.ts` |
 | Referral attribution | **Built (Phase 3A Prompt 2)** — a staff member at a counter records that a newly enrolled customer presented a valid invitation. Append-only, internal ids only, one per card ever, voidable by an owner or manager. No amount, points, eligibility or expiry: it records an arrival and grants nothing | `src/server/share/referrals.ts` |
+| Promotions and coupons | **Built (Phase 3A Prompt 3)** — an owner writes an offer and a code; a cashier types the code at the till against a card already in front of them and is told, unambiguously, that the offer was recorded for a person to hand over. Draft/active/paused/expired, a start and end time, a global and a per-customer limit. The code is stored as a salted digest and never in the clear. Nothing is calculated, discounted, charged or sent | `src/server/promotions/`, `/business/promotions`, `/api/scanner/coupon` |
 | PWA customer card | **Built** — per-card manifest and scope, service worker that caches nothing | `src/app/[locale]/card/` |
 | Arabic-first bilingual UI | **Built** — every string in both locales, RTL structure, an Arabic-capable font stack | `messages/`, `docs/BRAND.md` §3 |
 
@@ -53,6 +54,8 @@ claim can be checked rather than believed.
 | A referral record that names the referrer to staff | **Staff see that a customer arrived with an invitation, never whose** | The referring customer is somebody else's record. A counter screen that named them would turn every enrolment into a disclosure about a third party who is not in the room |
 | A share link that identifies the sharer | **The invitation page shows a business name and nothing else** | It is opened by whoever a link was forwarded to. It names no customer, no card, no balance, no programme and no serial, and it looks identical whether the link is revoked, unknown or malformed |
 | Counting who opened a share link | **Nothing is recorded, at all** | No audit row, no visit counter, no IP, no device. A capability that leaves a trail each time it is opened reports who has been looking at it, and an invitation page has no business knowing that |
+| A coupon that applies a discount at the till | **A coupon records an entitlement; a person hands it over** | This product has no amount, percentage, currency, tax, invoice or total, and inventing one would make a loyalty tool into half a point-of-sale system that nobody audited. The cashier reads what the offer says and gives it. The record says a customer was owed something, and when |
+| A public coupon page a customer claims from | **No public route was added** | The same decision as B7. A page that answers “is this code real?” to anybody who asks is a code oracle, and one that answers “is this card real?” reports whether a number is already a customer |
 | Deleting a location, a program, a version or a card | **No destructive verb exists** | Every one of them is referenced by ledger rows that are append-only by trigger. Locations close, programs pause, versions retire, and nothing is ever removed |
 
 ## Foundation only — built, and deliberately not finished
@@ -68,6 +71,7 @@ lying to the person reading it.
 | Wallet passes | Apple `pass.json` and Google `loyaltyObject` builders, fixture-tested, carrying the invitation link in the correct field on each platform | **Signing and delivery.** No Apple Pass Type certificate, no Google service account, no issuer id, no class, no "Add to Wallet" action, no bundle images, no localised bundle, no update channel — so a pass already saved never gains the link on its own. Real-device verification is a manual gate (`docs/WALLET-CAPABILITY-MATRIX.md` §6) |
 | Sharing and attribution | An invitation page, a QR, native share, copy, eight platform links, and a counter action recording that a customer arrived with an invitation | **The reward half.** Nothing is credited, calculated, awarded or paid, and no screen may imply one (D15). Nothing records who *opened* a link either — only that one was presented to a member of staff. No retrospective attribution (D21), no retention rule (D20). Messenger is absent: its web dialog needs a registered Facebook app id |
 | Marketing preference | Append-only history, capture context, actor, reason, the enrolment answer as the first entry, and a strict reading of what counts as permission | No customer-facing preference page and no unsubscribe route — both need a way to prove who is asking, which is the same unsolved problem as B7. No retention or erasure policy is implemented. No per-channel preference: the record says "marketing", not "SMS but not email" |
+| Promotions | A definition, a lifecycle, two limits, a window, a salted code, an atomic till redemption, an append-only void, and database rules that refuse a wrong row without a service in the way | **Distribution and fulfilment.** Nothing gives the customer the code (D22) and nothing confirms the item was actually handed over — the record says a person was owed it. No discount, cash value, tax or invoice, ever. No per-branch or per-day limit (D26), no per-customer codes (D24), no retention rule (D23). A void frees the slot, which is the right default and not always the right answer (D25) |
 | Analytics | Ledger-derived counts, breakdowns, date ranges, a per-branch filter | No cohort or retention view, no rollup table (recomputed per load, bounded — see `docs/evidence/phase-2-prompt-1.md` §5), no revenue or lifetime-value figures because the data to compute them honestly does not exist |
 | Customer record | Identity, every card, balances, pinned versions, branch context, source name, ledger activity | No notes, no tags, no manual adjustment, and no export — export needs its own privacy, retention, authorization and audit contract |
 
@@ -87,12 +91,12 @@ lying to the person reading it.
 | **Per-channel consent** — agreeing to SMS but not email | 2+, once a channel exists to consent to |
 | **Referral rewards** — crediting anybody for an invitation: what they get, when, within what limits, and what happens when an attribution is voided afterwards. Prompt 2 built the attribution and deliberately none of this | 3a+. Blocked on D15 |
 | **Referrer-facing anything** — a customer seeing how many people they invited, a leaderboard, a "top referrers" report | not scheduled. Each is a list of customers ordered by how many friends they brought, which is a reward programme's report |
-| **Promotions and games** | 3a |
+| **Games** — spin-the-wheel, scratch cards, and any other chance mechanic | not scheduled. Promotions shipped in Phase 3A Prompt 3; a game is a separate thing with its own fairness and regulatory questions |
 | **Wallet pass signing and delivery** — Apple certificate, Google issuer, "Add to Wallet" | 3a / 1.5. See `docs/WALLET-CAPABILITY-MATRIX.md` §5 |
 | **Wallet pass updates** — Apple `webServiceURL` + APNs, Google object PATCH | 3a+, and D16 (device-token retention) |
 | **Wallet notifications, location relevance, Smart Tap / Apple VAS** | D17, D18, and platform approval. No date |
 | **POS, public API, webhooks and integrations** | 3b |
-| **Advanced loyalty card mechanics** — cashback, discount, gift, membership, coupon, multipass | 2+ |
+| **Advanced loyalty card mechanics** — cashback, discount, gift, membership, multipass | 2+. *Coupon is no longer on this line: Phase 3A Prompt 3 shipped it as a counter-recorded entitlement rather than as a card type that computes a discount* |
 | **Agency, white-label, custom domain, billing, affiliate and franchise** | 4 / 5 |
 | **Workflow automation, AI assistance and prospecting** | 4+ |
 | Per-period reward limits, and showing a customer what they have already used | 2 |

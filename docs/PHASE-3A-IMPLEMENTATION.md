@@ -446,3 +446,263 @@ changed, and the runtime role still holds `SELECT` and `INSERT` and nothing else
 The aggregate notice rendered its heading and its sentence as one run-on line — *"Referral records 1
 customer has been recorded as arriving with an invitation."* The heading is now its own block. Small,
 and the kind of thing only reading the rendered page catches.
+
+---
+
+# Prompt 3 — an offer a cashier records, and a person hands over
+
+Prompts 1 and 2 built a link and the record that somebody arrived with one. Prompt 3 builds the
+other counter action a merchant actually asks for: **a coupon**.
+
+A merchant writes an offer and a code. A customer says the code. A cashier types it in. The screen
+says the offer was recorded for manual fulfilment, and a person hands it over.
+
+The capability audit that gates it is `docs/PROMOTIONS-CAPABILITY-MATRIX.md`. It was written before
+any of this existed and then used to constrain it: §3 is the reason no discount is calculated, §5 is
+the reason a cashier cannot create a promotion, and §7 is the list of things nobody has to ask about.
+
+---
+
+## 12. The defining exclusion: a redemption is a record, not an effect
+
+A `PromotionRedemption` row carries a business, a promotion, a card, a profile, an actor, a moment
+and an entry kind. It carries **no amount, percentage, currency, tax, invoice, total, points, stamps
+or balance**, and the column-name check in `tests/integration/promotion-integrity.test.ts` fails if
+one ever appears.
+
+`src/server/promotions/redemption.ts` imports the tenant context, the digest helpers, the audit
+writer and Prisma. It imports no ledger verb, no points engine, no stamp engine, no campaign module,
+no consent module, no wallet module and no referral module, and it cannot reach any of them. That is
+not a convention; it is the whole safety argument, and it is checked by reading the imports.
+
+The reason to be this strict is that a discount is where a loyalty tool quietly becomes half a
+point-of-sale system. Percentages, rounding, tax, currency, refunds, partial redemptions and the
+merchant's actual till are all one "just apply 10%" away, and none of them would have been reviewed.
+So the product stops at the honest sentence: **this customer is owed the thing the offer describes**.
+
+The cashier's success message is deliberately unambiguous about that:
+
+> Recorded for manual fulfilment: A free espresso. Hand it over now. Nothing was discounted or
+> charged. Give the customer what the offer says.
+
+---
+
+## 13. A code is a secret with almost no entropy, and the storage reflects it
+
+`CardShareLink` stores a plain SHA-256 of 32 random bytes, and that is correct there: a 256-bit
+random value has no dictionary to be found in.
+
+A coupon code is the opposite. It is four to sixty-four characters, chosen by a human, meant to be
+printed on a poster and spoken across a counter. `AUTUMN`, `FREE10`, `EID2026`. An unsalted digest
+column of values like those is a rainbow table away from being a plaintext column.
+
+So a promotion carries its own 32-byte salt, and stores
+
+```
+sha256(codeSalt ‖ businessId ‖ normalizeCode(code))
+```
+
+with NUL separators so ("AB", "C") and ("A", "BC") cannot collide, and `businessId` bound in so the
+same code in two tenants is two different digests.
+
+**The salt costs something, and the cost is paid rather than hidden.** With a per-promotion salt the
+`@@unique([businessId, codeDigest])` index can no longer see that two promotions share a code — two
+salts, two digests. So `createPromotion` compares the candidate against every existing promotion's
+salt, including expired ones, before inserting. That is a loop bounded by
+`MAX_PROMOTIONS_PER_BUSINESS = 200`, and the bound exists for this reason as much as any other.
+
+Redemption pays the same cost in the same way: it walks the business's ACTIVE promotions, computing
+one digest per salt, and compares with `timingSafeEqual`. Two hundred SHA-256 operations is nothing;
+a keyed HMAC with a single application secret would avoid the loop entirely, and is the right answer
+the day this product has a secret to key it with. `docs/PROMOTIONS-CAPABILITY-MATRIX.md` §2 says so
+plainly rather than presenting the salt as the finished design.
+
+The raw code exists in the body of one authenticated request and nowhere else. Not in a column, not
+in a URL, path or query string, not in a log, not in an audit row, not in a response, not in a
+rendered page. The audit rows carry two row ids and nothing more.
+
+### Normalisation, and why it is not politeness
+
+`normalizeCode` strips everything that is not a letter or a digit and upper-cases the rest. A
+customer reading a code aloud and a cashier typing it will not agree about spaces, hyphens or case,
+and a coupon that fails because somebody typed `free-10` instead of `FREE10` is a coupon that
+generates a complaint rather than a sale. The same function runs at create time and at redeem time,
+so the two can never disagree.
+
+---
+
+## 14. One refusal, for everything
+
+`redeemCoupon` returns exactly two shapes:
+
+```ts
+| { outcome: "RECORDED"; redemptionId; promotionName; benefitDescription }
+| { outcome: "NOT_ACCEPTED" }
+```
+
+`NOT_ACCEPTED` is returned for: a malformed code, a code no promotion has, a draft, a paused
+promotion, an expired one, one that has not started, one past its end, one whose global limit is
+used up, one this customer has already used to their limit, another tenant's promotion, a card that
+is not this business's — and from a catch-all, for anything not foreseen.
+
+The reason is the entropy again. A refusal that distinguished "no such code" from "that code is
+exhausted" is an oracle, and against a six-character code an oracle is most of the attack. Since the
+route is authenticated and rate-limited, the practical threat is a till left running a script rather
+than the open internet — which is exactly why `enforceStaffLimit(ctx, "write")` is applied here and
+noted in the code as mattering more here than elsewhere.
+
+**A bad coupon never fails the workflow it was typed into.** The coupon field on the scanner is its
+own action against a card that has already been found. Typing nonsense into it produces a refusal
+message and leaves the card, the stamp buttons and the reward button exactly where they were.
+
+---
+
+## 15. The lifecycle, and the two places it is enforced
+
+```
+DRAFT ──▶ ACTIVE ◀──▶ PAUSED
+  │         │            │
+  └─────────┴────────────┴──▶ EXPIRED   (terminal)
+```
+
+`TRANSITIONS` in `src/server/promotions/promotions.ts` and the `CASE` in `promotion_guard` are the
+same table written twice, on purpose: the service gives a merchant a useful message, and the trigger
+means a second service written later cannot skip it.
+
+The trigger also forces `DRAFT` on every insert regardless of what the caller supplied. A promotion
+that could be created already active is a promotion that can be created and used before anybody has
+read it back.
+
+`EXPIRED` is terminal and an expired promotion cannot be edited at all — not its name, not its
+window, not its limits. Editing the terms of an offer that customers have already redeemed against
+would rewrite what those redemptions meant.
+
+The `Expire` button asks twice for this reason. It is the one lifecycle action with no way back.
+
+---
+
+## 16. Limits, concurrency, and the backstop
+
+Two limits, both optional, both greater than zero by CHECK constraint: a global total and a
+per-customer total.
+
+The redemption transaction:
+
+1. `SELECT id FROM "Promotion" WHERE id = $1 FOR UPDATE` — a lock on the one row every concurrent
+   redemption of this promotion must pass through.
+2. Re-read the promotion **inside** the lock. The state or the window may have changed between the
+   candidate search and here.
+3. Count standing redemptions — `entry: REDEEMED` with `voidedBy: { none: {} }` — globally and for
+   this profile.
+4. Insert.
+
+Step 3 counts *standing* rows because a void here means "that did not happen", so a voided
+redemption frees the slot. That is the deliberate opposite of `ReferralAttribution`, where voiding
+does not free the card to be attributed again. Two tables, two meanings, and the reason is written in
+both migrations rather than left for a reader to infer.
+
+Then `promotion_redemption_validate` recounts the same thing from the table on `BEFORE INSERT`. That
+is not belt-and-braces for its own sake: the lock lives in one function, and the guarantee should not
+depend on every future caller remembering to take it.
+
+---
+
+## 17. What the database refuses, with no service in the way
+
+`promotion_guard` (BEFORE INSERT OR UPDATE on `Promotion`)
+
+- forces `DRAFT` on insert
+- freezes `id`, `businessId`, `codeDigest`, `codeSalt`, `createdByUserId`, `createdAt`
+- allows only the transitions above
+- refuses any change at all to an `EXPIRED` promotion
+
+`promotion_redemption_validate` (BEFORE INSERT on `PromotionRedemption`)
+
+- the business, the promotion, the card and the profile must all be the same tenant's, and the card
+  must be the profile's
+- the promotion must be `ACTIVE`
+- `now()` must be inside the window
+- the global and per-customer limits must still hold, counted from the table
+- a `REDEEMED` row may not name a row it voids
+- a `VOIDED` row must name a `REDEEMED` row, and must be a faithful copy of it — same business,
+  promotion, card and profile — so a void cannot quietly reassign what it withdraws
+
+Constraints and indexes carry the rest: positive limits, `startsAt < endsAt`, one name per business,
+one digest per business, and a partial unique index giving each redemption at most one void.
+
+Every failure raises `check_violation` with a message naming the rule, because "new row violates
+constraint" tells whoever hits it nothing.
+
+### Proven against the database, not the service
+
+`tests/integration/promotion-integrity.test.ts` inserts every invalid shape through `prisma` — the
+**restricted runtime client**, with no service in the way — exactly as a second service would, and
+inserts the valid shapes too, so the rules are known to refuse the wrong rows without refusing the
+right ones.
+
+The suite was confirmed to depend on what it claims. Dropping both
+`promotion_redemption_validate` and `promotion_guard` and re-running turns **20 of its 27 tests
+red**; the seven that stay green are the positive controls, the cases a foreign key or a unique index
+already covered, and the privilege-level append-only checks — none of which a trigger is responsible
+for. Both were then restored by rolling the migration back locally and reapplying it, and
+`db-roles.mjs` was re-run. A test that has never been red is a test nobody has checked.
+
+---
+
+## 18. Who may do what
+
+| | Cashier | Manager | Owner |
+|---|---|---|---|
+| Redeem a coupon at the till | ✅ `MAKE_REDEMPTIONS` | ✅ | ✅ |
+| See a card's recorded offers | ❌ | ✅ `VIEW_CUSTOMERS` | ✅ |
+| Create, edit, activate, pause, expire | ❌ | ✅ `EDIT_TEMPLATES` | ✅ |
+| Void a redemption | ❌ | ✅ | ✅ |
+| Read a code back | ❌ | ❌ | ❌ |
+
+A cashier holds `EDIT_CUSTOMERS` — enrolling people is their job — so permission alone is not the
+bar for managing promotions. `requirePromotionManager` requires `EDIT_TEMPLATES` **and** a role of
+`OWNER` or `MANAGER`, and the reasoning is in the code beside it.
+
+`/business/promotions` returns **404** for a cashier rather than an empty screen, and the sidebar
+does not offer it. Being told there is a page you may not see is itself information.
+
+The last row is the one worth stating: nobody reads a code back, including the owner who wrote it.
+There is no reveal route and no selection that reads `codeDigest` or `codeSalt` out to a caller. An
+owner who has forgotten their own code edits the promotion to set a new one.
+
+---
+
+## 19. What a void is
+
+Owner or manager only. The `REDEEMED` row stays exactly as it was; a `VOIDED` row is written beside
+it naming it, with an optional reason. The panel shows both, and the customer's entitlement comes
+back.
+
+That last part is a product decision with a sharp edge, recorded as **D25**: voiding is right when a
+cashier mistyped, and wrong when a cashier voids after handing over a free coffee. The product cannot
+tell those apart and does not guess.
+
+---
+
+## 20. What the screenshots found
+
+Five were taken and read.
+
+`desktop-en-promotions.png` came back showing the middle of the create form and nothing else — the
+promotion that had just been created, its state badge and the "nothing is calculated" notice were all
+above the top of the image. The dashboard shell scrolls `main`, not the document, so `fullPage` on a
+shell like this captures the document's idea of the page, which is a viewport that never moved. A
+`shot()` helper now rewinds `main` to the top before every capture. The screenshot is the only reason
+this was noticed, which is the argument for reading them.
+
+`phone-ar-promotions.png` and `phone-ar-coupon-till.png` confirm Arabic is usable at phone width:
+headings, the disclaimer, the empty state, the field labels and the till's coupon box all read right
+to left, with the hamburger and the locale switch on the left where they belong. The Latin phone
+number and the ISO dates stay left-to-right inside the Arabic run via `<bdi>`.
+
+`phone-en-coupon-till.png` shows the sentence a cashier actually has to act on, above the fold and in
+the same green as every other success on that screen.
+
+`desktop-en-customer-redemptions.png` shows the offers panel on the customer record with its own
+"nothing here was discounted, charged or paid" line — a second place the claim is denied, because the
+customer record is where somebody would go looking for a balance.
