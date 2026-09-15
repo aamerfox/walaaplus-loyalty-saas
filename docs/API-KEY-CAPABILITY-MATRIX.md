@@ -230,3 +230,271 @@ Write endpoints of any kind. Idempotency-key handling — there is nothing to ma
 the API is read-only. CORS and browser calling — a key in a browser is a key published. OAuth. GHL.
 POS. Any provider, credential or outbound call. New event types (**D28**). Any endpoint that takes a
 phone number, a name, a code, a card token or a share capability.
+
+---
+---
+
+# Part II — Prompt 2: the surface
+
+**Written before Prompt 2's implementation and used to constrain it.** Everything above describes
+the key. Everything below describes what the key now opens, and is the part §0 said would be the
+easy thing to get wrong.
+
+---
+
+## 9. What Prompt 2 builds, and what it still refuses
+
+| Capability | Prompt 1 | **Prompt 2** |
+|---|---|---|
+| Key lifecycle services | built | unchanged |
+| Owner **screen** for keys | — | **built** — list, create, rotate, revoke, in English and Arabic |
+| Show-once reveal with a copy affordance | — | **built** |
+| `X-API-Key` authentication | built, unmounted | **mounted on a real route** |
+| Per-key rate limiting | built, uncalled | **enforced on every `/api/v1` read** |
+| Envelope, error shape, cursor | defined, unserved | **served** |
+| `GET /api/v1/events` | — | **built** |
+| `GET /api/v1/events/{eventId}` | — | **built** |
+| Published consumer documentation | — | **built** — `docs/PUBLIC-API-V1.md` |
+| Any write through `/api/v1` | refused | **still refused** |
+| A second scope | refused | **still refused** — `events:read` is the only one |
+| CORS, cookies, browser calling | refused | **still refused** |
+| Key deletion | refused | **still refused** — D31 |
+
+---
+
+## 10. The route surface, exactly
+
+| Method and path | Authenticated by | Authorised by | Answers |
+|---|---|---|---|
+| `GET /api/v1/events` | `X-API-Key` header **only** | scope `EVENTS_READ` | a bounded page of this key's business's events |
+| `GET /api/v1/events/{eventId}` | `X-API-Key` header **only** | scope `EVENTS_READ` | one event, or `404` |
+| `POST /api/staff/api-keys` | the session cookie | `OWNER` of the business | create / rotate / revoke |
+
+Three routes, and the third is not public. There is no `OPTIONS` handler, no write verb, no
+discovery index, no OpenAPI endpoint and no `/api/v1/keys` — **a key cannot read, create or revoke a
+key**, which is what keeps a leaked key from extending its own life.
+
+### 10.1 Where the tenant comes from
+
+`ApiContext.businessId` is read from the key row and from nowhere else. There is no path parameter,
+query parameter, header or body field in `/api/v1` through which a business can be named — the
+routes take exactly two query parameters, `limit` and `cursor`, and a single path parameter that is
+an event id filtered *by* the tenant rather than selecting it.
+
+### 10.2 Key material may arrive in exactly one place
+
+The header. Not a query string, not a cookie, not a body — `GET` has no body and neither handler
+reads one.
+
+Stronger than "we do not read it": a request carrying a **credential-shaped query parameter**
+(`key`, `api_key`, `apikey`, `token`, `secret`, `access_token`, `password`, in any case) is refused
+`400` **before authentication runs**, so the value is never hashed, never looked up and never
+reaches a log line that records the path. v1 has no legitimate parameter by those names, so nothing
+correct is refused — and a merchant who tries the URL form is told immediately rather than retrying
+it, each retry writing their key into somebody's access log.
+
+The refusal names the parameter's **name** and never its value.
+
+### 10.3 No CORS, on purpose
+
+No `Access-Control-Allow-Origin` is ever sent, by any `/api/v1` response, success or failure. This
+is server-to-server: a key in a browser is a key published.
+
+The shape of the API enforces that on its own even before the missing header does. `X-API-Key` is
+not a CORS-safelisted request header, so any cross-origin browser call must preflight; the preflight
+is an `OPTIONS` request; there is no `OPTIONS` handler and no allow-origin header, so the browser
+refuses before the real request is sent.
+
+### 10.4 Caching
+
+Every `/api/v1` response carries `Cache-Control: no-store` and `Vary: X-API-Key`. A response
+selected by a secret header must never be stored by an intermediary, and `no-store` says so;
+`Vary` is belt-and-braces for an intermediary that ignores it.
+
+---
+
+## 11. Data exposure — decided column by column
+
+The public event shape was chosen by reading `IntegrationEvent` and everything reachable from it,
+not by picking fields that seemed useful.
+
+### 11.1 Every column of `IntegrationEvent`
+
+| Column | In `/api/v1`? | Why |
+|---|---|---|
+| `id` | **yes**, as `id` | the event's own identity, the cursor's tie-break, and the path parameter of the single read |
+| `eventType` | **yes**, as `type` | the vocabulary a consumer switches on |
+| `entityType` | **yes** | says what kind of thing `entityId` names |
+| `entityId` | **yes** | the correlation key — `RECORDED` and `VOIDED` for one redemption share it. An internal uuid belonging to this business, holding no customer data |
+| `occurredAt` | **yes**, ISO-8601 | database-assigned, and the ordering authority |
+| `envelopeVersion` | **yes** | a consumer meeting an unknown version should stop rather than guess |
+| `businessId` | **no** | the key already determines it, so a per-row copy is redundant — and a field that looks like a tenant selector is one a client eventually tries to set |
+| `createdAt` | **no** | a duplicate of `occurredAt` with no distinct meaning to a consumer; publishing two near-identical times invites ordering by the wrong one |
+| `deliveries` (relation) | **no** | our delivery attempts to the merchant's webhooks are operational detail about us, not about the event |
+| `business` (relation) | **no** | name, plan and contact details; none of it is event data |
+
+The `select` in the service lists the six exposed columns literally. Nothing is spread, and no
+relation is traversed.
+
+### 11.2 The categories that must never appear, and why they cannot
+
+| Must never appear | Where it actually lives | What keeps it out |
+|---|---|---|
+| Customer PII, phone, email, name | `CustomerBusinessProfile`, `Customer` | `IntegrationEvent` has **no relation** to either. There is no query path from a key to a person |
+| Raw event payload | nowhere — **the column does not exist** | The table was built with typed columns and no JSON bag, precisely so there is nowhere for one to go |
+| Webhook ciphertext, signing secret | `WebhookDestination` | Not selected, not joined, and no `/api/v1` route mentions the model |
+| API-key digest or raw value | `ApiKey.keyDigest` | `KEY_SELECT` omits it; the only read of `ApiKey` on the public path is authentication, which selects five columns and returns three |
+| Key prefix | `ApiKey.keyPrefix` | Owner UI only — it is how an owner recognises a row in their own list. Never in `/api/v1` |
+| Internal or provider errors | thrown values, `WebhookDeliveryAttempt.errorClass` | `/api/v1` has its own error mapper; an unrecognised throw becomes a fixed `INTERNAL` sentence |
+| Audit metadata | `AuditLog` | Never read by `/api/v1` |
+| Cross-tenant identifiers | other businesses' rows | `businessId` from the key is in the `WHERE` of every query, including the single-event read |
+
+### 11.3 What an event does **not** tell a consumer
+
+Worth stating so nobody is surprised: an event says *a promotion redemption was recorded (or
+voided) at this moment, and here is its internal id*. It does **not** carry the customer, the card,
+the promotion, the coupon code, the benefit or any amount. A consumer needing those asks the
+merchant through an authorised read that does not exist yet — which keeps the authorisation
+decision in one place instead of copying a customer's data into a feed nobody re-checks.
+
+---
+
+## 12. Ordering, pagination and what tampering with a cursor buys
+
+### 12.1 The order is total
+
+`ORDER BY "occurredAt" DESC, "id" DESC`.
+
+`occurredAt` alone is **not** a total order: it is `TIMESTAMP(3)`, and two transactions beginning in
+the same millisecond produce two events that compare equal. A sort with ties is a sort the database
+may return in a different order each time, which is how a paginating client sees one row twice and
+another never. `id` breaks every tie.
+
+### 12.2 The cursor is keyset, not offset
+
+`OFFSET 10000` makes PostgreSQL walk ten thousand rows in order to throw them away, so a small
+request buys arbitrary server work. It is also wrong under insertion: a row arriving ahead of the
+window shifts every later page.
+
+The cursor carries the last row's `(occurredAt, id)` and the next page asks for strictly-earlier
+rows under the same two-column order. That is an indexed seek at any depth, and it neither repeats
+nor skips when rows are inserted ahead of the window.
+
+### 12.3 It is opaque, and deliberately **not** signed
+
+The cursor is base64url and clients are told not to construct one. It is not signed or encrypted,
+and that is a decision rather than an omission:
+
+- signing needs a secret, and this prompt is not permitted to add one — nor should a pagination
+  token be the reason a new secret enters the deployment;
+- **there is nothing in it to protect.** It holds a timestamp and an id the caller was just handed
+  on the previous page;
+- **tampering buys nothing.** The tenant filter comes from the key and is `AND`-ed into the query;
+  a forged cursor can only move the caller's window within the caller's own events.
+
+A cursor minted by tenant A and replayed by tenant B's key therefore returns B's events — a test
+asserts exactly that, because it is the property that matters and "the cursor is opaque" is not.
+
+### 12.4 Clamp what has a default; refuse what does not
+
+| Input | Bad value | Behaviour |
+|---|---|---|
+| `limit` | absent, `0`, `-5`, `abc`, `1e9`, `NaN` | **clamped** to `[1, 100]`, default `25`. Never an error |
+| `cursor` | absent | page one |
+| `cursor` | malformed, truncated, tampered, not ours | **`400 BAD_REQUEST`** |
+
+That looks inconsistent and is not. A `limit` of `abc` has one obviously-safe reading — the
+default — and getting it wrong costs nothing. A `cursor` of `abc` has **no** safe reading: silently
+serving page one would restart a client's traversal without telling it, and a client that loops
+"fetch page, follow cursor" would re-ingest the whole feed forever. The rule is *clamp what has a
+sensible default, refuse what does not*.
+
+---
+
+## 13. Threat matrix — Prompt 2
+
+Continues T1–T17. "Prompt 2" means this prompt closes it.
+
+### 13.1 Against the surface
+
+| # | Goal | What stops it |
+|---|---|---|
+| T18 | **Read another tenant's events** | `businessId` comes from the key row; it is in the `WHERE` of the list and of the single read. No parameter can name a business |
+| T19 | **Reach events by guessing an event id** | The single read filters by `businessId` too, so another tenant's id is `404`. Identical `404` for "never existed" and "not yours" |
+| T20 | **Write through the read-only API** | No write handler exists. `GET` is the only exported method on both routes; anything else is a framework `405` |
+| T21 | **Use a key in a browser** | No CORS headers, no `OPTIONS` handler, and `X-API-Key` is not safelisted, so a cross-origin call cannot even preflight |
+| T22 | **Get a key into an access log via a URL** | Credential-shaped query parameters are refused `400` before authentication, and the refusal echoes the name, never the value |
+| T23 | **Have an intermediary cache one tenant's page and serve it to another** | `Cache-Control: no-store` on every response, plus `Vary: X-API-Key` |
+| T24 | **Escalate from a key to a staff service** | `ApiContext` is not a `TenantContext` and does not type-check where one is required. No `/api/v1` handler imports a staff service |
+| T25 | **Use a key to manage keys** | There is no key endpoint under `/api/v1`. Lifecycle is session + `OWNER` only |
+
+### 13.2 Against pagination
+
+| # | Goal | What stops it |
+|---|---|---|
+| T26 | **Make the database do unbounded work** | `limit` is clamped to 100 and the query is a keyset seek, never an offset scan |
+| T27 | **Cross a tenant boundary with a forged cursor** | The tenant filter is not in the cursor. §12.3 |
+| T28 | **Silently restart a consumer's traversal** | A malformed cursor is `400`, not page one. §12.4 |
+| T29 | **See a row twice, or miss one, while events arrive** | Total order on `(occurredAt, id)` and a strict keyset comparison. Traversal is proved under concurrent insertion |
+
+### 13.3 Against the key and the state behind it
+
+| # | Goal | What stops it |
+|---|---|---|
+| T30 | **Turn guesses into rows in the rate-limit table** | The window is consumed only *after* the key is found. An unknown key costs one indexed read and writes nothing |
+| T31 | **Turn a valid key into unbounded audit writes** | A read writes **no** audit row. `lastUsedAt` is the record, and it is one `UPDATE` that moves forward only |
+| T32 | **Learn whether a key was real, revoked or expired** | One refusal for all five conditions, from a function that takes no argument |
+| T33 | **Keep reading after the owner revokes** | The next request is refused. The in-flight one is not — see §14, stated rather than papered over |
+| T34 | **Get a PostgreSQL message out of a terminal-state key** | Prompt 1's conflict handling. `revokeKey` refuses exactly what the trigger would |
+
+---
+
+## 14. The revocation window, stated honestly
+
+Authentication and the event read are **two statements, not one transaction**. So:
+
+> A key revoked after `authenticateApiKey` returns and before the event query runs **will serve that
+> one in-flight request.**
+
+The window is the gap between two statements in one request. It is not closed, and the alternative —
+holding a row lock on the key for the duration of every read, or re-checking inside a transaction
+that still cannot see a commit that has not happened yet — would slow every request to narrow
+something that cannot be eliminated by either technique.
+
+What is guaranteed instead, and tested:
+
+- the in-flight request can only ever return **that tenant's own events**, which the key was
+  entitled to a moment earlier — the failure is safe, not merely brief;
+- the **next** request is refused, with the generic `401`;
+- nothing is written on the way through except `lastUsedAt`.
+
+The same is true of expiry, with the extra property from Prompt 1 that `expiresAt` — not the
+bookkeeping `state` — is the authority, so a lapsed key is refused whether or not the sweep has run.
+
+---
+
+## 15. What Prompt 2 records, and what it refuses to record
+
+| Fact | Recorded? | Where |
+|---|---|---|
+| A key was used, and when | **yes** | `ApiKey.lastUsedAt`, monotonic, one `UPDATE`, failure swallowed |
+| A key was created / rotated / revoked | **yes** | `AuditLog`, with the name and the **public** prefix |
+| Which events a caller read | **no** | One audit row per read turns a rate limit into unbounded writes |
+| Response bodies | **no** | Never |
+| The raw key, or its digest | **no** | Neither appears in an audit row, a log line, an error or a metric |
+| A failed authentication | **no row** | Deliberately: writing one would let an unauthenticated caller cause writes |
+
+---
+
+## 16. Still out of scope after Prompt 2
+
+Everything in §8, unchanged. Plus: no OpenAPI or machine-readable schema endpoint, no webhooks
+*into* the API, no per-key scope selection while one scope exists, no key-level IP allow-listing,
+no sandbox or test-mode key, and no endpoint that exposes a customer, a card, a promotion, a coupon
+code or an amount.
+
+And one absence worth naming rather than leaving implicit: **nothing warns an owner that a key is
+about to expire.** The date is on their screen and that is all, so the realistic failure is silent —
+a merchant's reporting job stops one morning and the key list says why, to nobody who is looking.
+Registered as **D32**, because a banner and an email are different answers with different costs and
+the second one needs a provider (**D27**).
