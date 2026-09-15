@@ -200,6 +200,68 @@ test.describe("replacing and revoking", () => {
     expect(await page.content()).not.toContain(first.slice(13));
   });
 
+  test("replaces a key WITHOUT renaming it — the default path through the form", async ({ page }) => {
+    /*
+     * The release-gate finding, end to end.
+     *
+     * The form pre-fills the replacement name with the current one, so this is what happens when an
+     * owner presses Replace and then Replace it. Against migration 18's unconditional unique index
+     * it failed every time with "You already have a key with that name", because the predecessor's
+     * row stays — which is the no-delete rule, working as intended. Migration 19 scopes the name to
+     * ACTIVE keys.
+     */
+    await page.setViewportSize(DESKTOP);
+    const cafe = await createStampCafe({ name: "Same name café" });
+    const db = scoped(cafe.businessId);
+    await signIn(page, await emailOf(cafe.userId));
+
+    await page.goto("/en/business/integrations");
+    await createKey(page, "Reporting");
+    const first = (await page.getByTestId("api-key-secret-value").innerText()).trim();
+    await page.getByTestId("api-key-secret-done").click();
+
+    const [original] = await db.keys();
+    await page.getByTestId(`api-key-rotate-${original.id}`).click();
+
+    // The field already holds "Reporting". The owner changes nothing.
+    await expect(page.getByTestId(`api-key-rotate-name-${original.id}`)).toHaveValue("Reporting");
+    await page.getByTestId(`api-key-rotate-yes-${original.id}`).click();
+
+    // A new value, and no error.
+    await expect(page.getByTestId("api-key-secret")).toBeVisible();
+    await expect(page.getByTestId("api-keys-error")).toHaveCount(0);
+    const second = (await page.getByTestId("api-key-secret-value").innerText()).trim();
+    expect(second).not.toBe(first);
+
+    await page.getByTestId("api-key-secret-done").click();
+    const rows = await db.keys();
+    expect(rows).toHaveLength(2);
+    expect(rows.every((r) => r.name === "Reporting")).toBe(true);
+    expect(rows.filter((r) => r.state === "ACTIVE")).toHaveLength(1);
+  });
+
+  test("lets a name be used again once the key holding it is revoked", async ({ page }) => {
+    await page.setViewportSize(DESKTOP);
+    const cafe = await createStampCafe({ name: "Recycle café" });
+    const db = scoped(cafe.businessId);
+    await signIn(page, await emailOf(cafe.userId));
+
+    await page.goto("/en/business/integrations");
+    await createKey(page, "Nightly export");
+    await page.getByTestId("api-key-secret-done").click();
+
+    const [first] = await db.keys();
+    await page.getByTestId(`api-key-revoke-${first.id}`).click();
+    await page.getByTestId(`api-key-revoke-yes-${first.id}`).click();
+    await expect(page.getByTestId(`api-key-state-${first.id}`)).toContainText(en.ApiKeys.stateRevoked);
+
+    // The same label again, because the key that held it is finished.
+    await createKey(page, "Nightly export");
+    await expect(page.getByTestId("api-keys-error")).toHaveCount(0);
+    await page.getByTestId("api-key-secret-done").click();
+    expect(await db.count()).toBe(2);
+  });
+
   test("revokes a key behind a confirmation, and keeps the row", async ({ page }) => {
     await page.setViewportSize(DESKTOP);
     const cafe = await createStampCafe({ name: "Revoke café" });
@@ -224,6 +286,61 @@ test.describe("replacing and revoking", () => {
     await expect(page.getByTestId(`api-key-revoke-${row.id}`)).toHaveCount(0);
 
     await sectionShot(page, "desktop-en-api-key-revoked");
+  });
+});
+
+test.describe("the one moment the key exists is announced", () => {
+  test("puts the reveal in a live region and moves focus into it", async ({ page }) => {
+    /*
+     * A sighted owner sees the card arrive. Without this, somebody using a screen reader gets
+     * nothing: the card is not a live region and focus stays on the button they pressed — so the
+     * one moment this value exists can pass unnoticed, and it cannot be recovered.
+     *
+     * That is a worse failure here than anywhere else in the product, because every other screen's
+     * content is still there tomorrow.
+     */
+    await page.setViewportSize(DESKTOP);
+    const cafe = await createStampCafe({ name: "Announce café" });
+    await signIn(page, await emailOf(cafe.userId));
+
+    await page.goto("/en/business/integrations");
+    await createKey(page, "Announced");
+
+    // The same convention `Notice` already uses for every transient message in this product.
+    const reveal = page.locator('[role="status"]').filter({ has: page.getByTestId("api-key-secret") });
+    await expect(reveal).toHaveCount(1);
+    await expect(reveal).toHaveAttribute("aria-live", "polite");
+
+    // Focus is inside the revealed region, so a keyboard or screen-reader user is standing next to
+    // the value rather than still on the Create button.
+    const focused = await page.evaluate(() => {
+      const el = document.activeElement;
+      return { inReveal: el?.closest('[role="status"]')?.querySelector('[data-testid="api-key-secret"]') !== null };
+    });
+    expect(focused.inReveal).toBe(true);
+  });
+
+  test("announces the copy confirmation from a region that was already there", async ({ page }) => {
+    await page.setViewportSize(DESKTOP);
+    const cafe = await createStampCafe({ name: "Copy café" });
+    await signIn(page, await emailOf(cafe.userId));
+
+    await page.goto("/en/business/integrations");
+    await createKey(page, "Copyable");
+
+    /*
+     * Present and empty BEFORE the copy, not created by it: a live region that appears at the same
+     * moment its text does is one some readers never announce, because they were not watching an
+     * element that did not exist yet.
+     */
+    const confirmation = page.getByTestId("api-key-secret-copied");
+    await expect(confirmation).toHaveCount(1);
+    await expect(confirmation).toHaveAttribute("aria-live", "polite");
+    await expect(confirmation).toHaveText("");
+
+    await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await page.getByTestId("api-key-secret-copy").click();
+    await expect(confirmation).toHaveText(en.ApiKeys.copied);
   });
 });
 

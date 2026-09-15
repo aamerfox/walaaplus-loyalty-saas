@@ -1,4 +1,4 @@
-import { IntegrationEntityType, IntegrationEventType } from "@prisma/client";
+import { IntegrationEntityType, IntegrationEventType, Prisma } from "@prisma/client";
 import { prisma } from "../db";
 import type { ApiContext } from "./auth";
 import { type ApiPage, type Cursor, cursorPage } from "./contract";
@@ -115,12 +115,36 @@ export interface ListApiEventsOptions {
  * value this server minted for THIS business. That is why the comparison below can use it directly:
  * it is not caller input any more.
  *
- * ## Keyset, not offset
+ * ## Keyset, not offset — and why this is raw SQL
  *
  * `OFFSET 10000` makes PostgreSQL walk ten thousand rows in order to discard them, so a small
  * request buys arbitrary server work. It is also wrong under insertion: a row arriving ahead of the
- * window shifts every later page. The cursor instead asks for rows strictly earlier than the last
- * one seen, under the same two-column order — an indexed seek at any depth, stable under insertion.
+ * window shifts every later page.
+ *
+ * The cursor asks for rows strictly earlier than the last one seen under the same two-column order.
+ * **The form of that comparison decides whether it is a seek or a scan**, and the release gate
+ * measured both against 40,000 events:
+ *
+ * | Predicate | Index Cond | Rows discarded | Buffers | Time |
+ * |---|---|---|---|---|
+ * | `at < X OR (at = X AND id < Y)` | `businessId` only | **20,001** | 595 | 13.8 ms |
+ * | `(at, id) < (X, Y)` | `businessId` **and** `occurredAt` | 1 | **5** | **0.12 ms** |
+ *
+ * The OR form is what a Prisma `where` can express, and PostgreSQL cannot push an OR of two columns
+ * into an index range — so it read every newer row in the business's feed and threw it away. That
+ * is the offset behaviour the cursor exists to avoid, wearing a keyset's clothes, and the cost grew
+ * with depth exactly as `OFFSET` does. The documentation claimed "an indexed seek at any depth";
+ * it was not one.
+ *
+ * The row-value form IS pushed into the index, so this is raw SQL rather than a Prisma `where`.
+ * The trade is deliberate and the risks are handled: every value is a bound parameter (`Prisma.sql`
+ * interpolation, never string concatenation), `businessId` still comes from the authenticated key,
+ * and the six columns are listed literally exactly as `EVENT_SELECT` does.
+ *
+ * **No index was added.** The obvious next step would be `(businessId, occurredAt DESC, id DESC)` to
+ * absorb the remaining incremental sort, but after this fix the query reads five buffers and the
+ * sort touches one tie group — so that index would cost a write on every event insert to solve a
+ * problem that no longer exists. Measured, then left alone.
  *
  * The comparison is the two-column form, not `occurredAt < at`, which would skip every other row
  * sharing that millisecond, and not `occurredAt <= at`, which would repeat them.
@@ -132,20 +156,24 @@ export async function listApiEvents(
   const cursor = options.cursor;
   const at = cursor ? new Date(cursor.at) : null;
 
-  const rows = await prisma.integrationEvent.findMany({
-    where: {
-      // From the key. Top-level keys are AND-ed, so this holds whatever the cursor says.
-      businessId: ctx.businessId,
-      ...(at && cursor
-        ? { OR: [{ occurredAt: { lt: at } }, { occurredAt: at, id: { lt: cursor.id } }] }
-        : {}),
-    },
-    orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
-    // One more than asked for, so the next cursor is decided without a second query and without a
-    // COUNT. `cursorPage` trims it.
-    take: options.size + 1,
-    select: EVENT_SELECT,
-  });
+  /*
+   * `businessId` from the key, always. It is the first thing in the WHERE and it is a bound
+   * parameter, so the tenant filter is in exactly one place and cannot be influenced by the cursor.
+   */
+  const keyset =
+    at && cursor
+      ? Prisma.sql`AND ("occurredAt", "id") < (${at}::timestamp, ${cursor.id})`
+      : Prisma.empty;
+
+  const rows = await prisma.$queryRaw<EventRow[]>`
+    SELECT "id", "eventType", "entityType", "entityId", "occurredAt", "envelopeVersion"
+      FROM "IntegrationEvent"
+     WHERE "businessId" = ${ctx.businessId}
+       ${keyset}
+     ORDER BY "occurredAt" DESC, "id" DESC
+     -- One more than asked for, so the next cursor is decided without a second query and without a
+     -- COUNT. \`cursorPage\` trims it.
+     LIMIT ${options.size + 1}`;
 
   const { items, page } = cursorPage(
     rows,

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
 import { useRouter } from "@/i18n/routing";
 import { Badge, Button, Card, EmptyState, Notice, TextInput } from "@/components/ui";
@@ -78,6 +78,25 @@ export default function ApiKeysClient({ businessId, keys, maxActive, ttlDays }: 
   const [confirming, setConfirming] = useState<{ id: string; action: "revoke" | "rotate" } | null>(null);
   const [name, setName] = useState("");
   const [rotateName, setRotateName] = useState("");
+
+  /**
+   * Where the keyboard goes when a key appears.
+   *
+   * A sighted owner sees a card arrive above the form. Somebody using a screen reader gets nothing:
+   * the card is not a live region and the focus stays on the Create button they just pressed, so
+   * the one moment this value exists can pass unnoticed — and it cannot be recovered afterwards.
+   * That is a worse outcome here than on any other screen in the product, because every other
+   * screen's content is still there tomorrow.
+   *
+   * So the region is announced AND focus moves into it. The live region alone would read the value
+   * at somebody without putting them anywhere useful; moving focus alone would be silent for
+   * anyone whose reader does not announce the focused container. Together they say "this happened"
+   * and leave the user standing next to the thing they have to copy.
+   */
+  const revealRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (secret !== null) revealRef.current?.focus();
+  }, [secret]);
 
   const activeCount = keys.filter((k) => k.state === "ACTIVE").length;
   const atCeiling = activeCount >= maxActive;
@@ -197,6 +216,12 @@ export default function ApiKeysClient({ businessId, keys, maxActive, ttlDays }: 
       )}
 
       {secret !== null && (
+        /*
+         * `role="status"` matches what `Notice` already does for every other transient message in
+         * this product, so assistive technology treats this the same way. `tabIndex={-1}` makes the
+         * region focusable by script without adding it to the tab order.
+         */
+        <div ref={revealRef} role="status" aria-live="polite" tabIndex={-1} className="outline-none">
         <Card testId="api-key-secret">
           <h3 className="font-semibold text-slate-900">{t("secretTitle")}</h3>
           <p className="mt-1 text-sm text-amber-700" data-testid="api-key-secret-warning">
@@ -221,14 +246,23 @@ export default function ApiKeysClient({ businessId, keys, maxActive, ttlDays }: 
             >
               {t("secretDone")}
             </Button>
-            {copied && (
-              <span className="text-sm text-emerald-700" data-testid="api-key-secret-copied">
-                {t("copied")}
-              </span>
-            )}
+            {/*
+              * Its own live region, and always present rather than conditionally rendered: a region
+              * that appears at the same moment its text does is a region some readers never
+              * announce, because they were not watching an element that did not exist yet.
+              */}
+            <span
+              role="status"
+              aria-live="polite"
+              className="text-sm text-emerald-700"
+              data-testid="api-key-secret-copied"
+            >
+              {copied ? t("copied") : ""}
+            </span>
           </div>
           <p className="mt-3 text-xs text-slate-500">{t("secretHow")}</p>
         </Card>
+        </div>
       )}
 
       <Card testId="api-key-create">

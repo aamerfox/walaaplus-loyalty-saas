@@ -111,7 +111,31 @@ export function hasScope(ctx: ApiContext, scope: ApiScope): boolean {
 }
 
 /**
- * Record that a key was used, at most once per call, monotonically.
+ * How stale `lastUsedAt` is allowed to get before a request writes it again.
+ *
+ * ## Why this is not zero
+ *
+ * The rate limit permits **600 requests per key per minute**, and the first version of `touchKey`
+ * wrote on every one of them. That is ten `UPDATE`s a second against a SINGLE ROW: ten row locks a
+ * second that every other request for that key queues behind, ten dead tuples a second for
+ * autovacuum to clear, and a database round-trip awaited on the latency path of every read — all to
+ * move a timestamp that nobody reads more than once a day.
+ *
+ * With a sixty-second floor the write happens at most once a minute per key, and the other 599
+ * requests match zero rows and write nothing at all. `updateMany` with no match is not a write, so
+ * there is no tuple, no lock and no bloat.
+ *
+ * ## What it costs, stated plainly
+ *
+ * `lastUsedAt` can now be up to a minute behind. That is inside what the column already promised:
+ * `api_key_guard` makes it monotonic precisely so "the record of use can only ever UNDERSTATE how
+ * recently it happened", and an owner reading their key list to decide whether a key is still in
+ * use is answering a question about days, not seconds.
+ */
+const TOUCH_RESOLUTION_MS = 60_000;
+
+/**
+ * Record that a key was used, monotonically and at most once a minute.
  *
  * Separate from authentication so the write is a decision a route makes rather than a side effect
  * of checking a header. The database refuses a value that moves backwards.
@@ -120,11 +144,17 @@ export function hasScope(ctx: ApiContext, scope: ApiScope): boolean {
  * never turn a successful read into an error.
  */
 export async function touchKey(apiKeyId: string, at: Date = new Date()): Promise<void> {
+  const staleBefore = new Date(at.getTime() - TOUCH_RESOLUTION_MS);
   await prisma.apiKey
     .updateMany({
-      // Only forward, in the WHERE as well as in the trigger: this way a concurrent later write is
-      // not overwritten by an earlier one, and the statement is a no-op rather than a refusal.
-      where: { id: apiKeyId, OR: [{ lastUsedAt: null }, { lastUsedAt: { lt: at } }] },
+      /*
+       * Only forward, and only if it is worth writing.
+       *
+       * The `lt` bound does both jobs at once: it keeps the write monotonic — a concurrent later
+       * value is never overwritten by an earlier one — and it turns the 599 requests a minute that
+       * would change nothing useful into a statement that matches no row and writes nothing.
+       */
+      where: { id: apiKeyId, OR: [{ lastUsedAt: null }, { lastUsedAt: { lt: staleBefore } }] },
       data: { lastUsedAt: at },
     })
     .catch(() => undefined);

@@ -1,0 +1,61 @@
+-- ════════════════════════════════════════════════════════════════════════════
+-- Migration 19 — an API key's name is unique among ACTIVE keys, not forever
+-- ════════════════════════════════════════════════════════════════════════════
+--
+-- Migration 18 created `ApiKey_businessId_name_key` as an UNCONDITIONAL unique
+-- index on (businessId, name). That is the wrong scope, and it broke two things
+-- that the Phase 3B.1 Prompt 3 release gate found by running them:
+--
+--   1. ROTATION WITH THE UNCHANGED NAME ALWAYS FAILED.
+--
+--      `rotateKey` revokes the predecessor and inserts the replacement in ONE
+--      transaction, and the predecessor's row stays - that is the whole point of
+--      the no-delete rule. With an unconditional index the replacement collided
+--      with the row it was replacing, so the owner got
+--      "That name is already in use".
+--
+--      The owner screen pre-fills the replacement name with the current name,
+--      so this was not an edge case: pressing Replace and then Replace it - the
+--      default path, and the action `docs/PUBLIC-API-V1.md` tells a consumer to
+--      take when they suspect a key - failed every time.
+--
+--   2. A NAME WAS BURNED FOREVER.
+--
+--      Revoke "Reporting" and no key could ever be called "Reporting" again.
+--      Keys expire after ninety days, so a business that rotates on schedule
+--      accumulates dead names indefinitely and eventually has to invent
+--      "Reporting 4" to describe the same thing.
+--
+-- WHAT UNIQUENESS IS ACTUALLY FOR HERE. The name is the owner's own label, and
+-- it exists so they can tell their LIVE keys apart in a list. Two revoked keys
+-- sharing a name confuses nobody: the list shows the state and the dates, and
+-- every audit row references a key by id rather than by name. So the constraint
+-- belongs on the active set.
+--
+-- WHY THIS IS SAFE ON AN ENVIRONMENT WHERE MIGRATION 18 IS ALREADY APPLIED.
+-- The new index is STRICTLY WEAKER than the one it replaces: unconditional
+-- uniqueness over all rows implies uniqueness over the ACTIVE subset. Any data
+-- that satisfied the old index satisfies the new one, so the CREATE cannot fail
+-- on existing rows, in any environment, whatever it holds. Nothing is deleted,
+-- nothing is rewritten, and no row changes.
+--
+-- WHY THIS IS AN INDEX SWAP AND NOT A TRIGGER. The same reason the active-slot
+-- ceiling is an index: a trigger that SELECTs cannot exclude a concurrent
+-- transaction, because a BEFORE INSERT trigger sees only committed rows, so two
+-- simultaneous creations would each find no clash and both insert. A partial
+-- unique index IS serialized by PostgreSQL - the second inserter blocks on the
+-- first's uncommitted entry and is refused when it commits. Proved directly in
+-- `tests/integration/api-key-concurrency.test.ts`.
+--
+-- LOCKING. `DROP INDEX` and `CREATE UNIQUE INDEX` both take an ACCESS EXCLUSIVE
+-- lock on "ApiKey" for the duration, inside this migration's transaction. That
+-- is stated rather than glossed: `ApiKey` is a small table - at most five active
+-- keys per business plus their retired predecessors - so the build is
+-- milliseconds, and no CONCURRENTLY variant is warranted. Authentication reads
+-- block for that instant; nothing else in the product touches this table.
+
+DROP INDEX "ApiKey_businessId_name_key";
+
+CREATE UNIQUE INDEX "ApiKey_businessId_name_key"
+  ON "ApiKey"("businessId", "name")
+  WHERE "state" = 'ACTIVE';

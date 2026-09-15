@@ -1199,11 +1199,25 @@ model ApiKey {
   business  Business @relation(fields: [businessId], references: [id], onDelete: Restrict)
   createdBy User?    @relation(fields: [createdByUserId], references: [id], onDelete: SetNull)
 
-  // The partial unique index that bounds active keys per business - UNIQUE (businessId, activeSlot)
-  // WHERE activeSlot IS NOT NULL - lives in migration 18 only. Prisma cannot express a partial
-  // index, and declaring the unconditional form here would make the two disagree; the same
-  // convention as `PromotionRedemption_voids_key` and `WebhookDelivery_one_pending_test_key`.
-  @@unique([businessId, name])
+  // Two partial unique indexes live in the migrations only, because Prisma cannot express a
+  // partial index and declaring the unconditional form here would make the two disagree - the same
+  // convention as `PromotionRedemption_voids_key` and `WebhookDelivery_one_pending_test_key`:
+  //
+  //   UNIQUE (businessId, activeSlot) WHERE activeSlot IS NOT NULL   migration 18
+  //     bounds active keys per business. A count in a trigger would not, because a BEFORE INSERT
+  //     trigger reads only committed rows.
+  //
+  //   UNIQUE (businessId, name) WHERE state = 'ACTIVE'               migration 19
+  //     the name is unique among LIVE keys, not forever. Migration 18 made it unconditional, which
+  //     meant a rotation could not keep its own name - the predecessor row stays, by design - and a
+  //     name was burned the moment a key using it was revoked.
+  //
+  // NEITHER is declared here. Migration 18 declared the name index unconditionally, which is what
+  // `migrate diff` then reported as drift once migration 19 made it partial - and an unconditional
+  // declaration would also be a lie about what the database enforces. Removing it follows the
+  // `activeSlot` precedent directly above and leaves the migrations as the single authority;
+  // nothing looks a key up by (businessId, name), so no generated client method is lost.
+  // `tests/integration/api-key-name-reuse.test.ts` asserts the real shape from `pg_indexes`.
   @@index([businessId, state])
 }
 
