@@ -370,15 +370,35 @@ the same millisecond produce two events that compare equal. A sort with ties is 
 may return in a different order each time, which is how a paginating client sees one row twice and
 another never. `id` breaks every tie.
 
-### 12.2 The cursor is keyset, not offset
+### 12.2 The cursor is keyset, not offset — and the FORM of the comparison decides it
 
 `OFFSET 10000` makes PostgreSQL walk ten thousand rows in order to throw them away, so a small
 request buys arbitrary server work. It is also wrong under insertion: a row arriving ahead of the
 window shifts every later page.
 
 The cursor carries the last row's `(occurredAt, id)` and the next page asks for strictly-earlier
-rows under the same two-column order. That is an indexed seek at any depth, and it neither repeats
-nor skips when rows are inserted ahead of the window.
+rows under the same two-column order. It neither repeats nor skips when rows are inserted ahead of
+the window.
+
+> **Corrected at the Phase 3B.1 release gate.** This section used to end "that is an indexed seek at
+> any depth". It was not one. Prompt 2 expressed the comparison as
+> `at < X OR (at = X AND id < Y)` — the form a Prisma `where` can produce — and PostgreSQL cannot
+> push an OR across two columns into an index range, so the query read every row between the top of
+> the feed and the caller's position and discarded it. Cost grew linearly with depth, exactly as
+> `OFFSET` does. Correctness was never affected, which is why every pagination test passed
+> throughout and only a query plan showed it.
+>
+> Measured at 40,000 events, reaching a cursor at depth 20,000:
+>
+> | Predicate | Index Cond | Rows discarded | Buffers |
+> |---|---|---|---|
+> | `at < X OR (at = X AND id < Y)` | `businessId` only | 20,001 | 595 |
+> | `(at, id) < (X, Y)` | `businessId` **and** `occurredAt` | 1 | **5** |
+>
+> `listApiEvents` now emits the row-value form, which needs raw SQL because a Prisma `where` cannot
+> express it — parameterised throughout, with `businessId` still the first term and still from the
+> key. `docs/PHASE-3B1-RELEASE-GATE.md` §3 has the detail, including why no additional index was
+> added and why the first two attempts at a regression test proved nothing.
 
 ### 12.3 It is opaque **and authenticated**
 

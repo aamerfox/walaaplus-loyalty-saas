@@ -45,6 +45,10 @@ wpk_1a2b3c4d_Xy7...43-characters...
 The first twelve characters are the public prefix and are shown in the owner's key list so they can
 tell one key from another. The remaining 43 characters are the secret.
 
+**Names.** Each key carries a label the owner chooses. It is theirs, it never appears in this API,
+and it is unique among their **active** keys — so a replacement may keep the name of the key it
+replaces, and a name becomes available again once the key holding it is revoked or expires.
+
 ---
 
 ## 3. Authentication
@@ -188,6 +192,11 @@ Keyset, ordered by `(occurredAt, id)` descending. The `id` is a genuine tie-brea
 millisecond precision, and two actions in the same millisecond produce two events with the same
 value.
 
+Paging deep into a long feed costs the same as paging at the top: the cursor is an indexed seek, not
+a scan with an offset. That is now measured rather than asserted — see
+`docs/PHASE-3B1-RELEASE-GATE.md` §3, which also records that it was **not** true before the release
+gate found it.
+
 ```
 GET /api/v1/events?limit=50
 → page.nextCursor = "v1.eyJhdCI6….kJ8f…"
@@ -206,7 +215,7 @@ about one — its encoding may change without a version bump, and an altered one
 A cursor is valid **for the business it was issued to**, not for the individual key. So:
 
 - a cursor from one of your keys works with another of your keys, and **replacing a key does not
-  invalidate a traversal in progress**;
+  invalidate a traversal in progress** — including a replacement that keeps the same name;
 - a cursor issued to a different business is a `400`, not a silently reinterpreted position.
 
 New events arriving while you page are **not** inserted into your traversal — a keyset walk moves

@@ -11,7 +11,8 @@ have to reconstruct.
 
 | File | What it owns |
 |---|---|
-| `prisma/migrations/20260924120000_api_keys/` | Migration 18: `ApiScope`, `ApiKeyState`, the `ApiKey` table, its CHECKs, its partial unique indexes, and two triggers |
+| `prisma/migrations/20260924120000_api_keys/` | Migration 18: `ApiScope`, `ApiKeyState`, the `ApiKey` table, its CHECKs, its indexes, and two triggers |
+| `prisma/migrations/20260925120000_api_key_name_active_only/` | Migration 19: the name is unique among **ACTIVE** keys. Migration 18 made it unconditional, which stopped a rotation keeping its own name |
 | `src/server/api/keys.ts` | Minting, the digest, the slot ceiling, create / rotate / revoke / list |
 | `src/server/api/auth.ts` | `X-API-Key` verification, the generic refusal, `ApiContext`, `touchKey` |
 | `src/server/api/contract.ts` | The envelope, error codes, the page assembler, page-size clamping. **No key material** — the signer is injected |
@@ -103,6 +104,18 @@ and `createdAt` are not, and §11.1 of the capability matrix says why for each.
 The categories that must never appear are not filtered — **they are unreachable**. There is no
 relation from `IntegrationEvent` to a customer, and no query path from a key to a person.
 
+### 3.2a A key's name is unique among live keys only
+
+Migration 18 made `(businessId, name)` unconditionally unique. Rotation revokes the predecessor and
+inserts the replacement in one transaction and the predecessor's row **stays** — so the replacement
+collided with the row it was replacing, and since the screen pre-fills the current name, the default
+rotation path failed every time. Revoking a key also burned its name permanently.
+
+Migration 19 scopes it: `UNIQUE (businessId, name) WHERE state = 'ACTIVE'`. The name exists so an
+owner can tell their **live** keys apart; two retired keys sharing one confuses nobody. The new index
+is strictly weaker than the old one, so it cannot fail to build on an environment that already has
+migration 18.
+
 ### 3.3 The order is total because it has to be
 
 `ORDER BY "occurredAt" DESC, "id" DESC`, with a two-column keyset comparison
@@ -112,6 +125,18 @@ relation from `IntegrationEvent` to a customer, and no query path from a key to 
 transactions beginning in the same millisecond produce two events that compare exactly equal. A sort
 with ties may be returned differently on each execution, which is precisely how a paginating client
 sees one row twice and another never. Proved with six events forced onto one timestamp.
+
+### 3.3a The keyset comparison has to be a row-value comparison
+
+`ORDER BY` alone does not make a cursor a seek — the predicate does. Prompt 2 used
+`at < X OR (at = X AND id < Y)`, which is what a Prisma `where` expresses, and PostgreSQL cannot push
+an OR across two columns into an index range: it read every newer row in the business's feed and
+discarded it, at a cost that grew with depth exactly as `OFFSET` does. 20,001 rows discarded and 595
+buffers to return 26, against 1 row and 5 buffers for the row-value form.
+
+So `listApiEvents` builds raw SQL. Every value is a bound template parameter, `businessId` is the
+first term and still comes from the key, `$queryRawUnsafe` is never used, and a test asserts all of
+that. `docs/PHASE-3B1-RELEASE-GATE.md` §3 records the measurement and why no extra index was added.
 
 ### 3.4 The cursor is opaque **and authenticated**
 
@@ -155,6 +180,18 @@ No `Access-Control-Allow-Origin` is sent by any response. The shape of the API e
 missing header does: `X-API-Key` is not a CORS-safelisted request header, so a cross-origin call must
 preflight with `OPTIONS`; no route exports an `OPTIONS` handler; the browser refuses before the real
 request leaves.
+
+### 3.6a `lastUsedAt` is written at most once a minute
+
+It used to be written on every request. At the documented ceiling of 600 requests per key per minute
+that is ten `UPDATE`s a second against one row: ten row locks that every other request for that key
+queues behind, ten dead tuples a second, and a round-trip awaited on the latency path of every read —
+to move a timestamp nobody reads more than once a day.
+
+A sixty-second floor in the `WHERE` turns the other 599 into a statement that matches no row and
+writes nothing. The cost is that `lastUsedAt` can be a minute behind, which is inside what the column
+already promised: the trigger makes it monotonic precisely so the record of use can only ever
+understate how recently it happened.
 
 ### 3.7 A read writes no audit row
 
@@ -210,6 +247,8 @@ written on the way through except `lastUsedAt`.
 | `tests/integration/api-keys-routes.test.ts` | 10 | The owner route: who may reach it, what it returns, the controlled conflict |
 | `tests/integration/public-api-events.test.ts` | 30 | `/api/v1`: authentication, tenancy, pagination, headers, rate limiting, the revocation boundary |
 | `tests/integration/public-api-cursor.test.ts` | 13 | The signed cursor: round-trip, every tamper case, the binding, the legacy format |
+| `tests/integration/api-key-name-reuse.test.ts` | 10 | Migration 19: rotation keeping its name, name reuse after revocation and expiry, the partial index as the runtime role sees it |
+| `tests/integration/public-api-scale.test.ts` | 8 | The feed is a seek at depth — measured from the service's own SQL — and a busy key is not a write storm |
 | `tests/unit/api-contract.test.ts` | 21 | The envelope, the cursor, and the source scans that keep the key out of places it must not reach |
 | `tests/e2e/api-keys-ui.spec.ts` | 11 | The owner screen in English and Arabic, and what a browser session cannot do |
 
@@ -236,6 +275,15 @@ test that would have to pretend to observe something it cannot.
 | verify-before-parse ordering | 7 |
 | the route's call to `verifyCursor` | 7 |
 | the labelled key derivation | 1 (source assertion — see below) |
+
+---
+
+## 6a. The release gate
+
+`docs/PHASE-3B1-RELEASE-GATE.md` audits all of the above against source, schema, triggers, grants,
+routes, UI and HTTP behaviour. It found five defects — two of them breaking the owner's rotation
+flow, one making the cursor a scan — fixed and red-proved each, and records what was checked and
+left alone, including two regression tests that passed for the wrong reason and had to be replaced.
 
 ---
 
