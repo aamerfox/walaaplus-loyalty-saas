@@ -24,44 +24,55 @@ import { resolveTestDatabaseUrls } from "../setup/test-env";
 /**
  * One waiting test delivery per destination, proved against **genuinely overlapping transactions**.
  *
- * ## Why this file exists rather than another `Promise.all`
+ * ## Three versions of this proof, and why the first two were not proofs
  *
- * The first version of this rule was a `BEFORE INSERT` trigger running `SELECT ... EXISTS`, and it
- * was claimed to be concurrency-safe. It is not. That check reads only **committed** rows, so under
- * READ COMMITTED two overlapping transactions each find nothing, each pass, and each commit — two
- * waiting tests, which is the thing the rule exists to prevent.
+ * **First:** a `BEFORE INSERT` trigger running `SELECT ... EXISTS`, claimed to be concurrency-safe.
+ * It is not — that check reads only **committed** rows, so two overlapping transactions each find
+ * nothing, each pass, and each commit. The evidence offered was `Promise.all` of two Prisma
+ * `create` calls, which Prisma issues as two autocommit statements over **one** pool: they
+ * serialized, the second genuinely saw the first's committed row, and *sequential* refusal was read
+ * as concurrency safety.
  *
- * The test that "proved" the trigger was `Promise.all` of two Prisma creates. Prisma issues those
- * as two autocommit statements over **one** connection pool, so they serialize: the second really
- * does see the first's committed row. That demonstrated **sequential** refusal and was read as
- * concurrency safety. A test that cannot fail for the reason you care about is not evidence about
- * that reason.
+ * **Second:** two pools and the first transaction held open, with "B blocked" inferred from a fixed
+ * 750 ms sleep. A fresh `PrismaClient`'s first query includes connecting and starting a query
+ * engine, and that alone outlasted the sleep — B was still connecting, A committed, and the
+ * *trigger* then refused B. The blocking assertion passed with B never having reached the index.
  *
- * ## What this does instead
+ * Then a third near-miss, fixed before it shipped: the sleep was replaced with
+ * `SELECT count(*) FROM pg_locks WHERE NOT granted`, which proves *some* backend is waiting
+ * somewhere — not that B is, and not that B is waiting on A.
  *
- * Two `PrismaClient` instances, so two independent connection pools, and the first transaction is
- * **held open on purpose**:
+ * **This version** binds the claim to **B's own backend process**, and infers nothing from elapsed
+ * time:
  *
- *   1. client A opens an interactive transaction and inserts a pending test — **not committed**;
- *   2. client B, on its own connection, attempts the same insert — this must **block**, and the
- *      test asserts it is still unsettled while A holds the row;
- *   3. A commits — B must then be **refused** with a unique violation naming the index;
- *   4. and the mirror: if A **rolls back**, B must be allowed through, because the rule is "one
- *      waiting test", not "one attempt ever".
+ *   1. A opens an interactive transaction and inserts a waiting test — uncommitted;
+ *   2. B opens its **own** interactive transaction, which pins one backend, and reads
+ *      `pg_backend_pid()` **inside** it before submitting anything;
+ *   3. B submits its INSERT;
+ *   4. the **migrator** connection — a third backend, not in the race — polls `pg_locks` for
+ *      **that exact PID** with `granted = false`, and requires a `transactionid` wait, which is
+ *      what an inserter blocked on another transaction's uncommitted index entry waits on. It
+ *      polls until B is demonstrably waiting, or gives up and fails saying so;
+ *   5. with B confirmed waiting, its INSERT must still be unsettled;
+ *   6. A commits → B is refused with **23505** from the partial unique index;
+ *   7. and the mirror: A rolls back → B **succeeds**, because the rule is "one waiting test", not
+ *      "one attempt ever".
  *
  * Both clients connect as the **restricted runtime role** — what `web` and `worker` hold.
  *
  * The guarantee under test is the partial unique index `WebhookDelivery_one_pending_test_key`
- * (migration 17). The trigger rule is still present and still useful — it gives the sequential case
- * a readable sentence instead of a duplicate-key error — but it is not what makes this file pass,
- * and removing the index makes it fail.
+ * (migration 17). Dropping only that index makes B stop waiting and lets the duplicate through
+ * despite the trigger — the red proof, and the original defect reproduced.
  */
 
-/** Long enough that a non-blocking insert would certainly have finished; short enough to be cheap. */
-const BLOCK_OBSERVATION_MS = 750;
+/** How long to keep polling for B to appear as a waiter before declaring the proof failed. */
+const WAIT_FOR_BLOCK_MS = 15_000;
 
-/** Prisma aborts an interactive transaction on its own after this; A is held for far less. */
-const HOLD_TIMEOUT_MS = 20_000;
+/** Gap between polls. No assertion depends on this value — it is a poll interval, not a delay. */
+const POLL_INTERVAL_MS = 25;
+
+/** Interactive transactions here are held open deliberately; Prisma's default would abort them. */
+const TX_TIMEOUT_MS = 30_000;
 
 const INSERT = `INSERT INTO "WebhookDelivery" ("id", "businessId", "destinationId", "isTest", "status", "nextAttemptAt", "createdAt")
      VALUES ($1::text, $2::text, $3::text, true, 'PENDING', now(), now())`;
@@ -90,23 +101,12 @@ beforeEach(async () => {
   destinationId = created.destination.id;
   await setDestinationState(cafe.ctx, destinationId, "ENABLED");
 
-  // Two clients, so two pools. This is the whole point of the file: one pool would serialize them
-  // and the test would pass without proving anything about concurrency.
+  // Two clients, so two pools. One pool would serialize them and the test would prove nothing.
   const { runtime } = resolveTestDatabaseUrls();
   a = new PrismaClient({ datasources: { db: { url: runtime } } });
   b = new PrismaClient({ datasources: { db: { url: runtime } } });
-
-  /*
-   * Warm both pools before anything is timed.
-   *
-   * This is not tidiness, it is the difference between a real result and a fake one. A fresh
-   * `PrismaClient`'s first query includes connecting and starting a query engine, which took long
-   * enough that the FIRST version of this file mistook it for blocking: B was still connecting
-   * during the observation window, A committed, and B's trigger then saw a committed row and
-   * refused with `check_violation` - so the test "passed" its blocking assertion without B ever
-   * having reached the index. Warmed up, B's INSERT reaches the trigger in milliseconds, passes it
-   * because A's row is uncommitted, and then blocks where it is supposed to.
-   */
+  // Warm both. The PID check would catch connection latency anyway; this keeps a failure obvious
+  // rather than clever.
   await Promise.all([a.$queryRaw`SELECT 1`, b.$queryRaw`SELECT 1`]);
 });
 
@@ -114,22 +114,7 @@ afterEach(async () => {
   await Promise.allSettled([a.$disconnect(), b.$disconnect()]);
 });
 
-/**
- * Is some backend waiting on a lock right now?
- *
- * Asked of the MIGRATOR connection, which is not part of the race. "Has not settled yet" is weak
- * evidence - a slow client looks the same - so the test also reads `pg_locks` and requires an
- * ungranted lock to exist. An insert waiting on another transaction's uncommitted index entry waits
- * on that transaction's id, which appears here as an ungranted `transactionid` lock.
- */
-async function someoneIsWaitingOnALock(): Promise<boolean> {
-  const rows = await migratorPrisma().$queryRaw<{ waiting: bigint }[]>`
-    SELECT count(*) AS waiting FROM pg_locks WHERE NOT granted
-  `;
-  return Number(rows[0].waiting) > 0;
-}
-
-/** Has this promise settled? Used to prove B is genuinely waiting rather than merely slow. */
+/** Has this promise settled? Paired with the PID check, never used on its own. */
 function watch<T>(promise: Promise<T>): { isSettled: () => boolean; result: Promise<T> } {
   let done = false;
   const result = promise.then(
@@ -142,21 +127,46 @@ function watch<T>(promise: Promise<T>): { isSettled: () => boolean; result: Prom
       throw e;
     },
   );
-  // The caller observes the rejection; this only records that it happened.
   result.catch(() => undefined);
   return { isSettled: () => done, result };
 }
 
+interface LockWait {
+  locktype: string;
+  mode: string;
+}
+
 /**
- * Open a transaction on `a`, insert a pending test, and hold it open until the returned handle is
- * told to finish. Resolving commits; rejecting rolls back.
+ * Poll the MIGRATOR connection until backend `pid` is waiting on an ungranted lock.
+ *
+ * Scoped to one PID on purpose. An earlier version asked
+ * `SELECT count(*) FROM pg_locks WHERE NOT granted` and asserted it was above zero, which proves
+ * *some* backend somewhere is waiting — not that B is, and not that B is waiting on A. Any
+ * unrelated wait anywhere in the database would have satisfied it.
  */
+async function waitUntilBlocked(pid: number): Promise<LockWait> {
+  const deadline = Date.now() + WAIT_FOR_BLOCK_MS;
+  for (;;) {
+    const rows = await migratorPrisma().$queryRaw<LockWait[]>`
+      SELECT locktype, mode
+        FROM pg_locks
+       WHERE pid = ${pid} AND NOT granted
+    `;
+    if (rows.length > 0) return rows[0];
+    if (Date.now() > deadline) {
+      throw new Error(`backend ${pid} never waited on a lock: nothing is serializing these inserts`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+  }
+}
+
+/** A's side: open a transaction, insert, and hold it open until told to commit or roll back. */
 async function holdOpenInsertOnA(): Promise<{ commit: () => void; rollback: () => void; done: Promise<unknown> }> {
-  let release: (commit: boolean) => void;
+  let release!: (commit: boolean) => void;
   const held = new Promise<boolean>((resolve) => {
     release = resolve;
   });
-  let inserted: () => void;
+  let inserted!: () => void;
   const hasInserted = new Promise<void>((resolve) => {
     inserted = resolve;
   });
@@ -166,21 +176,59 @@ async function holdOpenInsertOnA(): Promise<{ commit: () => void; rollback: () =
       async (tx) => {
         await tx.$executeRawUnsafe(INSERT, randomUUID(), cafe.businessId, destinationId);
         inserted();
-        const shouldCommit = await held;
-        // Throwing is how an interactive transaction is rolled back.
-        if (!shouldCommit) throw new Error("deliberate rollback");
+        if (!(await held)) throw new Error("deliberate rollback");
       },
-      { timeout: HOLD_TIMEOUT_MS, maxWait: HOLD_TIMEOUT_MS },
+      { timeout: TX_TIMEOUT_MS, maxWait: TX_TIMEOUT_MS },
     )
     .catch((e: unknown) => e);
 
-  // Do not hand the caller a handle until A's row actually exists inside its transaction.
   await hasInserted;
   return { commit: () => release(true), rollback: () => release(false), done };
 }
 
-function insertOnB(): Promise<unknown> {
-  return b.$executeRawUnsafe(INSERT, randomUUID(), cafe.businessId, destinationId);
+interface BAttempt {
+  pid: number;
+  insert: { isSettled: () => boolean; result: Promise<unknown> };
+  done: Promise<unknown>;
+}
+
+/**
+ * B's side: its own interactive transaction, so it holds ONE backend for the whole attempt.
+ *
+ * The PID is read inside that transaction and handed out **before** the INSERT is submitted, so the
+ * poller is watching the same backend that is about to block. That is the whole point of the file:
+ * the proof is about this process, not about the database in general.
+ */
+async function insertOnBInItsOwnTransaction(destination: string = destinationId): Promise<BAttempt> {
+  let pidReady!: (pid: number) => void;
+  const pidPromise = new Promise<number>((resolve) => {
+    pidReady = resolve;
+  });
+  /*
+   * Boxed in an object on purpose. `await` on a `Promise<Promise<T>>` unwraps BOTH levels, so the
+   * handle would arrive as the insert's eventual value instead of the insert itself - and the
+   * caller could not then observe whether it had settled, which is the one thing this file needs.
+   */
+  let handOut!: (box: { submitted: Promise<unknown> }) => void;
+  const insertHandle = new Promise<{ submitted: Promise<unknown> }>((resolve) => {
+    handOut = resolve;
+  });
+
+  const done = b.$transaction(
+    async (tx) => {
+      const rows = await tx.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+      pidReady(Number(rows[0].pid));
+      const submitted = tx.$executeRawUnsafe(INSERT, randomUUID(), cafe.businessId, destination);
+      handOut({ submitted });
+      // Rejecting here rolls B's transaction back, which is correct for the refusal case.
+      await submitted;
+      return "committed";
+    },
+    { timeout: TX_TIMEOUT_MS, maxWait: TX_TIMEOUT_MS },
+  );
+  done.catch(() => undefined);
+
+  return { pid: await pidPromise, insert: watch((await insertHandle).submitted), done };
 }
 
 function pendingTests(): Promise<number> {
@@ -190,80 +238,65 @@ function pendingTests(): Promise<number> {
 }
 
 describe("two overlapping transactions cannot both queue a waiting test", () => {
-  it("blocks the second insert while the first transaction is open, then refuses it on commit", async () => {
+  it("blocks B specifically, then refuses it from the unique index once A commits", async () => {
     const first = await holdOpenInsertOnA();
-    const second = watch(insertOnB());
+    const second = await insertOnBInItsOwnTransaction();
 
     /*
-     * The assertion the old test could not make. B's INSERT has been sent on its own connection and
-     * must be WAITING on A's uncommitted index entry. Without the index — with only the trigger's
-     * `EXISTS`, which reads committed rows — this would have completed immediately, because A's row
-     * is invisible to it.
-     *
-     * Two observations, because one of them is weak on its own: the promise has not settled, AND
-     * the database reports an ungranted lock. A client that is merely slow satisfies the first and
-     * not the second.
+     * The assertion neither earlier version could make: THIS backend is waiting, and it is waiting
+     * on a transaction id — what an inserter blocked on another transaction's uncommitted unique
+     * index entry waits on. Not a sleep, not a global count.
      */
-    await new Promise((resolve) => setTimeout(resolve, BLOCK_OBSERVATION_MS));
-    expect(second.isSettled(), "the second insert did not block; nothing is serializing these").toBe(false);
-    expect(await someoneIsWaitingOnALock(), "nothing is waiting on a lock, so B is slow rather than blocked").toBe(
-      true,
-    );
+    const wait = await waitUntilBlocked(second.pid);
+    expect(wait.locktype, "B is waiting, but not on another transaction").toBe("transactionid");
+    expect(second.insert.isSettled(), "B is recorded as waiting yet its INSERT already finished").toBe(false);
 
     first.commit();
     await first.done;
 
     /*
-     * Refused by the INDEX, not by the trigger.
-     *
-     * This distinction is the whole point of the file. The trigger cannot have decided this: it ran
-     * before A committed and saw nothing. A `check_violation` here would mean B never reached the
-     * index and the test had proved nothing about concurrency — which is exactly how the first
-     * version of this file failed.
+     * Refused by the INDEX, not by the trigger. The trigger cannot have decided this: it ran before
+     * A committed and saw nothing. A `check_violation` here would mean B never reached the index.
      */
-    await expect(second.result).rejects.toThrow(/23505/);
-    await expect(second.result).rejects.toThrow(/already exists/);
-    /*
-     * One column in the key, which is what identifies WHICH unique index refused. The only other
-     * unique index on this table is the partial one on ("destinationId", "integrationEventId"), and
-     * a violation of that one names both columns.
-     *
-     * Prisma surfaces PostgreSQL's DETAIL line rather than its MESSAGE, so the index name itself is
-     * not in the string. `webhook-release-gate.test.ts` asserts the index object exists with the
-     * right name and predicate; this asserts which one fired.
-     */
-    await expect(second.result).rejects.toThrow(/Key \("destinationId"\)=/);
-    await expect(second.result).rejects.not.toThrow(/a test is already queued for this destination/);
+    await expect(second.insert.result).rejects.toThrow(/23505/);
+    await expect(second.insert.result).rejects.toThrow(/already exists/);
+    // One column in the key identifies WHICH unique index fired: the other partial unique index on
+    // this table is on ("destinationId", "integrationEventId") and names both.
+    await expect(second.insert.result).rejects.toThrow(/Key \("destinationId"\)=/);
+    await expect(second.insert.result).rejects.not.toThrow(/a test is already queued for this destination/);
 
+    await second.done.catch(() => undefined);
     expect(await pendingTests()).toBe(1);
   }, 60_000);
 
-  it("lets the second through if the first rolls back, because the rule is about what is WAITING", async () => {
+  it("lets B through if A rolls back, because the rule is about what is WAITING", async () => {
     const first = await holdOpenInsertOnA();
-    const second = watch(insertOnB());
+    const second = await insertOnBInItsOwnTransaction();
 
-    await new Promise((resolve) => setTimeout(resolve, BLOCK_OBSERVATION_MS));
-    expect(second.isSettled()).toBe(false);
-    expect(await someoneIsWaitingOnALock()).toBe(true);
+    const wait = await waitUntilBlocked(second.pid);
+    expect(wait.locktype).toBe("transactionid");
+    expect(second.insert.isSettled()).toBe(false);
 
     // A changes its mind. B's wait ends in success, not in a refusal.
     first.rollback();
     await first.done;
-    await second.result;
+    await second.insert.result;
+    await expect(second.done).resolves.toBe("committed");
 
     expect(await pendingTests()).toBe(1);
   }, 60_000);
 
-  it("does not serialize unrelated destinations", async () => {
-    // The index is partial and keyed on the destination: it must not make one destination's test
-    // wait behind another's.
+  it("does not make one destination's test wait behind another's", async () => {
+    // The index is partial and keyed on the destination, so unrelated work must not serialize.
     const other = await createDestination(cafe.ctx, { name: "Second", url: "https://hooks.example.com/other" });
     await setDestinationState(cafe.ctx, other.destination.id, "ENABLED");
 
     const first = await holdOpenInsertOnA();
-    // B inserts for the OTHER destination while A still holds its row. This must not block.
-    const second = watch(b.$executeRawUnsafe(INSERT, randomUUID(), cafe.businessId, other.destination.id));
-    await second.result;
+    const second = await insertOnBInItsOwnTransaction(other.destination.id);
+
+    // No wait to observe: it simply completes while A still holds its own row.
+    await second.insert.result;
+    await expect(second.done).resolves.toBe("committed");
 
     first.commit();
     await first.done;
@@ -284,7 +317,9 @@ describe("two overlapping transactions cannot both queue a waiting test", () => 
       destinationId,
     );
 
-    await insertOnB();
+    const second = await insertOnBInItsOwnTransaction();
+    await second.insert.result;
+    await expect(second.done).resolves.toBe("committed");
 
     expect(await pendingTests()).toBe(1);
     expect(
