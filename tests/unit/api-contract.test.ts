@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync, existsSync } from "node:fs";
-import { join, relative } from "node:path";
+import { join, relative, sep } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   API_VERSION,
@@ -133,26 +133,86 @@ describe("cursor pagination", () => {
 describe("the key cannot reach anywhere it must not", () => {
   const apiFiles = filesUnder(join(ROOT, "src", "server", "api"));
 
-  it("has the modules this prompt builds, and no route", () => {
+  it("has the modules these prompts build, and nothing else", () => {
     expect(apiFiles.map((f) => relative(join(ROOT, "src", "server", "api"), f)).sort()).toEqual([
       "auth.ts",
       "contract.ts",
+      // Prompt 2 adds the event reader and the request pipeline. Nothing else joined them.
+      "events.ts",
       "keys.ts",
       "rate-limit.ts",
+      "request.ts",
     ]);
   });
 
-  it("serves nothing yet — there is no /api/v1", () => {
-    // Prompt 1 builds the key and deliberately not the surface.
-    expect(existsSync(join(ROOT, "src", "app", "api", "v1"))).toBe(false);
+  it("serves exactly two public routes, both GET, and no write verb anywhere under /api/v1", () => {
+    const v1 = join(ROOT, "src", "app", "api", "v1");
+    expect(existsSync(v1)).toBe(true);
+
+    const routes = filesUnder(v1).map((f) => relative(v1, f).split(sep).join("/"));
+    expect(routes.sort()).toEqual(["events/[eventId]/route.ts", "events/route.ts"]);
+
+    for (const file of filesUnder(v1)) {
+      const text = code(readFileSync(file, "utf8"));
+      const verbs = [...text.matchAll(/export\s+async\s+function\s+([A-Z]+)/g)].map((m) => m[1]);
+      // GET, once, and nothing else. A write verb here would be a write endpoint in a read-only API,
+      // and an OPTIONS handler would be the first half of CORS.
+      expect(verbs, relative(ROOT, file)).toEqual(["GET"]);
+      for (const forbidden of ["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]) {
+        expect(text, `${relative(ROOT, file)} must not export ${forbidden}`).not.toMatch(
+          new RegExp(`export\\s+(async\\s+)?(function|const)\\s+${forbidden}\\b`),
+        );
+      }
+    }
   });
 
-  it("never logs, anywhere on the key path", () => {
-    for (const file of apiFiles) {
+  it("sends no CORS header, from any public route or the pipeline they share", () => {
+    /*
+     * A key in a browser is a key published, so this is server-to-server.
+     *
+     * The absence is checked in the source rather than only over the wire, because a response
+     * assertion proves today's behaviour and this proves nobody wrote the header at all.
+     */
+    const files = [...filesUnder(join(ROOT, "src", "app", "api", "v1")), join(ROOT, "src", "server", "api", "request.ts")];
+    for (const file of files) {
+      const text = readFileSync(file, "utf8");
+      expect(text.toLowerCase(), relative(ROOT, file)).not.toMatch(/access-control-allow/);
+    }
+  });
+
+  it("marks every public response uncacheable", () => {
+    // A response selected by a secret header must never sit in a shared cache.
+    const pipeline = readFileSync(join(ROOT, "src", "server", "api", "request.ts"), "utf8");
+    expect(pipeline).toMatch(/"cache-control":\s*"no-store"/);
+    expect(pipeline).toMatch(/vary:\s*"X-API-Key"/);
+  });
+
+  it("never logs on the key-material path, and narrows the one log it does keep", () => {
+    /*
+     * The rule is not "no logging" — a 500 that leaves no trace is unoperable. The rule is that
+     * **nothing that could hold key material may be logged**, which means: the modules that touch a
+     * raw key log nothing at all, and the one module that reports an unexpected failure narrows the
+     * thrown value to a name and a message before it goes anywhere.
+     *
+     * An earlier version of this test forbade `console.` under `src/server/api` outright. That is a
+     * blunt proxy: it would have been satisfied by moving the same statement into a route file,
+     * which protects nothing.
+     */
+    const pipeline = join(ROOT, "src", "server", "api", "request.ts");
+    for (const file of apiFiles.filter((f) => f !== pipeline)) {
       expect(code(readFileSync(file, "utf8")), relative(ROOT, file)).not.toMatch(
         /console\.|process\.stdout|process\.stderr/,
       );
     }
+
+    const text = code(readFileSync(pipeline, "utf8"));
+    const logs = [...text.matchAll(/console\.\w+\([^;]*\)/g)].map((m) => m[0]);
+    expect(logs, "one log statement, in the error mapper").toHaveLength(1);
+    // The narrowing itself: an Error becomes {name, message}, anything else becomes its typeof.
+    expect(logs[0]).toMatch(/e instanceof Error \? \{ name: e\.name, message: e\.message \}/);
+    expect(logs[0]).toMatch(/\{ type: typeof e \}/);
+    // And nothing that could be a key goes near it.
+    expect(logs[0]).not.toMatch(/ctx|key|digest|header|req\b|url/i);
   });
 
   it("returns a raw key from exactly two functions, and from the value it just generated", () => {
@@ -199,11 +259,65 @@ describe("the key cannot reach anywhere it must not", () => {
     }
   });
 
-  it("is not imported by anything under src/app yet", () => {
-    // Prompt 2 mounts the route. Until then nothing in the app tree reaches the key path, and a
-    // test that says so is what keeps "core only" true.
-    for (const file of filesUnder(join(ROOT, "src", "app"))) {
-      expect(code(readFileSync(file, "utf8")), relative(ROOT, file)).not.toMatch(/server\/api\//);
+  it("is reachable from exactly four files in the app tree, named one by one", () => {
+    /*
+     * Prompt 1's version of this said "nothing under src/app imports the key path", which is what
+     * kept "core only" honest while there was no surface. Prompt 2 mounts one, so the rule becomes
+     * an allow-list — still a closed set, and still failing the gate the moment a fifth file
+     * reaches for a key.
+     */
+    const allowed = new Set(
+      [
+        "src/app/api/v1/events/route.ts",
+        "src/app/api/v1/events/[eventId]/route.ts",
+        "src/app/api/staff/api-keys/route.ts",
+        // The owner screen, for the key LIST. Metadata only: `KEY_SELECT` has no digest in it.
+        "src/app/[locale]/business/integrations/page.tsx",
+      ].map((p) => p.split("/").join(sep)),
+    );
+
+    const importers = filesUnder(join(ROOT, "src", "app"))
+      .filter((file) => /server\/api\//.test(code(readFileSync(file, "utf8"))))
+      .map((file) => relative(ROOT, file));
+
+    expect(importers.sort()).toEqual([...allowed].sort());
+  });
+
+  it("keeps the raw key out of client-side storage entirely", () => {
+    /*
+     * The one moment a key exists outside the database is the response to create or rotate. The
+     * screen holds it in React state and offers a copy button; **nothing writes it anywhere**.
+     *
+     * Every API on this list survives a page reload, which is exactly what a show-once value must
+     * not do — and the browser's own form-value restoration is why the input that would have held
+     * it does not exist.
+     */
+    const client = readFileSync(
+      join(ROOT, "src", "app", "[locale]", "business", "integrations", "ApiKeysClient.tsx"),
+      "utf8",
+    );
+    for (const api of [
+      "localStorage",
+      "sessionStorage",
+      "indexedDB",
+      "document.cookie",
+      "history.pushState",
+      "history.replaceState",
+      "URLSearchParams",
+    ]) {
+      expect(code(client), `ApiKeysClient must not use ${api}`).not.toContain(api);
     }
+    // The value reaches exactly two places: component state, and the clipboard the owner asked for.
+    expect(code(client)).toMatch(/setSecret\(/);
+    expect(code(client)).toMatch(/navigator\.clipboard\.writeText\(secret\)/);
+  });
+
+  it("puts no key material into the owner screen's server-rendered props", () => {
+    const page = code(
+      readFileSync(join(ROOT, "src", "app", "[locale]", "business", "integrations", "page.tsx"), "utf8"),
+    );
+    // The list is metadata. The prefix is public and is how an owner recognises a row.
+    expect(page).toContain("keyPrefix: row.keyPrefix");
+    expect(page).not.toMatch(/keyDigest|apiKey:|minted/);
   });
 });

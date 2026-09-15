@@ -596,9 +596,24 @@ describe("ordinary session authentication is unchanged", () => {
     expect((await enroll.POST()).status).toBe(410);
   });
 
-  it("has added no public API route", async () => {
-    // Prompt 1 builds the key and deliberately not the surface.
-    const { existsSync } = await import("node:fs");
-    expect(existsSync("src/app/api/v1")).toBe(false);
+  it("has added exactly one public surface, and it is read-only", async () => {
+    /*
+     * Prompt 1's version of this asserted that `src/app/api/v1` did not exist, which was the right
+     * assertion while the key had nothing to open. Prompt 2 mounts the surface, so the claim becomes
+     * a bound on it: two GET routes, and no verb that could write.
+     *
+     * `tests/unit/api-contract.test.ts` holds the same bound by reading the source; this one holds it
+     * by importing the modules, so a handler added at runtime rather than in a file would still be
+     * caught.
+     */
+    const list = await import("@/app/api/v1/events/route");
+    const single = await import("@/app/api/v1/events/[eventId]/route");
+    for (const mod of [list, single]) {
+      expect(Object.keys(mod).sort()).toEqual(["GET", "dynamic"]);
+    }
+
+    const { readdirSync } = await import("node:fs");
+    // One resource under /api/v1, and it is `events`.
+    expect(readdirSync("src/app/api/v1")).toEqual(["events"]);
   });
 });

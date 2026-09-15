@@ -6,7 +6,9 @@ import { getCurrentUserId } from "@/server/auth/session";
 import { isAppError } from "@/server/errors";
 import { listIntegrationEvents } from "@/server/integrations/events";
 import { listDestinations, webhooksConfigured } from "@/server/integrations/webhooks/destinations";
+import { KEY_TTL_DAYS, listKeys, MAX_ACTIVE_KEYS_PER_BUSINESS } from "@/server/api/keys";
 import { resolveScannerContext } from "@/server/tenant/scanner-context";
+import ApiKeysClient, { type ApiKeyRow } from "./ApiKeysClient";
 import WebhooksClient, { type DestinationRow } from "./WebhooksClient";
 
 /**
@@ -21,10 +23,19 @@ import WebhooksClient, { type DestinationRow } from "./WebhooksClient";
  * on it is how a product comes to be described as integrated with things it has never contacted.
  * `docs/INTEGRATIONS-CAPABILITY-MATRIX.md` §0.
  *
- * Since Prompt 2 the page has a second half: **custom webhook destinations**, which are the one
- * outbound capability the product has. That half is **owner only** — stricter than the event
- * history above it, because a destination is a standing instruction to send this business's
+ * Since Phase 3B Prompt 2 the page has a second half: **custom webhook destinations**, which are
+ * the one outbound capability the product has. That half is **owner only** — stricter than the
+ * event history above it, because a destination is a standing instruction to send this business's
  * activity to a third party, and a manager should not be able to arrange one.
+ *
+ * Phase 3B.1 Prompt 2 adds a third: **public API keys**, the one INBOUND capability. Owner only for
+ * the same reason and then some — a key is unattended read access to this history, valid for ninety
+ * days, usable by anyone holding it.
+ *
+ * The three sections belong on one screen because they are one subject: what reaches this business
+ * from outside, and what leaves it. Putting keys on their own page would have meant a new sidebar
+ * entry, and the sidebar does not filter by role — so it would have advertised an owner-only screen
+ * to every cashier.
  *
  * The event history is rendered on the server with no client component. Every value shown is an
  * internal id, a type or a time — the table has no column that could hold anything else.
@@ -74,6 +85,28 @@ export default async function IntegrationsPage({ params }: { params: Promise<{ l
         delivered: row.delivered,
         failed: row.failed,
         lastErrorClass: row.lastErrorClass,
+      }))
+    : [];
+
+  /*
+   * The owner's API keys.
+   *
+   * `listKeys` refuses a manager, so this is guarded by the same `isOwner` as the destinations
+   * above rather than being allowed to throw. Every field here is metadata: a name, the PUBLIC
+   * prefix, a state and three dates. **The digest is not in `KEY_SELECT` and the raw value is not
+   * stored**, so there is nothing on this path that could carry a secret to the browser.
+   */
+  const apiKeys: ApiKeyRow[] = isOwner
+    ? (await listKeys(ctx)).map((row) => ({
+        id: row.id,
+        name: row.name,
+        keyPrefix: row.keyPrefix,
+        state: row.state,
+        issuedAt: row.issuedAt.toISOString(),
+        expiresAt: row.expiresAt.toISOString(),
+        revokedAt: row.revokedAt?.toISOString() ?? null,
+        lastUsedAt: row.lastUsedAt?.toISOString() ?? null,
+        usable: row.usable,
       }))
     : [];
 
@@ -131,6 +164,15 @@ export default async function IntegrationsPage({ params }: { params: Promise<{ l
 
         {isOwner ? (
           <WebhooksClient businessId={ctx.businessId} destinations={destinations} configured={webhooksConfigured()} />
+        ) : null}
+
+        {isOwner ? (
+          <ApiKeysClient
+            businessId={ctx.businessId}
+            keys={apiKeys}
+            maxActive={MAX_ACTIVE_KEYS_PER_BUSINESS}
+            ttlDays={KEY_TTL_DAYS}
+          />
         ) : null}
 
         <p className="text-xs text-slate-500">{t("roadmap")}</p>
