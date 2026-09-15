@@ -27,8 +27,9 @@ import {
   rotateKey,
 } from "@/server/api/keys";
 import { consumeApiRateLimit } from "@/server/api/rate-limit";
-import { MembershipRole } from "@prisma/client";
-import { ForbiddenError } from "@/server/errors";
+import { ApiKeyState, MembershipRole } from "@prisma/client";
+import { AuditAction } from "@/server/audit/audit";
+import { ConflictCode, ConflictError, ForbiddenError } from "@/server/errors";
 import {
   createStampCafe,
   migratorPrisma,
@@ -46,6 +47,55 @@ import {
  */
 
 const DAY = 24 * 60 * 60 * 1000;
+
+/**
+ * Age a key in the database, behind the guard.
+ *
+ * `api_key_guard` refuses a change to `issuedAt` or `expiresAt` from anybody, which is the point of
+ * it — so ageing one is a migrator act with the trigger off, not something a service can do. Both
+ * timestamps move together because `ApiKey_expires_after_issue` is a table CHECK and stays on.
+ */
+async function ageKey(id: string, alsoSet = ""): Promise<void> {
+  await migratorPrisma().$executeRawUnsafe('ALTER TABLE "ApiKey" DISABLE TRIGGER api_key_guard');
+  try {
+    await migratorPrisma().$executeRawUnsafe(
+      `UPDATE "ApiKey" SET "issuedAt" = now() - interval '100 days',
+         "expiresAt" = now() - interval '1 day'${alsoSet} WHERE "id" = $1::text`,
+      id,
+    );
+  } finally {
+    await migratorPrisma().$executeRawUnsafe('ALTER TABLE "ApiKey" ENABLE TRIGGER api_key_guard');
+  }
+}
+
+/** Past its expiry AND swept: the terminal state. The slot goes, as `ApiKey_slot_iff_active` demands. */
+const expireKey = (id: string) => ageKey(id, `, "state" = 'EXPIRED', "activeSlot" = NULL`);
+
+/**
+ * Past its expiry but NOT swept: `state` is still ACTIVE and the slot is still held.
+ *
+ * This is the ordinary condition of a lapsed key rather than a contrived one — the sweep runs only
+ * when a key is issued, so a business that stops issuing leaves its lapsed keys exactly here.
+ */
+const lapseKey = (id: string) => ageKey(id);
+
+/** Every audit action recorded about one key, oldest first. */
+async function auditFor(keyId: string): Promise<string[]> {
+  const rows = await migratorPrisma().auditLog.findMany({
+    where: { entityType: "ApiKey", entityId: keyId },
+    orderBy: { createdAt: "asc" },
+    select: { action: true },
+  });
+  return rows.map((r) => r.action);
+}
+
+/** The row as the database holds it — not as a view chooses to present it. */
+async function storedKey(id: string) {
+  return migratorPrisma().apiKey.findFirstOrThrow({
+    where: { id },
+    select: { state: true, revokedAt: true, activeSlot: true },
+  });
+}
 
 let cafe: StampCafeFixture;
 
@@ -154,6 +204,8 @@ describe("revoking and rotating", () => {
     expect(revoked.usable).toBe(false);
     expect(revoked.revokedAt).not.toBeNull();
     await expect(revokeKey(cafe.ctx, created.key.id)).rejects.toThrow(/already revoked/);
+    // One revocation, one audit row. The refused second attempt adds nothing.
+    expect(await auditFor(created.key.id)).toEqual([AuditAction.API_KEY_CREATED, AuditAction.API_KEY_REVOKED]);
   });
 
   it("rotates to a new value and kills the old one in the same breath", async () => {
@@ -179,6 +231,117 @@ describe("revoking and rotating", () => {
     const created = await createKey(cafe.ctx, { name: "Gone" });
     await revokeKey(cafe.ctx, created.key.id);
     await expect(rotateKey(cafe.ctx, created.key.id, "Again")).rejects.toThrow(/only an active key/i);
+  });
+
+  it("refuses an EXPIRED key the same way, and changes nothing doing it", async () => {
+    /*
+     * The regression this exists for.
+     *
+     * `revokeKey` used to guard only against REVOKED. An EXPIRED key walked past that clause into
+     * the UPDATE and was stopped by `api_key_guard` as a rest-state transition — a raw database
+     * error in the place a controlled conflict was intended. Both rest states are terminal, so both
+     * produce the same conflict, and neither writes anything.
+     */
+    const created = await createKey(cafe.ctx, { name: "Lapsed and swept" });
+    await expireKey(created.key.id);
+    const before = await auditFor(created.key.id);
+
+    const error = await revokeKey(cafe.ctx, created.key.id).catch((e: unknown) => e);
+    // A conflict, not a database message: the trigger error would be a 500 on the owner route in
+    // Prompt 2, carrying PostgreSQL's own words to whoever read it.
+    expect(error).toBeInstanceOf(ConflictError);
+    expect((error as ConflictError).code).toBe(ConflictCode.API_KEY_NOT_ACTIVE);
+    expect((error as ConflictError).status).toBe(409);
+    expect((error as ConflictError).message).toMatch(/expired/i);
+    expect((error as ConflictError).message).not.toMatch(/rest state|check_violation|ApiKey:/);
+
+    // Nothing moved: not the state, not the revocation stamp, not the slot.
+    expect(await storedKey(created.key.id)).toEqual({
+      state: ApiKeyState.EXPIRED,
+      revokedAt: null,
+      activeSlot: null,
+    });
+    // And no audit row, because a refused action is not an action.
+    expect(await auditFor(created.key.id)).toEqual(before);
+    expect(before).not.toContain(AuditAction.API_KEY_REVOKED);
+
+    // The caller-facing answer is untouched by any of this: still refused, still one sentence.
+    await expect(authenticateApiKey(created.apiKey)).resolves.toMatchObject({ ok: false, reason: "EXPIRED" });
+    expect(JSON.stringify(apiUnauthorized())).not.toMatch(/revoked|expired|unknown|malformed|missing/i);
+  });
+
+  it("revokes a key whose expiry has passed but whose state is still ACTIVE", async () => {
+    /*
+     * The stated behaviour for the in-between state, and why it is that way.
+     *
+     * The sweep to EXPIRED is lazy, so a lapsed key keeps `state = ACTIVE` until this business
+     * issues another. `revokeKey` decides on `state` alone — the same column `api_key_guard`
+     * decides on — so it accepts this one. That is useful rather than merely permitted: it releases
+     * the slot, and it records that the owner ended the key rather than let it run out.
+     *
+     * Access does not turn on it. The key was already refused before this call and is still refused
+     * after, because `authenticateApiKey` reads `expiresAt` and does not trust `state`.
+     */
+    const created = await createKey(cafe.ctx, { name: "Lapsed, unswept" });
+    await lapseKey(created.key.id);
+
+    expect(await storedKey(created.key.id)).toMatchObject({ state: ApiKeyState.ACTIVE });
+    await expect(authenticateApiKey(created.apiKey)).resolves.toMatchObject({ ok: false, reason: "EXPIRED" });
+
+    const revoked = await revokeKey(cafe.ctx, created.key.id);
+    expect(revoked.state).toBe(ApiKeyState.REVOKED);
+    // `usable` was already false on the clock; now it is false on the state as well.
+    expect(revoked.usable).toBe(false);
+    expect(revoked.revokedAt).not.toBeNull();
+
+    const stored = await storedKey(created.key.id);
+    expect(stored.state).toBe(ApiKeyState.REVOKED);
+    expect(stored.activeSlot).toBeNull();
+    expect(await auditFor(created.key.id)).toEqual([AuditAction.API_KEY_CREATED, AuditAction.API_KEY_REVOKED]);
+
+    // Refused before, refused after, and the wire answer never said which.
+    await expect(authenticateApiKey(created.apiKey)).resolves.toMatchObject({ ok: false, reason: "REVOKED" });
+    expect(JSON.stringify(apiUnauthorized())).not.toMatch(/revoked|expired|unknown|malformed|missing/i);
+
+    // Terminal once it lands there: a second attempt is the conflict, not a second audit row.
+    await expect(revokeKey(cafe.ctx, created.key.id)).rejects.toThrow(/already revoked/);
+    expect(await auditFor(created.key.id)).toHaveLength(2);
+  });
+
+  it("stops accepting the revocation once the lazy sweep has run", async () => {
+    /*
+     * The documented wrinkle, tested rather than smoothed over: which sentence an owner reads for a
+     * lapsed key depends on whether anything has issued a key since. Nothing security-relevant
+     * differs — the key is unusable either way and its slot is free either way — but the product
+     * says so out loud instead of pretending the two paths are identical.
+     */
+    const lapsed = await createKey(cafe.ctx, { name: "Lapsed" });
+    await lapseKey(lapsed.key.id);
+
+    // Issuing anything sweeps it. Issuing is the only thing that does.
+    await createKey(cafe.ctx, { name: "The sweep" });
+    expect(await storedKey(lapsed.key.id)).toEqual({
+      state: ApiKeyState.EXPIRED,
+      revokedAt: null,
+      activeSlot: null,
+    });
+
+    const error = await revokeKey(cafe.ctx, lapsed.key.id).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ConflictError);
+    expect((error as ConflictError).code).toBe(ConflictCode.API_KEY_NOT_ACTIVE);
+    expect((error as ConflictError).message).toMatch(/expired/i);
+    expect(await auditFor(lapsed.key.id)).toEqual([AuditAction.API_KEY_CREATED]);
+  });
+
+  it("refuses to rotate an EXPIRED key, with the same conflict and no successor", async () => {
+    const created = await createKey(cafe.ctx, { name: "Too late" });
+    await expireKey(created.key.id);
+
+    const error = await rotateKey(cafe.ctx, created.key.id, "Successor").catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ConflictError);
+    expect((error as ConflictError).code).toBe(ConflictCode.API_KEY_NOT_ACTIVE);
+    // And nothing was minted on the way to that refusal.
+    expect((await listKeys(cafe.ctx)).map((k) => k.name)).toEqual(["Too late"]);
   });
 
   it("frees the ceiling when a key is revoked", async () => {
@@ -209,17 +372,9 @@ describe("X-API-Key authentication tells a caller nothing", () => {
     const revoked = await createKey(cafe.ctx, { name: "Revoked" });
     await revokeKey(cafe.ctx, revoked.key.id);
 
+    // Lapsed but unswept, deliberately: `expiresAt` is the authority, not the bookkeeping state.
     const expired = await createKey(cafe.ctx, { name: "Expired" });
-    await migratorPrisma().$executeRawUnsafe('ALTER TABLE "ApiKey" DISABLE TRIGGER api_key_guard');
-    try {
-      await migratorPrisma().$executeRawUnsafe(
-        `UPDATE "ApiKey" SET "issuedAt" = now() - interval '100 days', "expiresAt" = now() - interval '1 day'
-          WHERE "id" = $1::text`,
-        expired.key.id,
-      );
-    } finally {
-      await migratorPrisma().$executeRawUnsafe('ALTER TABLE "ApiKey" ENABLE TRIGGER api_key_guard');
-    }
+    await lapseKey(expired.key.id);
 
     const cases: [string, string | null, string][] = [
       ["missing", null, "MISSING"],

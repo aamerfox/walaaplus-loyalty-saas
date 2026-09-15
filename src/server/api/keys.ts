@@ -243,7 +243,15 @@ async function issue(
             where: { id: rotatedFromId, businessId: ctx.businessId, state: ApiKeyState.ACTIVE },
             data: { state: ApiKeyState.REVOKED, activeSlot: null },
           });
-          if (revoked.count === 0) throw new NotFoundError("API key not found");
+          /*
+           * Zero rows means the predecessor stopped being ACTIVE between `rotateKey`'s check and
+           * this statement - revoked or swept concurrently. It is NOT "no such key": `rotateKey`
+           * established that it exists and belongs to this business, and answering not-found would
+           * tell the owner something untrue about a row they can see.
+           */
+          if (revoked.count === 0) {
+            throw new ConflictError("Only an active key can be rotated", ConflictCode.API_KEY_NOT_ACTIVE);
+          }
         }
 
         const row = await tx.apiKey.create({
@@ -327,7 +335,55 @@ export async function rotateKey(ctx: TenantContext, keyId: string, name: string)
   return issue(ctx, parsed.data.name, existing.id);
 }
 
-/** End a key now. Exactly once: the trigger refuses a second revocation. */
+/**
+ * The refusal for a key that is already past acting on.
+ *
+ * One conflict code for both terminal states, and a sentence saying which one applies. The code is
+ * what a screen branches on; the sentence is what a person reads, and telling an owner a key is
+ * "already revoked" when it quietly lapsed would be a small untruth in the one place they look to
+ * find out what happened to it.
+ */
+function terminalStateConflict(state: ApiKeyState): ConflictError {
+  return new ConflictError(
+    state === ApiKeyState.REVOKED ? "That key is already revoked" : "That key has expired",
+    ConflictCode.API_KEY_NOT_ACTIVE,
+  );
+}
+
+/**
+ * End a key now.
+ *
+ * ## Both rest states are terminal
+ *
+ * `api_key_guard` lets ACTIVE become EXPIRED or REVOKED and permits no state change after that, so
+ * EXPIRED is exactly as final as REVOKED. An earlier version of this function guarded only against
+ * REVOKED: an EXPIRED key passed the guard clause, reached the UPDATE, and was refused by the
+ * trigger as a rest-state transition — an unhandled database error in the place a controlled
+ * conflict was intended, which would surface as a 500 through the owner route in Prompt 2.
+ *
+ * The rule it now follows is worth naming, because it generalises: **the service refuses exactly
+ * what the database would refuse, before the database has to.** A service that refuses less than
+ * its triggers do is a service whose error messages are chosen by PostgreSQL.
+ *
+ * ## A key whose expiry has passed but whose state is still ACTIVE
+ *
+ * That combination is reachable and normal. The sweep to EXPIRED is lazy — `releaseExpiredSlots`
+ * runs only when a key is issued — so a lapsed key keeps `state = ACTIVE` until this business
+ * creates another one.
+ *
+ * **Such a key may be revoked**, deliberately. The decision is made on `state` alone, the same
+ * column the trigger decides on, so the service and the database never disagree. It also does
+ * something worth doing: it releases the slot, which otherwise stays held until an issue sweeps it,
+ * and it records that the owner chose to end this key rather than merely letting it run out.
+ *
+ * Nothing about access turns on it either way. `authenticateApiKey` reads `expiresAt` directly
+ * rather than trusting `state`, so a lapsed key was already refused before this ran and is still
+ * refused after — and refused with the same generic answer, which does not change here.
+ *
+ * The wrinkle, stated rather than smoothed over: whether a lapsed key answers "revoked" or "that
+ * key has expired" depends on whether the sweep has run for that business yet. Both outcomes leave
+ * the key unusable and its slot free; only the sentence the owner reads differs.
+ */
 export async function revokeKey(ctx: TenantContext, keyId: string): Promise<ApiKeyView> {
   requireApiKeyOwner(ctx);
   const now = new Date();
@@ -337,19 +393,30 @@ export async function revokeKey(ctx: TenantContext, keyId: string): Promise<ApiK
     select: { id: true, state: true },
   });
   if (!existing) throw new NotFoundError("API key not found");
-  if (existing.state === ApiKeyState.REVOKED) {
-    throw new ConflictError("That key is already revoked", ConflictCode.API_KEY_NOT_ACTIVE);
-  }
+  // Not `=== REVOKED`. EXPIRED is terminal too, and carrying one to the UPDATE is how a trigger
+  // error escapes in place of a conflict. Nothing is written and no audit row is recorded.
+  if (existing.state !== ApiKeyState.ACTIVE) throw terminalStateConflict(existing.state);
 
   return prisma.$transaction(async (tx) => {
     const moved = await tx.apiKey.updateMany({
-      // The state in the WHERE, so two concurrent revocations cannot both succeed: the second
-      // matches zero rows.
-      where: { id: existing.id, businessId: ctx.businessId, state: { not: ApiKeyState.REVOKED } },
+      /*
+       * `state: ACTIVE` in the WHERE, matching the guard clause above.
+       *
+       * It closes two gaps at once: two concurrent revocations cannot both succeed, and a key swept
+       * to EXPIRED between the read and this statement matches zero rows instead of reaching the
+       * trigger. Either way the caller gets the conflict, never a database message.
+       */
+      where: { id: existing.id, businessId: ctx.businessId, state: ApiKeyState.ACTIVE },
       data: { state: ApiKeyState.REVOKED, activeSlot: null },
     });
     if (moved.count === 0) {
-      throw new ConflictError("That key is already revoked", ConflictCode.API_KEY_NOT_ACTIVE);
+      // It left ACTIVE between the two statements. Report the state it actually reached; the
+      // transaction rolls back, so no audit row survives this path either.
+      const current = await tx.apiKey.findFirstOrThrow({
+        where: { id: existing.id },
+        select: { state: true },
+      });
+      throw terminalStateConflict(current.state);
     }
 
     await recordAudit(tx, {
