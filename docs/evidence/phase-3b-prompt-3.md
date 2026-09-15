@@ -587,27 +587,53 @@ HAVING count(*) > 1;
 Staging: Freebuff reports no destinations created, so there can be no deliveries — the query is the
 confirmation to run before applying 17, not a conclusion to carry.
 
-### 15.5 The real proof
+### 15.5 The real proof, and the two near-misses on the way to it
 
-`tests/integration/webhook-pending-test-concurrency.test.ts` uses **two `PrismaClient` instances**,
-so two connection pools, and holds the first transaction open:
+`tests/integration/webhook-pending-test-concurrency.test.ts` took three attempts, and the first two
+are worth recording because both **passed** while proving nothing.
+
+*Attempt one* replaced the `Promise.all` with two `PrismaClient` instances and inferred "B blocked"
+from a fixed 750 ms sleep. A fresh client's first query includes connecting and starting a query
+engine, and that alone outlasted the sleep: B was still connecting, A committed, and the **trigger**
+then refused B with `check_violation`. The blocking assertion was satisfied with B never having
+reached the index.
+
+*Attempt two* replaced the sleep with `SELECT count(*) FROM pg_locks WHERE NOT granted`. That proves
+**some** backend somewhere is waiting — not that B is, and not that B is waiting on A. Any unrelated
+wait in the database would have satisfied it.
+
+*What is committed* binds the claim to B's own backend process and infers nothing from elapsed time:
 
 1. A opens an interactive transaction and inserts a waiting test — uncommitted;
-2. B, on its own pool, attempts the same insert — the test asserts it is **still unsettled** after a
-   deliberate pause, which is the assertion the old test could never make;
-3. A commits — B is refused with a unique violation naming the index;
-4. and the mirror: if A **rolls back**, B is allowed through, because the rule is "one waiting test",
-   not "one attempt ever".
+2. **B opens its own interactive transaction**, which pins one backend, and reads
+   `pg_backend_pid()` **inside** it before submitting anything;
+3. B submits its INSERT;
+4. the **migrator** connection — a third backend, not in the race — polls `pg_locks` for **that
+   exact PID** with `granted = false` and requires a **`transactionid`** wait, which is what an
+   inserter blocked on another transaction's uncommitted index entry waits on. It polls until B is
+   demonstrably waiting or fails saying which backend never waited. No sleeps, no global counts;
+5. with B confirmed waiting, its INSERT must still be unsettled;
+6. A commits — B is refused with **23505**, `Key ("destinationId")=…`, and explicitly **not** the
+   trigger's sentence. One column in the key identifies which index fired: the other partial unique
+   index on this table names two;
+7. and the mirror: if A **rolls back**, B **succeeds** and commits.
 
 Plus: two different destinations do not serialize against each other, and a destination stops being
 constrained once its waiting test settles.
 
+**Red proof.** Dropping *only* the partial unique index — the trigger verified still present —
+fails it with `backend 276 never waited on a lock: nothing is serializing these inserts`, and the
+duplicate goes through. That is the original defect reproduced by name. Restored: 4/4.
+
 ### 15.6 Status
 
-**Written and reviewed, not yet verified.** Docker Desktop is down on this machine and both
-databases live inside it, so the preflight, migration 17, the concurrency test, its red proof, the
-integration suite, the gate and Playwright have not run. TypeScript, ESLint, `prisma validate` and
-the 616 unit tests pass.
+**Verified.** Preflight: 0 duplicates in the development database (0 destinations) and a freshly
+recreated test database. The blocker itself was exercised against two planted duplicates - it
+raised with the exact query and left 4 rows as 4 rows with no index created. Migration 17 applies
+cleanly from scratch, lock and all.
 
-No replacement SHA is offered and nothing is pushed until those are green. `docs/PHASE-3B-RELEASE-GATE.md`
-§7 lists exactly what is outstanding.
+Concurrency proof 4/4 bound to B's backend PID; red proof fails by name when only the index is
+dropped. Release-gate suite 11/11. Gate 16/16. Playwright 122 passed, twice. `migrate status` 17/17,
+`migrate diff` unchanged, migrations 15 and 16 byte-for-byte untouched, audit and scans clean.
+
+`docs/PHASE-3B-RELEASE-GATE.md` §7 carries the full table.

@@ -248,8 +248,22 @@ HAVING count(*) > 1;
 
 | Environment | Result |
 |---|---|
-| Local development and test databases | **Not yet inspected.** Docker Desktop is down on this machine and both databases live in it — see §7 |
+| Local **development** database | **0 duplicates**, and 0 destinations at all — so no deliveries exist to be duplicated |
+| Local **test** database | recreated; all 17 migrations applied cleanly, index built |
 | Staging | **Not run by me, and not assumed.** Freebuff reports no destinations created, so there can be no deliveries; the query above is the confirmation to run before applying 17, not a conclusion to carry |
+
+The blocker itself was also exercised rather than trusted. Two duplicate waiting tests were planted
+in the test database, the index dropped, and the migration's lock + preflight + index run as one
+transaction:
+
+```
+ERROR:  Migration 17 blocked: 1 destination(s) already hold more than one PENDING test delivery.
+DETAIL: The partial unique index this migration creates cannot be built while they exist.
+HINT:   Run: SELECT "destinationId", count(*) FROM "WebhookDelivery" WHERE "isTest" AND ...
+```
+
+Rows before: 4. Rows after: 4. Index: absent. It refused and **changed nothing** — which is the
+claim that mattered.
 
 Zero rows means migration 17 applies cleanly. Anything else is a human decision about those
 deliveries — let them settle through the ordinary retry path, or settle them deliberately — followed
@@ -263,11 +277,22 @@ genuinely saw the first's committed row. The test demonstrated **sequential** re
 concurrency safety. A test that cannot fail for the reason you care about is not evidence about that
 reason.
 
-`tests/integration/webhook-pending-test-concurrency.test.ts` replaces it with two `PrismaClient`
-instances — two pools — and holds the first transaction open on purpose: it asserts the second insert
-is **still unsettled** while the first is uncommitted, then refused with a unique violation naming
-the index once the first commits, then allowed through if the first rolls back instead. Removing the
-index must make it fail; that red proof is part of §7's outstanding work.
+`tests/integration/webhook-pending-test-concurrency.test.ts` replaces it, and took two further
+attempts to become a proof rather than a passing test:
+
+- inferring "blocked" from a **fixed sleep** was satisfied by a fresh client's connection setup — B
+  never reached the index and the *trigger* refused it;
+- asking `pg_locks WHERE NOT granted` **globally** proves some backend is waiting, not that B is.
+
+What is committed pins B to **one backend**: B runs in its own interactive transaction, reads
+`pg_backend_pid()` inside it before submitting, and the migrator connection polls for **that PID**
+with `granted = false`, requiring a `transactionid` wait. Then: B unsettled while waiting; **23505**
+naming `Key ("destinationId")` once A commits, explicitly not the trigger's sentence; and B
+succeeding if A rolls back instead.
+
+**Red-proved.** Dropping only the index, trigger left in place, fails it with
+`backend <pid> never waited on a lock: nothing is serializing these inserts` and lets the duplicate
+through.
 
 ### 4.4 What it does and does not touch
 
@@ -328,23 +353,25 @@ supplies staging evidence separately.
 
 ---
 
-## 7. Outstanding — why this document does not assert a verdict
+## 7. Verification of the F1 correction
 
-The F1 correction is written and reviewed but **not verified**. Docker Desktop is not running on this
-machine, its backing Windows service is stopped, and the session has no rights to start it; both the
-development and test databases live inside Docker, so nothing database-backed can run.
-
-Blocked until Docker is available:
+Docker was unavailable for part of this work and everything database-backed was held until it came
+back. It did, and all of it ran.
 
 | | |
 |---|---|
-| Duplicate preflight against the local development and test databases | §4.2 |
-| Migration 17 applying cleanly, including the preflight `DO` block | |
-| `webhook-pending-test-concurrency.test.ts` — the real overlapping-transaction proof | §4.3 |
-| Its red proof: drop the index, watch that test fail, restore | |
-| `webhook-release-gate.test.ts` and the rest of the integration suite | |
-| The full gate, and Playwright twice | |
+| Duplicate preflight, development and test databases | **0 duplicates** — §4.2 |
+| Preflight blocker, against planted duplicates | raised with the exact query; **4 rows before, 4 after**; index absent |
+| Migration 17 applying from scratch | clean, including the lock and the preflight |
+| `webhook-pending-test-concurrency.test.ts` | **4/4**, bound to B's backend PID |
+| Its red proof — drop only the index, trigger left in place | **fails**: `backend <pid> never waited on a lock`, duplicate allowed. Restored, 4/4 |
+| `webhook-release-gate.test.ts` | **11/11** |
+| Full gate | **16/16** |
+| Playwright, twice | **122 passed**, both runs |
+| `migrate status` / `migrate diff` | 17/17; diff unchanged from the pre-existing Phase 2 `ConsentRecord` naming difference |
+| Migrations 15 and 16 | byte-for-byte untouched |
+| `npm audit`, `git diff --check`, control-byte, secret and raw-capability scans | clean |
 
-Until those are green, **no replacement SHA is offered and nothing is pushed.** The corrected work
-sits in the working tree. An engineering-gate verdict asserted from a run that did not happen would
-be the same category of mistake as the one this section exists to correct.
+**This document still asserts no engineering-gate verdict.** Two claims in it were wrong on review —
+the trigger's concurrency safety, and then the global lock observation that replaced it. The verdict
+belongs to the reviewer, not to the document.
