@@ -39,6 +39,7 @@ Each fix was reverted and the suite re-run. Every one took its own tests red.
 | Reverted | Tests that failed |
 |---|---|
 | The partial name index → migration 18's unconditional form | **6** — rotation keeping its name, repeated rotation, reuse after revocation, reuse after expiry, the index-shape assertion, the runtime-role permission case |
+| Dropping `ApiKey_businessId_activeName_key` outright | **8** — the three name races, the control, both index-shape assertions, the migration replay, and the runtime-role case |
 | The row-value keyset → the OR form | **2** — the captured-SQL plan assertion and the source assertion |
 | `lastUsedAt` resolution → write every request | **2** — the timestamp test and the `xmin` row-version test |
 | The reveal's live region and focus | **1** — the browser announcement test |
@@ -77,14 +78,14 @@ that cannot fail is worse than no test, because it reads like coverage.
 
 | Check | Result |
 |---|---|
-| `node scripts/gate.mjs` | **GATE PASSED, 16/16 steps** |
+| `node scripts/gate.mjs` | **GATE PASSED, 16/16 steps, 807.0s** (re-run after the migration-19 redesign) |
 | Unit tests | **638** passed (43 files) |
-| Integration tests | **1104** passed (69 files) — up from 1086/67 |
+| Integration tests | **1111** passed (69 files) — up from 1086 at the baseline |
 | Playwright, run 1 | **137** passed |
 | Playwright, run 2 | **137** passed |
 | `npm audit --omit=dev` | 0 vulnerabilities |
 | `npm audit` (including dev) | 0 vulnerabilities |
-| Migration status | 19 migrations found; migration 19 is the only one pending anywhere |
+| Migration status | 19 applied, 0 rolled back, on a database recreated from empty after migration 19 changed |
 | `prisma migrate diff` | only the pre-existing cosmetic `ConsentRecord` FK/index naming difference from Phase 2 Prompt 2 — **no new drift**, see §4.1 |
 | `git diff --check` | clean |
 | Raw-key scan (`wpk_` shape) | no match |
@@ -117,6 +118,39 @@ the single authority for both partial indexes on this table.
 
 The gate was re-run in full after that change rather than assumed still valid, because regenerating
 the Prisma client touches every query in the product.
+
+---
+
+## 4a. Migration 19, corrected twice under review
+
+Two rounds of review found two things wrong with this migration, both in its safety story rather
+than its SQL result:
+
+1. **The locking comment was wrong.** It said `DROP INDEX` and `CREATE UNIQUE INDEX` both take
+   `ACCESS EXCLUSIVE`. `CREATE INDEX` takes `SHARE` — writers wait, readers are served. The
+   conclusion I had drawn happened to be right; the reason was not, which is the worse kind of error
+   in a comment somebody uses to decide whether a migration is safe to run.
+
+2. **The order was backwards, and the cost estimate was unfounded.** It dropped the old index before
+   building the new one, putting the blocking lock in front of the long operation — then justified
+   it with "the build is milliseconds because a business holds at most five active keys". That
+   reasoning ignores that the ceiling bounds only ACTIVE rows: retired predecessors are never
+   deleted (**D31**) and keys expire every ninety days, so the table is unbounded and the build
+   scales with it.
+
+The migration now creates `ApiKey_businessId_activeName_key` first and drops
+`ApiKey_businessId_name_key` afterwards, both in Prisma's single transaction. No duration is
+claimed; the comment requires a controlled low-traffic window and says why `CONCURRENTLY` cannot be
+used inside a transactional migration. Release gate §2.4 and §2.5.
+
+### 4a.1 The four properties proved
+
+| Property | Where |
+|---|---|
+| Old data satisfying unconditional uniqueness accepts the new partial index | `api-key-name-reuse.test.ts` — builds a realistic pre-migration table across two businesses, replays the unconditional index over it, then replays migration 19's `CREATE` |
+| Active-name uniqueness is concurrency-safe after the old index is gone | `api-key-concurrency.test.ts` — two overlapping transactions on **different slots** and the same name; B blocks on B's own PID and is refused `23505` on `("businessId", name)`. Different slots is the control that stops the slot index proving it instead |
+| Same-name rotation, and reuse after revoke or expiry | `api-key-name-reuse.test.ts` |
+| No committed window permits a duplicate ACTIVE name | `api-key-name-reuse.test.ts` — replays the swap one statement at a time and attempts the duplicate after each: refused before, refused with both indexes present, refused after |
 
 ---
 
@@ -156,6 +190,8 @@ src/server/api/events.ts                                row-value keyset, raw pa
 src/server/api/auth.ts                                  lastUsedAt resolution
 src/app/[locale]/business/integrations/ApiKeysClient.tsx  live region and focus on the reveal
 tests/e2e/api-keys-ui.spec.ts                           rotation-without-rename, name reuse, announcement
+tests/integration/api-key-concurrency.test.ts           the active-name races, with a different-slot control
+tests/integration/public-api-cursor.test.ts             a forged signature that was sometimes genuine
 docs/API-KEY-CAPABILITY-MATRIX.md                       §12.2 corrected
 docs/PUBLIC-API-V1.md                                   names, and the corrected pagination promise
 docs/PHASE-3B1-IMPLEMENTATION.md                        §3.2a, §3.3a, §3.6a, §6a

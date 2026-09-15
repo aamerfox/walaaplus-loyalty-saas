@@ -12,7 +12,7 @@ have to reconstruct.
 | File | What it owns |
 |---|---|
 | `prisma/migrations/20260924120000_api_keys/` | Migration 18: `ApiScope`, `ApiKeyState`, the `ApiKey` table, its CHECKs, its indexes, and two triggers |
-| `prisma/migrations/20260925120000_api_key_name_active_only/` | Migration 19: the name is unique among **ACTIVE** keys. Migration 18 made it unconditional, which stopped a rotation keeping its own name |
+| `prisma/migrations/20260925120000_api_key_name_active_only/` | Migration 19: `ApiKey_businessId_activeName_key`, unique among **ACTIVE** keys. Migration 18 made it unconditional, which stopped a rotation keeping its own name. Creates before it drops — see the release gate §2.4 |
 | `src/server/api/keys.ts` | Minting, the digest, the slot ceiling, create / rotate / revoke / list |
 | `src/server/api/auth.ts` | `X-API-Key` verification, the generic refusal, `ApiContext`, `touchKey` |
 | `src/server/api/contract.ts` | The envelope, error codes, the page assembler, page-size clamping. **No key material** — the signer is injected |
@@ -111,10 +111,18 @@ inserts the replacement in one transaction and the predecessor's row **stays** �
 collided with the row it was replacing, and since the screen pre-fills the current name, the default
 rotation path failed every time. Revoking a key also burned its name permanently.
 
-Migration 19 scopes it: `UNIQUE (businessId, name) WHERE state = 'ACTIVE'`. The name exists so an
-owner can tell their **live** keys apart; two retired keys sharing one confuses nobody. The new index
-is strictly weaker than the old one, so it cannot fail to build on an environment that already has
-migration 18.
+Migration 19 scopes it: `ApiKey_businessId_activeName_key`,
+`UNIQUE (businessId, name) WHERE state = 'ACTIVE'`. The name exists so an owner can tell their
+**live** keys apart; two retired keys sharing one confuses nobody. The new index is strictly weaker
+than the old one, so it cannot fail to build on an environment that already has migration 18.
+
+It **creates the replacement before dropping the original**, under a new name rather than reusing
+the old one: dropping first would put an `ACCESS EXCLUSIVE` lock in front of the index build, and
+renaming afterwards would buy nothing but another catalog lock. `CREATE INDEX` takes `SHARE` — writers
+wait, readers and therefore authentication do not — and the `ACCESS EXCLUSIVE` of the `DROP` lands
+last, on a catalog operation. Both are in one Prisma transaction, so no committed state lacks an
+active-name guarantee. Release gate §2.4 and §2.5 carry the lock table, the reason `CONCURRENTLY` is
+not used, and why no duration is claimed.
 
 ### 3.3 The order is total because it has to be
 

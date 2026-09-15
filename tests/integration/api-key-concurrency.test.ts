@@ -70,12 +70,12 @@ function insertSql(): string {
      VALUES ($1::text, $2::text, $3::text, $4::text, $5::text, 'EVENTS_READ', 'ACTIVE', $6::int, now(), now() + interval '90 days', now())`;
 }
 
-function args(slot: number): [string, string, string, string, string, number] {
+function args(slot: number, name?: string): [string, string, string, string, string, number] {
   const raw = `wpk_${randomBytes(4).toString("hex")}_${randomBytes(32).toString("base64url")}`;
   return [
     randomUUID(),
     cafe.businessId,
-    `Key ${randomUUID().slice(0, 8)}`,
+    name ?? `Key ${randomUUID().slice(0, 8)}`,
     raw.slice(0, 12),
     createHash("sha256").update(raw, "utf8").digest("hex"),
     slot,
@@ -119,7 +119,10 @@ async function waitUntilBlocked(pid: number): Promise<{ locktype: string }> {
 }
 
 /** A holds slot `slot` in an open transaction until told to finish. */
-async function holdSlotOnA(slot: number): Promise<{ commit: () => void; rollback: () => void; done: Promise<unknown> }> {
+async function holdSlotOnA(
+  slot: number,
+  name?: string,
+): Promise<{ commit: () => void; rollback: () => void; done: Promise<unknown> }> {
   let release!: (commit: boolean) => void;
   const held = new Promise<boolean>((resolve) => {
     release = resolve;
@@ -132,7 +135,7 @@ async function holdSlotOnA(slot: number): Promise<{ commit: () => void; rollback
   const done = a
     .$transaction(
       async (tx) => {
-        await tx.$executeRawUnsafe(insertSql(), ...args(slot));
+        await tx.$executeRawUnsafe(insertSql(), ...args(slot, name));
         inserted();
         if (!(await held)) throw new Error("deliberate rollback");
       },
@@ -145,7 +148,7 @@ async function holdSlotOnA(slot: number): Promise<{ commit: () => void; rollback
 }
 
 /** B tries for the same slot, in its own transaction, reporting its PID before it submits. */
-async function trySlotOnB(slot: number): Promise<{
+async function trySlotOnB(slot: number, name?: string): Promise<{
   pid: number;
   insert: { isSettled: () => boolean; result: Promise<unknown> };
   done: Promise<unknown>;
@@ -165,7 +168,7 @@ async function trySlotOnB(slot: number): Promise<{
     async (tx) => {
       const rows = await tx.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
       pidReady(Number(rows[0].pid));
-      const submitted = tx.$executeRawUnsafe(insertSql(), ...args(slot));
+      const submitted = tx.$executeRawUnsafe(insertSql(), ...args(slot, name));
       handOut({ submitted });
       await submitted;
       return "committed";
@@ -227,6 +230,96 @@ describe("two overlapping transactions cannot both take one slot", () => {
     await first.done;
     expect(await activeKeys()).toBe(2);
   }, 60_000);
+});
+
+describe("two overlapping transactions cannot both take one live NAME", () => {
+  /*
+   * Migration 19's guarantee, under real concurrency.
+   *
+   * The active-name rule used to be an unconditional unique index; migration 19 replaced it with a
+   * partial one predicated on ACTIVE. A partial unique index is still serialized by PostgreSQL —
+   * the second inserter blocks on the first's uncommitted entry — and this proves it rather than
+   * assuming it, because the whole reason the ceiling is an index and not a trigger is that a
+   * trigger reading committed rows would let both through.
+   *
+   * **The two inserts use DIFFERENT SLOTS on purpose.** Same slot would be serialized by
+   * `ApiKey_businessId_activeSlot_key`, and the test would pass while proving nothing about the
+   * name. Different slots means the only thing that can serialize them is the name index.
+   */
+  it("blocks B specifically, then refuses it from the active-name index once A commits", async () => {
+    const first = await holdSlotOnA(1, "Contested");
+    const second = await trySlotOnB(2, "Contested");
+
+    const wait = await waitUntilBlocked(second.pid);
+    expect(wait.locktype, "B is waiting, but not on another transaction").toBe("transactionid");
+    expect(second.insert.isSettled(), "B is recorded as waiting yet its INSERT already finished").toBe(false);
+
+    first.commit();
+    await first.done;
+
+    // Refused by the NAME index, named in the error. Not the slot index: the slots differ.
+    await expect(second.insert.result).rejects.toThrow(/23505/);
+    /*
+     * PostgreSQL quotes only the identifiers that need it, so the detail reads
+     * `Key ("businessId", name)=` - camelCase quoted, `name` bare. Matched as the database actually
+     * writes it, and still specific enough to distinguish this from the slot index's
+     * `("businessId", "activeSlot")`.
+     */
+    await expect(second.insert.result).rejects.toThrow(/Key \("businessId", "?name"?\)=/);
+
+    await second.done.catch(() => undefined);
+    expect(await activeKeys()).toBe(1);
+  });
+
+  it("lets B have the name if A rolls back", async () => {
+    const first = await holdSlotOnA(1, "Contested");
+    const second = await trySlotOnB(2, "Contested");
+
+    await waitUntilBlocked(second.pid);
+    first.rollback();
+    await first.done;
+
+    // A's entry never committed, so the name was never taken.
+    await expect(second.insert.result).resolves.toBeDefined();
+    await second.done;
+    expect(await activeKeys()).toBe(1);
+  });
+
+  it("does not serialize two different names against each other", async () => {
+    // The control. If this blocked, the index would be constraining more than it should and the
+    // test above would be proving something other than what it claims.
+    const first = await holdSlotOnA(1, "One");
+    const second = await trySlotOnB(2, "Two");
+
+    await expect(second.insert.result).resolves.toBeDefined();
+    first.commit();
+    await first.done;
+    await second.done;
+    expect(await activeKeys()).toBe(2);
+  });
+
+  it("stops constraining a name once the holder leaves ACTIVE, even under contention", async () => {
+    /*
+     * The other half of the partial predicate. A revoked row keeps its name but leaves the index,
+     * so a concurrent insert of that name must NOT block on it — which is exactly what makes
+     * same-name rotation work.
+     */
+    const created = await createKey(cafe.ctx, { name: "Recycled" });
+    await revokeKey(cafe.ctx, created.key.id);
+
+    const first = await holdSlotOnA(1, "Recycled");
+    // A holds an uncommitted ACTIVE "Recycled"; the revoked row is irrelevant to both.
+    const second = await trySlotOnB(2, "Recycled");
+    await waitUntilBlocked(second.pid);
+    first.commit();
+    await first.done;
+    await expect(second.insert.result).rejects.toThrow(/23505/);
+    await second.done.catch(() => undefined);
+
+    // One live "Recycled" plus the revoked predecessor.
+    expect(await activeKeys()).toBe(1);
+    expect(await migratorPrisma().apiKey.count({ where: { businessId: cafe.businessId, name: "Recycled" } })).toBe(2);
+  });
 });
 
 describe("the ceiling holds when every caller asks at once", () => {

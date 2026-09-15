@@ -39,42 +39,82 @@
 -- on existing rows, in any environment, whatever it holds. Nothing is deleted,
 -- nothing is rewritten, and no row changes.
 --
--- WHY THIS IS AN INDEX SWAP AND NOT A TRIGGER. The same reason the active-slot
+-- WHY THIS IS AN INDEX AND NOT A TRIGGER. The same reason the active-slot
 -- ceiling is an index: a trigger that SELECTs cannot exclude a concurrent
 -- transaction, because a BEFORE INSERT trigger sees only committed rows, so two
 -- simultaneous creations would each find no clash and both insert. A partial
 -- unique index IS serialized by PostgreSQL - the second inserter blocks on the
--- first's uncommitted entry and is refused when it commits. Proved directly in
--- `tests/integration/api-key-concurrency.test.ts`.
+-- first's uncommitted entry and is refused when it commits.
 --
--- LOCKING. The two statements do NOT take the same lock, and the difference is
--- worth stating precisely rather than rounding to the stronger one:
+-- ── ORDER OF THE TWO STATEMENTS ─────────────────────────────────────────────
 --
---   DROP INDEX            takes ACCESS EXCLUSIVE on "ApiKey" - blocks readers
---                         and writers alike.
---   CREATE UNIQUE INDEX   takes SHARE (this is the plain form, not
---                         CONCURRENTLY) - blocks writers, ALLOWS readers.
+-- CREATE FIRST, DROP SECOND. An earlier draft did the reverse, which put the
+-- most restrictive lock in front of the longest operation - exactly backwards.
 --
--- The operational consequence for THIS migration is nonetheless that reads and
--- writes are both blocked throughout, and the reason is the transaction rather
--- than the second statement. Prisma runs a migration file in ONE transaction,
--- and PostgreSQL holds every lock a transaction acquires until it commits. So
--- the DROP's ACCESS EXCLUSIVE is taken at the first statement and is still held
--- when the CREATE runs; the CREATE's weaker SHARE requirement is already
--- satisfied and adds nothing. From the DROP until commit, "ApiKey" is
--- unavailable to everybody.
+--   CREATE UNIQUE INDEX   takes SHARE on "ApiKey". Blocks writers; READERS ARE
+--                         SERVED THROUGHOUT. This is the statement whose cost
+--                         grows with the size of the table, and it now runs
+--                         while authentication can still read.
 --
--- That is the property the swap needs - no window in which neither index exists
--- and a duplicate live name could be inserted - and it is bought by the DROP,
--- not by the CREATE.
+--   DROP INDEX            takes ACCESS EXCLUSIVE - blocks readers and writers
+--                         alike - but it is a catalog operation on an index
+--                         that already exists, and it runs LAST, after the
+--                         replacement is built and valid.
 --
--- The cost is small here and that is why no CONCURRENTLY variant is warranted:
--- `ApiKey` holds at most five active keys per business plus their retired
--- predecessors, so the build is milliseconds. Authentication reads block for
--- that instant; nothing else in the product touches this table.
+-- Locks are held until the transaction commits, so from the DROP onwards the
+-- table is unavailable to everybody for the remainder of the transaction. That
+-- remainder is one catalog update rather than an index build, which is the
+-- whole point of this ordering.
+--
+-- UNIQUENESS IS NEVER ABSENT, not even momentarily. During the CREATE the old
+-- unconditional index still exists and still enforces a STRICTER rule; once the
+-- new index is valid both are enforcing; the DROP then removes the stricter one.
+-- Prisma runs a migration file in a single transaction, so there is no committed
+-- state in which neither index constrains an ACTIVE name. A failure at any point
+-- rolls the whole thing back to migration 18's arrangement.
+--
+-- ── WHY NOT CONCURRENTLY ────────────────────────────────────────────────────
+--
+-- `CREATE INDEX CONCURRENTLY` and `DROP INDEX CONCURRENTLY` cannot run inside a
+-- transaction block, and Prisma executes a migration file inside one. Using them
+-- would mean abandoning that transaction, and with it the guarantee above: there
+-- would be committed intermediate states, and a consumer or an operator could
+-- observe the table with only one of the two indexes - or, if a CONCURRENTLY
+-- build failed, with an INVALID index left behind that enforces nothing and must
+-- be dropped by hand before a retry.
+--
+-- Atomicity is worth more here than availability, because the alternative
+-- failure mode is a half-migrated production database that silently stops
+-- constraining live key names. The cost of that choice is stated below rather
+-- than hidden.
+--
+-- ── OPERATIONAL COST, STATED HONESTLY ───────────────────────────────────────
+--
+-- **NO DURATION IS CLAIMED.** An earlier draft said the build takes
+-- milliseconds because a business holds at most five active keys. That reasoning
+-- was wrong: the five-key ceiling bounds ACTIVE rows only, and retired
+-- predecessors are never deleted - `ApiKey` has no retention or deletion policy
+-- at all, which is the open owner decision D31. Keys expire every ninety days,
+-- so the table grows without bound for as long as the product is used, and the
+-- index build scales with the total row count rather than with the active one.
+--
+-- What is actually true:
+--
+--   * for the duration of the CREATE, writes to "ApiKey" block and reads do not.
+--     Key creation, rotation and revocation wait; `lastUsedAt` writes wait;
+--     AUTHENTICATION STILL WORKS, because it only reads.
+--   * from the DROP to the commit, reads block too. That span is a catalog
+--     operation, not a build.
+--   * nothing else in the product touches this table, so no other feature is
+--     affected either way.
+--
+-- **DEPLOY THIS IN A CONTROLLED LOW-TRAFFIC WINDOW.** Not because a duration is
+-- known, but because it is not: the only honest planning assumption is that the
+-- build time is proportional to a table whose size nobody has bounded. Check
+-- `SELECT count(*) FROM "ApiKey"` beforehand if a window needs sizing.
 
-DROP INDEX "ApiKey_businessId_name_key";
-
-CREATE UNIQUE INDEX "ApiKey_businessId_name_key"
+CREATE UNIQUE INDEX "ApiKey_businessId_activeName_key"
   ON "ApiKey"("businessId", "name")
   WHERE "state" = 'ACTIVE';
+
+DROP INDEX "ApiKey_businessId_name_key";

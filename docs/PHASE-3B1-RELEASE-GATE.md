@@ -54,7 +54,8 @@ as long as it uses the product, and eventually has to call the same job `Reporti
 
 ### 2.3 The fix, and why it is the right scope
 
-Migration 19 makes the index partial: `UNIQUE (businessId, name) WHERE state = 'ACTIVE'`.
+Migration 19 replaces it with a partial index under a new stable name:
+`ApiKey_businessId_activeName_key`, `UNIQUE (businessId, name) WHERE state = 'ACTIVE'`.
 
 The name is the owner's own label and it exists so they can tell their **live** keys apart in a
 list. Two retired keys sharing a name confuses nobody — the list shows state and dates, and audit
@@ -73,6 +74,48 @@ ceiling is an index and not a trigger.
 became partial. The declaration was removed rather than documented, following the `activeSlot`
 precedent in the same model: a schema that states a uniqueness rule the database does not enforce is
 worse than a schema that is silent about it. Nothing looks a key up by that pair.
+
+### 2.4 The order of the two statements, and what it costs — corrected under review
+
+The first draft dropped the old index and then created the new one. That is backwards: it takes the
+**most restrictive lock in front of the longest operation.** Migration 19 now creates first.
+
+| Statement | Lock on `ApiKey` | Effect |
+|---|---|---|
+| `CREATE UNIQUE INDEX … WHERE state = 'ACTIVE'` | `SHARE` | blocks writers; **readers are served**, so authentication keeps working through the build |
+| `DROP INDEX` (old) | `ACCESS EXCLUSIVE` | blocks readers and writers — but runs **last**, and is a catalog operation rather than a build |
+
+Locks are held until the transaction commits, so from the `DROP` onwards the table is unavailable to
+everyone for the remainder of the transaction. That remainder is now one catalog update instead of
+an index build, which is the entire point of the reordering.
+
+**Uniqueness is never absent.** During the build the old unconditional index still enforces a
+stricter rule; once the new index is valid both enforce; then the stricter one is dropped. Prisma
+runs the file in one transaction, so no committed state lacks an active-name guarantee, and any
+failure rolls back to migration 18's arrangement. Walked one statement at a time in
+`tests/integration/api-key-name-reuse.test.ts`.
+
+**Why not `CONCURRENTLY`.** `CREATE INDEX CONCURRENTLY` and `DROP INDEX CONCURRENTLY` cannot run
+inside a transaction block, and Prisma runs a migration file inside one. Using them would mean
+giving up the guarantee above — committed intermediate states an operator could observe with only
+one index present, and, if a concurrent build failed, an `INVALID` index enforcing nothing that has
+to be dropped by hand before a retry. Atomicity is worth more here than availability, because the
+alternative failure mode is a half-migrated production database that has quietly stopped
+constraining live key names.
+
+### 2.5 No duration is claimed, and why the first draft's was wrong
+
+The first draft said the build takes milliseconds "because a business holds at most five active
+keys". That reasoning does not hold: **the five-key ceiling bounds ACTIVE rows only.** Retired
+predecessors are never deleted — `ApiKey` has no retention or deletion policy at all, which is the
+open owner decision **D31** — and keys expire every ninety days, so the table grows without bound
+for as long as the product is used. The build scales with total rows, not with live ones.
+
+So no duration is stated. What is stated instead: writes block for the build and reads do not;
+reads block only from the `DROP` to the commit; nothing else in the product touches this table.
+**Deploy in a controlled low-traffic window** — not because the cost is known to be high, but
+because it is not known at all, and `SELECT count(*) FROM "ApiKey"` is the only honest way to size
+one.
 
 ---
 
