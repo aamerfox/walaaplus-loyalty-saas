@@ -88,7 +88,11 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export interface ListApiEventsOptions {
   /** Already clamped by `pageSize`. This function does not re-interpret a caller's number. */
   size: number;
-  /** Already decoded and validated by `decodeCursor`. Null means the first page. */
+  /**
+   * Already **authenticated**: verified by `verifyCursor` against the binding derived from the
+   * authenticated business, so it is a position this server minted for THIS tenant rather than
+   * caller input. Null means the first page.
+   */
   cursor: Cursor | null;
 }
 
