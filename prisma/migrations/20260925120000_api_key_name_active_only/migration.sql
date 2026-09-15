@@ -51,10 +51,12 @@
 -- CREATE FIRST, DROP SECOND. An earlier draft did the reverse, which put the
 -- most restrictive lock in front of the longest operation - exactly backwards.
 --
---   CREATE UNIQUE INDEX   takes SHARE on "ApiKey". Blocks writers; READERS ARE
---                         SERVED THROUGHOUT. This is the statement whose cost
---                         grows with the size of the table, and it now runs
---                         while authentication can still read.
+--   CREATE UNIQUE INDEX   takes SHARE on "ApiKey". Blocks writers; reads are
+--                         served. This is the statement whose cost grows with
+--                         the size of the table, and it now runs while the
+--                         authentication LOOKUP can still complete. See the
+--                         section below for why that is not the same as saying
+--                         an API request is served.
 --
 --   DROP INDEX            takes ACCESS EXCLUSIVE - blocks readers and writers
 --                         alike - but it is a catalog operation on an index
@@ -98,20 +100,41 @@
 -- so the table grows without bound for as long as the product is used, and the
 -- index build scales with the total row count rather than with the active one.
 --
--- What is actually true:
+-- What is actually true, stated per request rather than per statement - because
+-- "the lookup is a read" is NOT the same claim as "the request is served", and
+-- an earlier draft of this comment ran the two together:
 --
---   * for the duration of the CREATE, writes to "ApiKey" block and reads do not.
---     Key creation, rotation and revocation wait; `lastUsedAt` writes wait;
---     AUTHENTICATION STILL WORKS, because it only reads.
---   * from the DROP to the commit, reads block too. That span is a catalog
---     operation, not a build.
---   * nothing else in the product touches this table, so no other feature is
---     affected either way.
+--   DURING THE CREATE (SHARE: writes wait, reads do not)
+--
+--     * The authentication LOOKUP completes. `authenticateApiKey` is a single
+--       indexed SELECT on the digest, and SHARE does not block it.
+--     * A REQUEST THAT IS ABOUT TO BE SERVED THEN WAITS. `guardApiRequest`
+--       awaits `touchKey()` before the handler runs, and that is an UPDATE of
+--       `lastUsedAt` on this table - so a successful `/api/v1` read blocks until
+--       this migration commits. The lookup succeeding does not mean the caller
+--       gets an answer.
+--     * A REQUEST THAT IS REFUSED STILL COMPLETES, because every refusal returns
+--       before `touchKey` is reached: a missing or bad key (401), a wrong scope
+--       (403), a credential in the query string (400), and a rate-limited caller
+--       (429 - its counter is in `AuthRateLimit`, a different table).
+--     * OWNER KEY MUTATIONS WAIT. Create, rotate and revoke are writes here.
+--
+--   FROM THE DROP TO THE COMMIT (ACCESS EXCLUSIVE: everything waits)
+--
+--     * Reads wait too, INCLUDING THE AUTHENTICATION LOOKUP ITSELF. For this
+--       span no `/api/v1` request can even be authenticated.
+--     * That span is one catalog operation rather than an index build, which is
+--       the entire reason the CREATE goes first.
+--
+--   Nothing else in the product touches this table, so no other feature is
+--   affected in either window.
 --
 -- **DEPLOY THIS IN A CONTROLLED LOW-TRAFFIC WINDOW.** Not because a duration is
 -- known, but because it is not: the only honest planning assumption is that the
--- build time is proportional to a table whose size nobody has bounded. Check
--- `SELECT count(*) FROM "ApiKey"` beforehand if a window needs sizing.
+-- build time is proportional to a table whose size nobody has bounded, and that
+-- for that whole time an authenticated public-API request may be waiting rather
+-- than being answered. Check `SELECT count(*) FROM "ApiKey"` beforehand if a
+-- window needs sizing.
 
 CREATE UNIQUE INDEX "ApiKey_businessId_activeName_key"
   ON "ApiKey"("businessId", "name")

@@ -82,12 +82,27 @@ The first draft dropped the old index and then created the new one. That is back
 
 | Statement | Lock on `ApiKey` | Effect |
 |---|---|---|
-| `CREATE UNIQUE INDEX … WHERE state = 'ACTIVE'` | `SHARE` | blocks writers; **readers are served**, so authentication keeps working through the build |
+| `CREATE UNIQUE INDEX … WHERE state = 'ACTIVE'` | `SHARE` | blocks writers; reads are served, so the authentication **lookup** completes — but see below, an authenticated request does not |
 | `DROP INDEX` (old) | `ACCESS EXCLUSIVE` | blocks readers and writers — but runs **last**, and is a catalog operation rather than a build |
 
 Locks are held until the transaction commits, so from the `DROP` onwards the table is unavailable to
 everyone for the remainder of the transaction. That remainder is now one catalog update instead of
 an index build, which is the entire point of the reordering.
+
+**The lookup being a read does not mean the request is served.** An earlier version of this section
+said "readers are served, so authentication keeps working through the build", which was wrong, and
+wrong in the direction that matters: it understated the impact of running this migration under load.
+`guardApiRequest` **awaits `touchKey()`** — an `UPDATE` of `lastUsedAt` on this same table — before
+the handler runs. So during the `CREATE`:
+
+| Request | During `CREATE` (`SHARE`) | During `DROP` → commit (`ACCESS EXCLUSIVE`) |
+|---|---|---|
+| `/api/v1` read that would succeed | **waits** — the lookup completes, then `touchKey`'s `UPDATE` blocks | **waits** — the lookup itself blocks |
+| `/api/v1` refused: 400, 401, 403, 429 | completes — every refusal returns before `touchKey`, and the rate-limit counter lives in `AuthRateLimit` | **waits**, except the credential-in-query `400`, which never reads the table |
+| Owner create / rotate / revoke | **waits** — these are writes | **waits** |
+
+So the honest summary is: during the build, refusals are answered and successes queue; from the drop
+to the commit, nothing is answered at all.
 
 **Uniqueness is never absent.** During the build the old unconditional index still enforces a
 stricter rule; once the new index is valid both enforce; then the stricter one is dropped. Prisma

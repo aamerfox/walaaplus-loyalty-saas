@@ -119,10 +119,14 @@ than the old one, so it cannot fail to build on an environment that already has 
 It **creates the replacement before dropping the original**, under a new name rather than reusing
 the old one: dropping first would put an `ACCESS EXCLUSIVE` lock in front of the index build, and
 renaming afterwards would buy nothing but another catalog lock. `CREATE INDEX` takes `SHARE` — writers
-wait, readers and therefore authentication do not — and the `ACCESS EXCLUSIVE` of the `DROP` lands
-last, on a catalog operation. Both are in one Prisma transaction, so no committed state lacks an
-active-name guarantee. Release gate §2.4 and §2.5 carry the lock table, the reason `CONCURRENTLY` is
-not used, and why no duration is claimed.
+wait, reads do not — and the `ACCESS EXCLUSIVE` of the `DROP` lands last, on a catalog operation.
+Both are in one Prisma transaction, so no committed state lacks an active-name guarantee.
+
+**A served `/api/v1` request still waits during the build**, even though its first step is a read:
+`guardApiRequest` awaits `touchKey()`, which is an `UPDATE` on this table. Refusals complete, because
+they return before that point. From the `DROP` to the commit even the authentication lookup waits.
+Release gate §2.4 carries the per-request table, §2.5 why no duration is claimed, and both explain
+why `CONCURRENTLY` cannot be used inside a transactional migration.
 
 ### 3.3 The order is total because it has to be
 
