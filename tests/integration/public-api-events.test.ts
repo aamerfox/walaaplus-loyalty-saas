@@ -5,7 +5,8 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { GET as eventRoute } from "@/app/api/v1/events/[eventId]/route";
 import { GET as eventsRoute } from "@/app/api/v1/events/route";
 import { hasScope, type ApiContext } from "@/server/api/auth";
-import { decodeCursor, encodeCursor, MAX_PAGE_SIZE } from "@/server/api/contract";
+import { MAX_PAGE_SIZE } from "@/server/api/contract";
+import { signCursor, verifyCursor } from "@/server/api/cursor";
 import { createKey, revokeKey } from "@/server/api/keys";
 import { API_RATE_LIMIT_MAX } from "@/server/api/rate-limit";
 import { createPromotion, setPromotionState } from "@/server/promotions/promotions";
@@ -309,14 +310,16 @@ describe("a key sees one business and cannot be argued out of it", () => {
     expect(JSON.stringify(theirs.body)).not.toContain(b.eventIds[0]);
   });
 
-  it("does not follow a cursor across a tenant boundary", async () => {
+  it("refuses a cursor minted for another business, rather than quietly reinterpreting it", async () => {
     /*
-     * The property the opaque cursor actually has.
+     * This behaviour changed under review, and the change is the point of the fix.
      *
-     * It is not signed — signing would need a secret this phase may not add, and there is nothing
-     * inside it to protect. What makes tampering worthless is that the tenant filter comes from the
-     * KEY and is AND-ed into the query, so a cursor minted in one business and replayed by another
-     * business's key walks the second business's own rows.
+     * Cursors used to be unsigned, so a cursor minted for business A and replayed with B's key was
+     * simply honoured as a position in B's feed: safe, because the tenant filter comes from the
+     * key, but silent. A forged cursor was indistinguishable from one we issued.
+     *
+     * Now the cursor is bound to the business it was minted for, so this is a 400. Nothing is read,
+     * and the caller is told their cursor is not one this API issued — which is true, for them.
      */
     const a = await build("Café A", 4);
     const b = await build("Café B", 4);
@@ -326,14 +329,18 @@ describe("a key sees one business and cannot be argued out of it", () => {
     expect(aCursor).not.toBeNull();
 
     const replayed = await listEvents(b.apiKey, `?limit=10&cursor=${encodeURIComponent(aCursor!)}`);
-    expect(replayed.status).toBe(200);
-    for (const event of items(replayed)) {
-      expect(b.eventIds, "every row must belong to the replaying key's business").toContain(event.id);
-      expect(a.eventIds).not.toContain(event.id);
-    }
+    expect(replayed.status).toBe(400);
+    expect(String((replayed.body.error as { code: string }).code)).toBe("BAD_REQUEST");
+    // Not echoed, and nothing of either tenant's feed came back.
+    expect(JSON.stringify(replayed.body)).not.toContain(aCursor!.slice(0, 20));
+    expect(replayed.body).not.toHaveProperty("data");
+
+    // A's own cursor still works for A, so the refusal is about the binding and not the cursor.
+    const mine = await listEvents(a.apiKey, `?limit=10&cursor=${encodeURIComponent(aCursor!)}`);
+    expect(mine.status).toBe(200);
   });
 
-  it("ignores a hand-built cursor that names another tenant's row", async () => {
+  it("refuses a hand-built cursor naming another tenant's row, without reading a row", async () => {
     const a = await build("Café A", 3);
     const b = await build("Café B", 3);
 
@@ -342,12 +349,50 @@ describe("a key sees one business and cannot be argued out of it", () => {
       orderBy: { occurredAt: "asc" },
       select: { id: true, occurredAt: true },
     });
-    // A structurally perfect cursor pointing at a row this key may not see.
-    const forged = encodeCursor({ at: stolen.occurredAt.toISOString(), id: stolen.id });
 
-    const page = await listEvents(a.apiKey, `?cursor=${encodeURIComponent(forged)}`);
+    // Signed for B — a perfectly valid cursor, for somebody else.
+    const forB = signCursor({ at: stolen.occurredAt.toISOString(), id: stolen.id }, { businessId: b.cafe.businessId });
+    const refused = await listEvents(a.apiKey, `?cursor=${encodeURIComponent(forB)}`);
+    expect(refused.status).toBe(400);
+
+    // And signed for A but naming B's row: the MAC passes, the tenant filter still holds, and the
+    // page contains only A's events. Signing is not a substitute for the WHERE clause.
+    const forA = signCursor({ at: stolen.occurredAt.toISOString(), id: stolen.id }, { businessId: a.cafe.businessId });
+    const page = await listEvents(a.apiKey, `?cursor=${encodeURIComponent(forA)}`);
     expect(page.status).toBe(200);
     for (const event of items(page)) expect(a.eventIds).toContain(event.id);
+  });
+
+  it("refuses a cursor whose position was altered after we signed it", async () => {
+    const w = await build("Café Tamper", 4);
+    const page = await listEvents(w.apiKey, "?limit=2");
+    const issued = nextCursor(page);
+    expect(issued).not.toBeNull();
+
+    const [format, payload, mac] = issued!.split(".");
+    const decoded = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as { at: string; id: string };
+
+    const forgeries = [
+      // A moved timestamp, which is how a caller would try to widen their window.
+      `${format}.${Buffer.from(JSON.stringify({ ...decoded, at: "2099-01-01T00:00:00.000Z" })).toString("base64url")}.${mac}`,
+      // A different row id.
+      `${format}.${Buffer.from(JSON.stringify({ ...decoded, id: randomUUID() })).toString("base64url")}.${mac}`,
+      // The signature itself.
+      `${format}.${payload}.${"A".repeat(43)}`,
+      // The unsigned format this API used to issue.
+      Buffer.from(JSON.stringify(decoded), "utf8").toString("base64url"),
+    ];
+
+    for (const forged of forgeries) {
+      const answer = await listEvents(w.apiKey, `?cursor=${encodeURIComponent(forged)}`);
+      expect(answer.status, forged.slice(0, 24)).toBe(400);
+      expect(String((answer.body.error as { code: string }).code)).toBe("BAD_REQUEST");
+      expect(answer.body, "a refused cursor returns no rows").not.toHaveProperty("data");
+      expect(JSON.stringify(answer.body)).not.toContain(forged.slice(0, 20));
+    }
+
+    // The one we actually issued still works, so none of the above failed for another reason.
+    expect((await listEvents(w.apiKey, `?limit=10&cursor=${encodeURIComponent(issued!)}`)).status).toBe(200);
   });
 });
 
@@ -521,13 +566,19 @@ describe("paging through the feed", () => {
     expect(JSON.stringify(page.body)).not.toContain("total");
   });
 
-  it("issues a cursor that decodes to the last row of the page it came from", async () => {
+  it("issues a signed cursor that verifies to the last row of the page it came from", async () => {
     const w = await build("Café Shape", 3);
     const page = await listEvents(w.apiKey, "?limit=2");
-    const decoded = decodeCursor(nextCursor(page));
+    const issued = nextCursor(page);
+
+    // Verified with the business the key belongs to — the same binding the route re-derives.
+    const decoded = verifyCursor(issued, { businessId: w.cafe.businessId });
     expect(decoded).not.toBeNull();
     expect(decoded!.id).toBe(items(page)[1].id);
     expect(decoded!.at).toBe(items(page)[1].occurredAt);
+
+    // And it is the signed shape, not the bare payload.
+    expect(issued).toMatch(/^v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/);
   });
 });
 

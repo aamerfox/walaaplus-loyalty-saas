@@ -8,9 +8,7 @@ import {
   apiSuccess,
   apiUnauthorized,
   cursorPage,
-  decodeCursor,
   DEFAULT_PAGE_SIZE,
-  encodeCursor,
   MAX_PAGE_SIZE,
   pageSize,
 } from "@/server/api/contract";
@@ -68,30 +66,17 @@ describe("the response envelope", () => {
 });
 
 describe("cursor pagination", () => {
-  it("round-trips a cursor", () => {
-    const cursor = { at: "2026-09-15T10:00:00.000Z", id: "abc" };
-    expect(decodeCursor(encodeCursor(cursor))).toEqual(cursor);
-  });
-
-  it("returns null for anything it did not produce, and never throws", () => {
-    for (const bad of [
-      null,
-      undefined,
-      "",
-      "not-base64!",
-      Buffer.from("not json").toString("base64url"),
-      Buffer.from(JSON.stringify({ at: 1, id: "x" })).toString("base64url"),
-      Buffer.from(JSON.stringify({ at: "nonsense", id: "x" })).toString("base64url"),
-      Buffer.from(JSON.stringify({ at: "2026-09-15T10:00:00.000Z" })).toString("base64url"),
-      Buffer.from(JSON.stringify({ at: "2026-09-15T10:00:00.000Z", id: "" })).toString("base64url"),
-      Buffer.from(JSON.stringify({ at: "2026-09-15T10:00:00.000Z", id: "x".repeat(65) })).toString("base64url"),
-      Buffer.from(JSON.stringify([1, 2, 3])).toString("base64url"),
-      "x".repeat(600),
-    ]) {
-      expect(() => decodeCursor(bad as string), String(bad).slice(0, 20)).not.toThrow();
-      expect(decodeCursor(bad as string), String(bad).slice(0, 20)).toBeNull();
-    }
-  });
+  /*
+   * Signing and verification are NOT tested here.
+   *
+   * A cursor is now authenticated with a key derived from `NEXTAUTH_SECRET`, so exercising it means
+   * a validated environment — which the unit project deliberately does not have. Rather than give
+   * `signCursor` a key parameter so a unit test could pass one in (a seam that exists only for
+   * tests, and one a caller could later pass something weak through), the cursor tests live in
+   * `tests/integration/public-api-cursor.test.ts` where the environment is real.
+   *
+   * What stays here is the part that has no key in it: the page assembler.
+   */
 
   it("clamps the page size, and never errors on a silly one", () => {
     expect(pageSize(undefined)).toBe(DEFAULT_PAGE_SIZE);
@@ -110,23 +95,37 @@ describe("cursor pagination", () => {
 
   it("builds a page from size + 1 rows and reports no total", () => {
     const rows = Array.from({ length: 4 }, (_, i) => ({ id: `id-${i}`, at: `2026-09-1${i}T00:00:00.000Z` }));
-    const full = cursorPage(rows, 3, (r) => ({ at: r.at, id: r.id }));
+    // The signer is injected, which is what keeps this function free of key material.
+    const sign = (c: { at: string; id: string }) => `signed(${c.at},${c.id})`;
+
+    const full = cursorPage(rows, 3, (r) => ({ at: r.at, id: r.id }), sign);
     expect(full.items).toHaveLength(3);
     expect(full.page.count).toBe(3);
-    expect(full.page.nextCursor).not.toBeNull();
-    expect(decodeCursor(full.page.nextCursor)).toEqual({ at: rows[2].at, id: rows[2].id });
+    // The cursor names the LAST row of the page returned, not of the rows fetched.
+    expect(full.page.nextCursor).toBe(`signed(${rows[2].at},${rows[2].id})`);
     // A total over a growing table is a second scan and is wrong by the time it is read.
     expect(full.page).not.toHaveProperty("total");
 
-    const last = cursorPage(rows.slice(0, 2), 3, (r) => ({ at: r.at, id: r.id }));
+    const last = cursorPage(rows.slice(0, 2), 3, (r) => ({ at: r.at, id: r.id }), sign);
     expect(last.page.nextCursor).toBeNull();
     expect(last.items).toHaveLength(2);
   });
 
   it("handles an empty page without inventing a cursor", () => {
-    const empty = cursorPage([] as { id: string; at: string }[], 3, (r) => ({ at: r.at, id: r.id }));
+    const empty = cursorPage([] as { id: string; at: string }[], 3, (r) => ({ at: r.at, id: r.id }), () => "never");
     expect(empty.items).toEqual([]);
     expect(empty.page).toEqual({ nextCursor: null, count: 0 });
+  });
+
+  it("never signs a cursor for a page that has no next page", () => {
+    // A cursor minted for a final page would be a value the client is invited to follow into
+    // nothing, and one more signed string in the world than there needed to be.
+    let signed = 0;
+    cursorPage([{ id: "a", at: "2026-09-15T00:00:00.000Z" }], 3, (r) => ({ at: r.at, id: r.id }), () => {
+      signed += 1;
+      return "x";
+    });
+    expect(signed).toBe(0);
   });
 });
 
@@ -137,7 +136,8 @@ describe("the key cannot reach anywhere it must not", () => {
     expect(apiFiles.map((f) => relative(join(ROOT, "src", "server", "api"), f)).sort()).toEqual([
       "auth.ts",
       "contract.ts",
-      // Prompt 2 adds the event reader and the request pipeline. Nothing else joined them.
+      // Prompt 2 adds the event reader, the request pipeline and the signed cursor.
+      "cursor.ts",
       "events.ts",
       "keys.ts",
       "rate-limit.ts",
@@ -164,6 +164,47 @@ describe("the key cannot reach anywhere it must not", () => {
         );
       }
     }
+  });
+
+  it("signs cursors with a derived, domain-separated key and never with a raw secret", () => {
+    /*
+     * The properties a reviewer should be able to check without running anything:
+     *
+     *  - the HMAC key is DERIVED, so `NEXTAUTH_SECRET` never appears as the key itself;
+     *  - the derivation is labelled, so this key cannot collide with the rate-limit pepper that is
+     *    derived from the same root;
+     *  - the signed message is domain-separated and carries the binding;
+     *  - the comparison is constant-time;
+     *  - the integration encryption key is NOT used — see the file's own note on why.
+     */
+    const cursor = readFileSync(join(ROOT, "src", "server", "api", "cursor.ts"), "utf8");
+    const body = code(cursor);
+
+    expect(body).toMatch(/createHmac\("sha256", env\(\)\.NEXTAUTH_SECRET\)\.update\(DERIVATION_LABEL\)/);
+    expect(body).toMatch(/const DERIVATION_LABEL = "walaaplus:api:v1:cursor"/);
+    expect(body).toMatch(/const MESSAGE_DOMAIN = "walaaplus:api:v1:cursor:events"/);
+    expect(body).toMatch(/canonical\(\[MESSAGE_DOMAIN, FORMAT, binding\.businessId, payload\]\)/);
+    expect(body).toMatch(/timingSafeEqual\(presented, expected\)/);
+
+    // The root secret is never the HMAC key, and never the message either.
+    expect(body).not.toMatch(/createHmac\([^)]*cursorKey\(\)[^)]*NEXTAUTH_SECRET/);
+    expect(body).not.toContain("INTEGRATION_ENCRYPTION_KEY");
+
+    // And no test-only door into the key.
+    expect(body).not.toMatch(/ForTests|__test|process\.env\./);
+  });
+
+  it("verifies the cursor before any row is read, and against the authenticated context", () => {
+    const route = code(readFileSync(join(ROOT, "src", "app", "api", "v1", "events", "route.ts"), "utf8"));
+    const verifyAt = route.indexOf("verifyCursor(");
+    const readAt = route.indexOf("listApiEvents(");
+    expect(verifyAt).toBeGreaterThan(-1);
+    expect(readAt).toBeGreaterThan(-1);
+    // Source order is not proof of runtime order on its own, but the 400 between them is: the
+    // handler returns before it reaches the read. The integration suite proves the behaviour.
+    expect(verifyAt, "the cursor is verified before the events are read").toBeLessThan(readAt);
+    // The binding comes from the guard's context, never from the request.
+    expect(route).toMatch(/verifyCursor\(rawCursor, \{ businessId: guard\.ctx\.businessId \}\)/);
   });
 
   it("sends no CORS header, from any public route or the pipeline they share", () => {

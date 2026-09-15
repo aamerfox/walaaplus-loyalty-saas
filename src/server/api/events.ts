@@ -2,6 +2,7 @@ import { IntegrationEntityType, IntegrationEventType } from "@prisma/client";
 import { prisma } from "../db";
 import type { ApiContext } from "./auth";
 import { type ApiPage, type Cursor, cursorPage } from "./contract";
+import { signCursor } from "./cursor";
 
 /**
  * The only thing `/api/v1` can read.
@@ -104,6 +105,12 @@ export interface ListApiEventsOptions {
  * may return differently on each execution, and that is precisely how a paginating client sees one
  * row twice and another never. `id` breaks every tie.
  *
+ * ## The cursor is authenticated
+ *
+ * `options.cursor` has already been through `verifyCursor`, so by the time it arrives here it is a
+ * value this server minted for THIS business. That is why the comparison below can use it directly:
+ * it is not caller input any more.
+ *
  * ## Keyset, not offset
  *
  * `OFFSET 10000` makes PostgreSQL walk ten thousand rows in order to discard them, so a small
@@ -136,10 +143,18 @@ export async function listApiEvents(
     select: EVENT_SELECT,
   });
 
-  const { items, page } = cursorPage(rows, options.size, (row) => ({
-    at: row.occurredAt.toISOString(),
-    id: row.id,
-  }));
+  const { items, page } = cursorPage(
+    rows,
+    options.size,
+    (row) => ({ at: row.occurredAt.toISOString(), id: row.id }),
+    /*
+     * Signed with the business from the KEY, which is the same value that filtered the query above.
+     * A cursor and the rows it points at therefore always agree about whose feed this is, and the
+     * next request's verification re-derives the binding from its own key rather than from anything
+     * the client sent.
+     */
+    (cursor) => signCursor(cursor, { businessId: ctx.businessId }),
+  );
   return { items: items.map(toView), page };
 }
 

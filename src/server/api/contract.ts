@@ -20,7 +20,10 @@ export interface ApiSuccess<T> {
 }
 
 export interface ApiPage {
-  /** Opaque. Pass it back as `cursor` to continue; absent when there is nothing after this page. */
+  /**
+   * Opaque and **signed**. Pass it back as `cursor` to continue; absent when there is nothing after
+   * this page. A client must not construct, parse or alter one — an altered cursor is a `400`.
+   */
   nextCursor: string | null;
   /** How many items this page holds. Never a total — see `cursorPage`. */
   count: number;
@@ -84,10 +87,13 @@ export const DEFAULT_PAGE_SIZE = 25;
  * depth. It is also correct under insertion: an offset page shifts when a row is added ahead of it,
  * so a client walking pages sees an item twice or not at all.
  *
- * The cursor is **opaque by contract** — clients must not construct one — but it is deliberately
- * not encrypted or signed. It carries a sort key and an id, both of which the caller already has
- * from the page it came from, so there is nothing in it to protect. Tampering with one cannot reach
- * another tenant's rows: the business filter comes from the key, not from the cursor.
+ * The cursor is **opaque by contract** — clients must not construct one — and it is
+ * **authenticated**: `src/server/api/cursor.ts` signs it with a derived, domain-separated key and
+ * binds it to the business it was issued for, so a value this API did not mint is refused before
+ * anything is parsed or read.
+ *
+ * This module holds only the SHAPE. Signing lives next door because it needs server-side key
+ * material, and keeping the shape free of that is what lets the page assembler below stay pure.
  */
 export interface Cursor {
   /** ISO-8601, from the sort column of the last item on the previous page. */
@@ -96,25 +102,13 @@ export interface Cursor {
   id: string;
 }
 
-export function encodeCursor(cursor: Cursor): string {
-  return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
-}
-
-/** Returns null for anything that is not a cursor this function produced. Never throws. */
-export function decodeCursor(raw: string | null | undefined): Cursor | null {
-  if (!raw || raw.length > 512) return null;
-  try {
-    const parsed: unknown = JSON.parse(Buffer.from(raw, "base64url").toString("utf8"));
-    if (parsed === null || typeof parsed !== "object") return null;
-    const candidate = parsed as Record<string, unknown>;
-    if (typeof candidate.at !== "string" || typeof candidate.id !== "string") return null;
-    if (Number.isNaN(Date.parse(candidate.at))) return null;
-    if (candidate.id.length === 0 || candidate.id.length > 64) return null;
-    return { at: candidate.at, id: candidate.id };
-  } catch {
-    return null;
-  }
-}
+/**
+ * Turns a cursor into the string a client receives.
+ *
+ * Passed in rather than imported, so `cursorPage` has no key material and no environment to read,
+ * and so a caller cannot build a page without having decided what the cursor is valid for.
+ */
+export type CursorSigner = (cursor: Cursor) => string;
 
 /** Clamp a caller's `limit`. An absent or unusable value gets the default, never an error. */
 export function pageSize(raw: string | number | null | undefined): number {
@@ -132,12 +126,17 @@ export function pageSize(raw: string | number | null | undefined): number {
  * without a `COUNT`. **No total is returned**: a total over a growing table is a second scan and is
  * wrong by the time it is read.
  */
-export function cursorPage<T>(rows: T[], size: number, keyOf: (row: T) => Cursor): { items: T[]; page: ApiPage } {
+export function cursorPage<T>(
+  rows: T[],
+  size: number,
+  keyOf: (row: T) => Cursor,
+  sign: CursorSigner,
+): { items: T[]; page: ApiPage } {
   const hasMore = rows.length > size;
   const items = hasMore ? rows.slice(0, size) : rows;
   const last = items.at(-1);
   return {
     items,
-    page: { nextCursor: hasMore && last ? encodeCursor(keyOf(last)) : null, count: items.length },
+    page: { nextCursor: hasMore && last ? sign(keyOf(last)) : null, count: items.length },
   };
 }

@@ -1,5 +1,6 @@
 import { ApiScope } from "@prisma/client";
-import { ApiErrorCode, decodeCursor, pageSize } from "@/server/api/contract";
+import { ApiErrorCode, pageSize } from "@/server/api/contract";
+import { verifyCursor } from "@/server/api/cursor";
 import { listApiEvents } from "@/server/api/events";
 import { apiFail, apiInternal, apiOk, guardApiRequest } from "@/server/api/request";
 
@@ -43,10 +44,20 @@ export async function GET(req: Request) {
      * cursor", which is what a client building a URL from an unset variable is saying.
      */
     const rawCursor = params.get("cursor");
-    const cursor = rawCursor === null || rawCursor === "" ? null : decodeCursor(rawCursor);
+    /*
+     * Verified against the AUTHENTICATED context, which is why this is below the guard and not
+     * above it. The binding is re-derived from the key on every request; nothing the client sends
+     * contributes to it.
+     *
+     * A cursor that fails — altered, forged, expired in format, minted for another business, or one
+     * of the unsigned ones this API issued before it was fixed — is the fixed 400 below. **No event
+     * row is read on that path**, and the submitted value is not echoed back.
+     */
+    const cursor =
+      rawCursor === null || rawCursor === ""
+        ? null
+        : verifyCursor(rawCursor, { businessId: guard.ctx.businessId });
     if (rawCursor !== null && rawCursor !== "" && cursor === null) {
-      // The submitted value is not echoed: a cursor is not secret, but a rule that never reflects
-      // caller input back into a response is a rule with no exceptions to get wrong later.
       return apiFail(ApiErrorCode.BAD_REQUEST, "The cursor is not one this API issued", 400);
     }
 
