@@ -117,6 +117,55 @@ they are authenticated as a person, which the API caller is not.
 **The internal reason is still knowable to us** where it matters: revocation and expiry are visible
 in the owner's list. It is only the *caller* who learns nothing.
 
+### 4.1 The owner's side: both ways a key ends are terminal
+
+The caller is told nothing; the **owner** is told plainly, and that half has its own rule.
+
+`ACTIVE` may become `EXPIRED` or `REVOKED`, and `walaaplus_api_key_guard` permits no state change
+after either. Both are rest states. So both must produce the same controlled refusal from the
+service, under one conflict code:
+
+| Key state | `revokeKey` | `rotateKey` | Row written | Audit row |
+|---|---|---|---|---|
+| `ACTIVE` | succeeds — state `REVOKED`, slot released | succeeds — predecessor revoked, successor issued | yes | `api_key.revoked` / `api_key.rotated` |
+| `EXPIRED` | **409 `API_KEY_NOT_ACTIVE`** — "That key has expired" | 409 `API_KEY_NOT_ACTIVE` | **none** | **none** |
+| `REVOKED` | 409 `API_KEY_NOT_ACTIVE` — "That key is already revoked" | 409 `API_KEY_NOT_ACTIVE` | none | none |
+
+The rule behind that table generalises past API keys, and is the one to carry forward:
+
+> **A service refuses exactly what the database would refuse, before the database has to.**
+
+A service that refuses *less* than its triggers do is a service whose error messages are chosen by
+PostgreSQL. The earlier `revokeKey` guarded only against `REVOKED`; an `EXPIRED` key reached the
+`UPDATE`, and `api_key_guard` answered `23514 — "ApiKey: EXPIRED is a rest state"`. That is a raw
+database error where a conflict was intended, and through the Prompt 2 owner route it would have
+been a 500 carrying PostgreSQL's own words. The state is also re-checked *inside* the `UPDATE`
+predicate, so a key that changes state between the read and the write hits the same conflict rather
+than the trigger.
+
+### 4.2 A key past its expiry whose state is still `ACTIVE`
+
+The sweep to `EXPIRED` is **lazy** — `releaseExpiredSlots` runs only when a key is issued — so a
+business that stops issuing leaves its lapsed keys at `state = ACTIVE` with their slots still held.
+This is the ordinary condition of a lapsed key, not an edge case.
+
+**Such a key can still be revoked**, deliberately:
+
+- The decision is made on `state` alone, the same column the trigger decides on, so the service and
+  the database never disagree about what is permitted.
+- It releases the slot, which otherwise stays held until something issues a key.
+- It records that the owner *ended* the key, which is a different fact from the key running out.
+
+**Access does not turn on any of this.** `authenticateApiKey` reads `expiresAt` directly rather than
+trusting `state`, so a lapsed key is refused before the revocation and refused after it — with the
+same generic 401 in §4 either way. Nothing in §4 changes here.
+
+The wrinkle, stated rather than smoothed over: whether a lapsed key answers "that key has expired"
+or revokes successfully depends on whether the sweep has run for that business yet. Both outcomes
+leave the key unusable and its slot free; only the sentence the owner reads differs. Both paths are
+covered in `tests/integration/api-keys.test.ts`, including the transition — a lapsed key that is
+revocable, then swept by an unrelated `createKey`, then refused.
+
 ---
 
 ## 5. Why an API caller does not get a `TenantContext`
