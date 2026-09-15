@@ -4,6 +4,7 @@
 |---|---|
 | Branch | `rebuild/phase-0-foundation` |
 | Baseline | `365fd78` — Prompt 1 plus the `revokeKey` terminal-state correction |
+| Review correction | Cursors were unsigned at `918de1d`; they are authenticated from the SHA below. §3.2 |
 | Capability, data-exposure and threat matrix written first | `docs/API-KEY-CAPABILITY-MATRIX.md` Part II (§9–§16) |
 | Consumer contract | `docs/PUBLIC-API-V1.md` |
 | Implementation record | `docs/PHASE-3B1-IMPLEMENTATION.md` |
@@ -69,15 +70,46 @@ for the URL form is told at once instead of getting a `401` and retrying it — 
 key into a proxy log, a browser history and an analytics row we cannot reach to erase. The refusal
 names the parameter and never its value.
 
-### 3.2 The cursor is opaque and deliberately unsigned
+### 3.2 The cursor is authenticated — corrected under review
 
-Signing needs a secret, and this phase may not add one — nor should a pagination token be the reason a
-new secret enters a deployment. There is also nothing in it to protect: a timestamp and an id the
-caller was just handed.
+**This shipped wrong at `918de1d` and the review was right.** The original argument was that signing
+was unnecessary because the tenant filter comes from the key, so a forged cursor could only move a
+caller's window within their own events.
 
-What makes tampering worthless is that **the tenant filter comes from the key**, not from the cursor.
-Two tests hold it: a cursor minted by business A and replayed with business B's key returns B's own
-rows; and a hand-built cursor naming one of B's rows, replayed with A's key, still returns only A's.
+That is true, and it is beside the point. **"Tampering is harmless" is not "tampering is detected"**,
+and the contract promised the second. It also left the property resting entirely on one `WHERE`
+clause elsewhere — a defence that lasts exactly as long as nobody edits that line.
+
+A cursor is now `v1.<payload>.<HMAC-SHA256>`:
+
+| Decision | What was done, and why |
+|---|---|
+| **Key** | Derived: `createHmac("sha256", NEXTAUTH_SECRET).update("walaaplus:api:v1:cursor")`. The root secret is never the HMAC key itself. Same idiom as the rate-limit pepper, so there is one way this codebase scopes a root secret |
+| **Not the integration key** | `INTEGRATION_ENCRYPTION_KEY` is **optional by design** — a deployment that sends no webhooks must start normally. Signing cursors with it would refuse every cursor wherever webhooks are unconfigured; a present-or-fallback arrangement would change the signing key the day webhooks were configured and silently invalidate outstanding cursors |
+| **Domain separation** | A distinct derivation label, plus `walaaplus:api:v1:cursor:events` as the first field of the signed message |
+| **Canonical message** | Every field length-prefixed, so no choice of values can produce another choice's bytes |
+| **Binding** | `businessId`. **Not the API key** — see below |
+| **Order** | MAC verified **before** the payload is parsed. Attacker-chosen bytes never reach `JSON.parse`, and **no event row is read** on a failing path |
+| **Comparison** | `timingSafeEqual` |
+| **Env / Compose** | **No new variable, no Compose change, no migration.** The material already exists and is already required |
+
+**Why business binding and not key binding**, since the review asked for the answer either way:
+
+1. Key binding would **refuse requests that are entitled to succeed** — every active key of a
+   business may read exactly the same rows.
+2. It would **punish the one action we tell people to take**: `docs/PUBLIC-API-V1.md` says to replace
+   a key you suspect, and under key binding that would invalidate the cursor in hand and force a
+   restart from the top.
+3. It would **buy nothing**: a cursor opens nothing without a key, and anyone holding a key for that
+   business can mint fresh cursors at will.
+
+Revocation is unaffected either way — a revoked key is refused at authentication, long before its
+cursor is looked at.
+
+**One behaviour changed, and it is worth stating plainly.** A cursor minted for business A and
+replayed with B's key used to be **honoured** as a position in B's own feed. It is now a `400`. Both
+are safe; only the second is detected. The test that asserted the old behaviour was rewritten to
+assert the new one rather than deleted.
 
 ### 3.3 Clamp what has a default; refuse what does not
 
@@ -112,9 +144,9 @@ refused; and nothing is written on the way through except `lastUsedAt`.
 
 | Check | Result |
 |---|---|
-| `node scripts/gate.mjs` | **GATE PASSED, 16/16 steps, 736.9s** |
-| Unit tests | **637** passed (43 files) |
-| Integration tests | **1072** passed (66 files) |
+| `node scripts/gate.mjs` | **GATE PASSED, 16/16 steps, 741.8s** (re-run in full after the cursor fix) |
+| Unit tests | **638** passed (43 files) |
+| Integration tests | **1086** passed (67 files) |
 | Playwright, run 1 | **133** passed |
 | Playwright, run 2 | **133** passed |
 | `npm audit --omit=dev` | 0 vulnerabilities |
@@ -124,7 +156,7 @@ refused; and nothing is written on the way through except `lastUsedAt`.
 | `git diff --check` | clean |
 | Raw-key scan (`wpk_` shape, whole repo) | no match |
 | Secret-literal scan | no match |
-| Control-byte scan (17 changed files) | none |
+| Control-byte scan (changed files) | none |
 | `public/` | 0 changed files |
 | `prisma/` | 0 changed files |
 | `docker-compose*.yml`, `deploy/` | 0 changed files |
@@ -141,7 +173,13 @@ Both public routes build as **dynamic**, never prerendered:
 That matters: a statically optimised copy of a response selected by a secret header would be one
 tenant's page served from a build artefact.
 
-### 4.2 One failure, found and fixed
+### 4.2 Verification was run twice
+
+The figures above are from the run **after** the cursor-signing correction. The pre-correction run
+at `918de1d` also passed in full; every check was re-run from scratch rather than assumed to still
+hold, because the change touched the module every list response goes through.
+
+### 4.3 One failure, found and fixed
 
 The first full gate run failed on **one** test out of 1072: `api-keys.test.ts` still asserted
 `src/app/api/v1` did not exist, which was Prompt 1's correct claim and became false the moment this
@@ -163,6 +201,17 @@ of them was already failing.
 | the credential-shaped-parameter refusal | 2 | "refuses a credential-shaped parameter BEFORE authenticating" |
 | `Cache-Control: no-store` and `Vary` | 5 | "is uncacheable and carries no CORS header" |
 | the rate-limit consumption | 3 | "opens one window per key and refuses with a retry hint at the cap" |
+| **the cursor MAC entirely** | **7** | every tamper case, plus both cross-tenant cursor tests |
+| **the business binding in the MAC** | **4** | "is refused for a different business, which is the binding doing its job" |
+| **verify-before-parse ordering** | **7** | the tamper cases, plus the unit assertion on the source |
+| **the route's call to `verifyCursor`** | **7** | the tamper cases, plus the whole traversal, which breaks on a signed cursor |
+| **the labelled key derivation** | **1** | a source assertion — see the note below |
+
+The last row is honestly different from the others. Replacing the derivation with the raw
+`NEXTAUTH_SECRET` as the HMAC key still produces cursors that sign and verify correctly, so **no
+behavioural test can see it**: it is a key-hygiene property, not a functional one. It is caught by a
+source assertion in `tests/unit/api-contract.test.ts`, which is the right instrument for it — a
+behavioural test here would be pretending to observe something it cannot.
 
 ---
 
@@ -208,6 +257,7 @@ sits below two others — never appears in it.
 **New**
 
 ```
+src/server/api/cursor.ts
 src/server/api/events.ts
 src/server/api/request.ts
 src/app/api/v1/events/route.ts
@@ -215,6 +265,7 @@ src/app/api/v1/events/[eventId]/route.ts
 src/app/api/staff/api-keys/route.ts
 src/app/[locale]/business/integrations/ApiKeysClient.tsx
 tests/integration/public-api-events.test.ts
+tests/integration/public-api-cursor.test.ts
 tests/integration/api-keys-routes.test.ts
 tests/e2e/api-keys-ui.spec.ts
 docs/PUBLIC-API-V1.md

@@ -14,7 +14,8 @@ have to reconstruct.
 | `prisma/migrations/20260924120000_api_keys/` | Migration 18: `ApiScope`, `ApiKeyState`, the `ApiKey` table, its CHECKs, its partial unique indexes, and two triggers |
 | `src/server/api/keys.ts` | Minting, the digest, the slot ceiling, create / rotate / revoke / list |
 | `src/server/api/auth.ts` | `X-API-Key` verification, the generic refusal, `ApiContext`, `touchKey` |
-| `src/server/api/contract.ts` | The envelope, error codes, cursor encode/decode, page-size clamping |
+| `src/server/api/contract.ts` | The envelope, error codes, the page assembler, page-size clamping. **No key material** — the signer is injected |
+| `src/server/api/cursor.ts` | Cursor signing and verification: the derived key, the binding, the constant-time check |
 | `src/server/api/rate-limit.ts` | The per-key window, consumed only after authentication |
 | `src/server/api/events.ts` | The public event projection, the tenant filter and the sort |
 | `src/server/api/request.ts` | The `/api/v1` pipeline: the order of the checks, the headers, the error mapper |
@@ -112,14 +113,34 @@ transactions beginning in the same millisecond produce two events that compare e
 with ties may be returned differently on each execution, which is precisely how a paginating client
 sees one row twice and another never. Proved with six events forced onto one timestamp.
 
-### 3.4 The cursor is opaque and deliberately unsigned
+### 3.4 The cursor is opaque **and authenticated**
 
-Signing would need a secret this phase may not add, and a pagination token should not be the reason a
-new secret enters a deployment. More to the point there is nothing in it to protect — a timestamp and
-an id the caller was just handed — and **tampering buys nothing**, because the tenant filter comes
-from the key and is `AND`-ed into the query. A cursor minted by one business and replayed by another
-business's key walks the second business's own rows. That is the property worth testing, and it is
-tested, rather than the weaker claim that the string is opaque.
+This shipped wrong the first time and was corrected under review. The original argument — that
+signing was unnecessary because the tenant filter comes from the key, so tampering could only move a
+caller's window within their own events — was true and beside the point. **"Tampering is harmless"
+is not "tampering is detected."** It also left the whole property resting on one `WHERE` clause
+somewhere else, which is a defence that lasts until somebody edits that line.
+
+`src/server/api/cursor.ts` now signs: `v1.<payload>.<HMAC-SHA256>`.
+
+**The key is derived, never raw.** `createHmac("sha256", NEXTAUTH_SECRET).update("walaaplus:api:v1:cursor")`
+— the same idiom `src/server/security/rate-limit.ts` uses for its pepper, so there is one way this
+codebase scopes a root secret. `INTEGRATION_ENCRYPTION_KEY` was considered first and rejected
+because it is **optional by design**: signing cursors with it would break page two wherever webhooks
+are unconfigured, and a present-or-fallback arrangement would make the signing key change the day
+webhooks were configured.
+
+**Bound to the business, not to the key.** A cursor names a position in a feed the business owns and
+every active key may read the same rows; key binding would refuse entitled requests and would break
+a traversal the moment a consumer did the thing we tell them to do — replace a key they suspect. It
+would buy nothing, because a cursor opens nothing without a key.
+
+**MAC before parse.** Attacker-chosen bytes never reach `JSON.parse`, and **no event row is read** on
+a failing path. Length-prefixed fields in the signed message, `timingSafeEqual` for the comparison.
+
+The behaviour change worth noting for anyone reading the old tests: a cross-tenant cursor replay used
+to be **honoured** as a position in the replayer's own feed. It is now a `400`. Both are safe; only
+the second is detected.
 
 ### 3.5 Clamp what has a default; refuse what does not
 
@@ -187,13 +208,20 @@ written on the way through except `lastUsedAt`.
 | `tests/integration/api-key-integrity.test.ts` | 21 | The database refuses a wrong row, under the restricted runtime role |
 | `tests/integration/api-key-concurrency.test.ts` | 7 | The slot ceiling under overlapping transactions |
 | `tests/integration/api-keys-routes.test.ts` | 10 | The owner route: who may reach it, what it returns, the controlled conflict |
-| `tests/integration/public-api-events.test.ts` | 29 | `/api/v1`: authentication, tenancy, pagination, headers, rate limiting, the revocation boundary |
+| `tests/integration/public-api-events.test.ts` | 30 | `/api/v1`: authentication, tenancy, pagination, headers, rate limiting, the revocation boundary |
+| `tests/integration/public-api-cursor.test.ts` | 13 | The signed cursor: round-trip, every tamper case, the binding, the legacy format |
 | `tests/unit/api-contract.test.ts` | 21 | The envelope, the cursor, and the source scans that keep the key out of places it must not reach |
 | `tests/e2e/api-keys-ui.spec.ts` | 11 | The owner screen in English and Arabic, and what a browser session cannot do |
 
-### Guarantees red-proved in Prompt 2
+### Guarantees red-proved
 
 Each was removed in turn and the suite re-run; every one took its own test red.
+
+One entry is honestly different. Replacing the **derivation** with the raw `NEXTAUTH_SECRET` as the
+HMAC key still produces cursors that sign and verify correctly, so no behavioural test can see it —
+it is a key-hygiene property, not a functional one. It is caught by a source assertion in
+`tests/unit/api-contract.test.ts`, and that is the right instrument for it rather than a behavioural
+test that would have to pretend to observe something it cannot.
 
 | Removed | Tests that failed |
 |---|---|
@@ -203,6 +231,11 @@ Each was removed in turn and the suite re-run; every one took its own test red.
 | the credential-shaped-parameter refusal | 2 |
 | `Cache-Control: no-store` and `Vary` | 5 |
 | the rate-limit consumption | 3 |
+| the cursor MAC entirely | 7 |
+| the business binding in the MAC | 4 |
+| verify-before-parse ordering | 7 |
+| the route's call to `verifyCursor` | 7 |
+| the labelled key derivation | 1 (source assertion — see below) |
 
 ---
 

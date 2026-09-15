@@ -93,7 +93,7 @@ Every response, success or failure, carries `apiVersion`.
 {
   "apiVersion": "v1",
   "data": [ { "id": "…", "type": "…", "…": "…" } ],
-  "page": { "nextCursor": "eyJhdCI6…", "count": 25 }
+  "page": { "nextCursor": "v1.eyJhdCI6….kJ8f…", "count": 25 }
 }
 ```
 
@@ -113,7 +113,7 @@ already have, or a database message.
 
 | HTTP | `code` | Means |
 |---|---|---|
-| `400` | `BAD_REQUEST` | A malformed cursor, or a credential in the query string |
+| `400` | `BAD_REQUEST` | A cursor this API did not issue to you, or a credential in the query string |
 | `401` | `UNAUTHORIZED` | Any authentication failure. All five are identical |
 | `403` | `FORBIDDEN` | Authenticated, but the key's scope does not cover this endpoint |
 | `404` | `NOT_FOUND` | No such event **for this key's business** |
@@ -142,13 +142,17 @@ A page of this business's integration events, **newest first**.
 | Name | Type | Default | Behaviour |
 |---|---|---|---|
 | `limit` | integer | `25` | Clamped to `1…100`. An absent, zero, negative or unparseable value gets the default — never an error |
-| `cursor` | opaque string | — | From the previous page's `page.nextCursor`. An empty value means "no cursor" |
+| `cursor` | opaque signed string | — | From the previous page's `page.nextCursor`, **passed back unchanged**. An empty value means "no cursor" |
 
 Any other parameter is ignored, **except** the credential-shaped names in §3, which are refused.
 
-A `cursor` that this API did not issue is a `400`. It is deliberately not treated as "start again":
-quietly serving page one would restart your traversal without telling you, and a client looping
-"fetch page, follow cursor" would re-ingest the whole feed forever.
+A `cursor` that this API did not issue **to you** is a `400`. That covers an edited one, a
+truncated one, one issued to another business, and one of the unsigned cursors this API produced
+before the format was authenticated.
+
+It is deliberately not treated as "start again": quietly serving page one would restart your
+traversal without telling you, and a client looping "fetch page, follow cursor" would re-ingest the
+whole feed forever.
 
 ### The event object
 
@@ -186,18 +190,24 @@ value.
 
 ```
 GET /api/v1/events?limit=50
-→ page.nextCursor = "eyJhdCI6…"
+→ page.nextCursor = "v1.eyJhdCI6….kJ8f…"
 
-GET /api/v1/events?limit=50&cursor=eyJhdCI6…
+GET /api/v1/events?limit=50&cursor=v1.eyJhdCI6….kJ8f…
 → page.nextCursor = null      ← you have reached the end
 ```
 
 Stop when `nextCursor` is `null`. **`page` never carries a total**: a total over a growing table is a
 second scan and is wrong by the time you read it.
 
-**The cursor is opaque.** Do not construct, parse or store assumptions about one; its encoding may
-change without a version bump. A cursor from one key used with another key returns the second key's
-own events, not the first's.
+**The cursor is opaque and signed.** It carries a message authentication code, so the server can
+tell a cursor it issued from one it did not. Do not construct, parse, edit or store assumptions
+about one — its encoding may change without a version bump, and an altered one is a `400`.
+
+A cursor is valid **for the business it was issued to**, not for the individual key. So:
+
+- a cursor from one of your keys works with another of your keys, and **replacing a key does not
+  invalidate a traversal in progress**;
+- a cursor issued to a different business is a `400`, not a silently reinterpreted position.
 
 New events arriving while you page are **not** inserted into your traversal — a keyset walk moves
 strictly backwards from where you started. Poll from the top again for anything newer.
@@ -244,6 +254,8 @@ after a key is found.
 - **Order on `occurredAt`, break ties on `id`** — the same rule we sort by.
 - **Check `envelopeVersion`.** Stop on a version you do not know.
 - **Treat `429` as normal** and honour `Retry-After`.
+- **Pass `nextCursor` back byte for byte.** It is signed; trimming, re-encoding or "tidying" it
+  will fail verification. If you persist it between runs, persist the exact string.
 - **Store the key like a password.** Not in source control, not in a URL, not in a browser.
 - **Replace a key you suspect** — it takes effect immediately and the old value stops working in the
   same transaction the new one is created in.
@@ -273,7 +285,8 @@ run. The following are **not** breaking and may happen without notice:
 
 - a new value of `type` or `entityType` (**handle unknown values by ignoring the event**);
 - a new **optional** field on the event object;
-- a change to the cursor's encoding;
+- a change to the cursor's encoding or signing — outstanding cursors may stop verifying, so treat a
+  `400` on a stored cursor as "start from the top", not as an outage;
 - a change to an error `message` — never to a `code`.
 
 ---

@@ -380,20 +380,83 @@ The cursor carries the last row's `(occurredAt, id)` and the next page asks for 
 rows under the same two-column order. That is an indexed seek at any depth, and it neither repeats
 nor skips when rows are inserted ahead of the window.
 
-### 12.3 It is opaque, and deliberately **not** signed
+### 12.3 It is opaque **and authenticated**
 
-The cursor is base64url and clients are told not to construct one. It is not signed or encrypted,
-and that is a decision rather than an omission:
+> **This section was rewritten after review.** The first version argued the cursor did not need
+> signing, because the tenant filter comes from the key, so tampering could only move a caller's
+> window within their own events.
+>
+> That is true and it is beside the point. **"Tampering is harmless" is not "tampering is
+> detected"**, and this document promised the second. Worse, the argument rested entirely on one
+> `WHERE` clause elsewhere in the codebase: a defence that survives exactly as long as nobody edits
+> that line. The review was right and the cursor is now signed.
 
-- signing needs a secret, and this prompt is not permitted to add one — nor should a pagination
-  token be the reason a new secret enters the deployment;
-- **there is nothing in it to protect.** It holds a timestamp and an id the caller was just handed
-  on the previous page;
-- **tampering buys nothing.** The tenant filter comes from the key and is `AND`-ed into the query;
-  a forged cursor can only move the caller's window within the caller's own events.
+A cursor is `v1.<payload>.<mac>`:
 
-A cursor minted by tenant A and replayed by tenant B's key therefore returns B's events — a test
-asserts exactly that, because it is the property that matters and "the cursor is opaque" is not.
+| Part | What it is |
+|---|---|
+| `v1` | the format. A different value is refused, so the construction can change later without ambiguity |
+| `payload` | base64url of `{at, id}` — the same two fields as before, and still nothing else |
+| `mac` | HMAC-SHA256, full 32 bytes, over a domain-separated canonical message |
+
+**The key is derived, never a raw secret.** `createHmac("sha256", NEXTAUTH_SECRET)` over the label
+`walaaplus:api:v1:cursor` — the same idiom `src/server/security/rate-limit.ts` already uses for its
+pepper, deliberately, so this codebase has one way of turning a root secret into a scoped one. Two
+derivations from one root under different labels cannot collide, so a cursor MAC is no use as a
+rate-limit hash and neither is any use for signing a session.
+
+**Why not `INTEGRATION_ENCRYPTION_KEY`.** The review offered it as the first option. It is
+**optional by deliberate design** (`src/server/env.ts`: a deployment that sends no webhooks must
+start normally). Signing cursors with it would mean `/api/v1` served page one and refused every
+cursor wherever webhooks were unconfigured — one feature failing because an unrelated one is not set
+up, which is the coupling that rule exists to prevent. "Use it if present, else fall back" is worse:
+the signing key would change the day webhooks were configured, silently invalidating outstanding
+cursors, and the security property would depend on deployment configuration rather than on code.
+`NEXTAUTH_SECRET` is required, validated at boot, and present everywhere.
+
+**The signed message is length-prefixed**, field by field, so no choice of values can produce the
+same bytes as a different choice. Today's fields could not collide anyway; the next one added
+cannot reintroduce the problem.
+
+**The MAC is checked before the payload is parsed.** Attacker-chosen bytes never reach `JSON.parse`
+or a date parser, and **no event row is read** on a failing path. The comparison is
+`timingSafeEqual`.
+
+### 12.3.1 Bound to the business, and not to the individual key
+
+The binding is `businessId`. Whether to add `apiKeyId` was asked explicitly at review, so the answer
+is written down rather than assumed:
+
+**Business binding is necessary.** It is the tenant boundary, and it makes a cursor minted for one
+merchant fail verification outright for another rather than being quietly reinterpreted against the
+second merchant's rows. The check and the isolation then agree instead of one relying on the other.
+
+**Key binding would be wrong**, for three reasons:
+
+1. **It would refuse requests that are entitled to succeed.** A cursor names a position in a feed
+   the business owns, and every active key of that business may read exactly the same rows.
+2. **It would punish the one action we tell people to take.** `docs/PUBLIC-API-V1.md` tells a
+   consumer to replace a key they suspect. Under key binding, replacing one mid-traversal would
+   invalidate the cursor in hand and force a restart from the top — re-ingesting the whole feed as
+   the price of rotating a credential.
+3. **It would buy nothing.** A cursor is not a capability and opens nothing without a valid key.
+   Anyone holding a key for this business can mint fresh cursors at will.
+
+Revocation is unaffected either way: a revoked key is refused at authentication, long before its
+cursor is looked at.
+
+### 12.3.2 What is refused
+
+Each of these is the fixed `400`, with the submitted value never echoed and **no row read**:
+
+| Input | Why |
+|---|---|
+| an altered `at` | the MAC covers it |
+| an altered `id` | the MAC covers it |
+| an altered, truncated or absent signature | the MAC comparison fails |
+| a cursor minted for another business | the binding is in the signed message |
+| **an unsigned cursor of the shape this API issued before the fix** | one segment, not three |
+| any other shape, or anything over 512 characters | refused before anything is hashed |
 
 ### 12.4 Clamp what has a default; refuse what does not
 
@@ -433,7 +496,9 @@ Continues T1–T17. "Prompt 2" means this prompt closes it.
 | # | Goal | What stops it |
 |---|---|---|
 | T26 | **Make the database do unbounded work** | `limit` is clamped to 100 and the query is a keyset seek, never an offset scan |
-| T27 | **Cross a tenant boundary with a forged cursor** | The tenant filter is not in the cursor. §12.3 |
+| T27 | **Cross a tenant boundary with a forged cursor** | Two independent things stop it: the cursor is MAC-bound to the business, so another tenant's cursor fails verification; and the tenant filter comes from the key regardless, so even a correctly-signed cursor naming a foreign row returns only this tenant's events. §12.3 |
+| T27a | **Alter a position to reach rows outside the page we offered** | The MAC covers `at` and `id`. A changed cursor is a `400` before any row is read, not a different window |
+| T27b | **Downgrade to the unsigned cursor format** | Verification requires three parts and a valid MAC; the old single-segment form is refused |
 | T28 | **Silently restart a consumer's traversal** | A malformed cursor is `400`, not page one. §12.4 |
 | T29 | **See a row twice, or miss one, while events arrive** | Total order on `(occurredAt, id)` and a strict keyset comparison. Traversal is proved under concurrent insertion |
 
