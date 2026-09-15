@@ -466,15 +466,11 @@ Stated precisely: nothing was exposed, no other tenant's delivery was marked fai
 that is never claimed consumes no attempt. What the caller gained was **control over how long every
 other business's webhooks wait** — without limit, and with no access beyond their own owner session.
 
-Closed in both layers. The service refuses a second test while one is waiting
-(`409 WEBHOOK_TEST_PENDING`, both locales). **Migration 17** adds the same rule to
-`walaaplus_webhook_delivery_guard`, so it also holds against a direct writer and against two
-concurrent callers that both pass the service's `count`. Outstanding test deliveries are now bounded
-by the number of destinations, itself bounded at five.
-
-**Red-proved in both directions**, which is what makes "defence in depth" a fact rather than a
-phrase: removing the database rule turned 3 tests red while the service-level ones stayed green;
-removing the service check turned a different 3 red while the database ones stayed green.
+Closed in three layers, **and only one of them is the guarantee** - see §15, which corrects what
+this section originally claimed. The service refuses a second test while one is waiting
+(`409 WEBHOOK_TEST_PENDING`, both locales); a **partial unique index** serializes two overlapping
+inserts; and the trigger supplies a readable sentence for the sequential case. Outstanding test
+deliveries are bounded by the number of destinations, itself bounded at five.
 
 ### 14.2 LOW — the batch-size rationale computed from a constant that no longer exists
 
@@ -509,8 +505,9 @@ A partial unique index would have expressed 14.1's rule more tersely and was rej
 **an index is validated against rows that already exist.** Migration 16 was being deployed to staging
 as this was written, and if anyone had queued two tests for one destination first, the index would
 have failed to build and stopped the deployment on data nobody created wrongly. A trigger rule
-constrains only what is written from now on — it cannot fail on existing data, takes no table lock
-and rewrites nothing. Any existing duplicate pending tests settle normally; no new pair can be made.
+constrains only what is written from now on — it cannot fail on existing data and rewrites nothing.
+(That argument is superseded by §15, which explains why the trigger was never the guarantee. The
+index that replaced it **does** take a lock, and §15.4 says so.) Any existing duplicate pending tests settle normally; no new pair can be made.
 
 Additive: one `CREATE OR REPLACE FUNCTION`, no table touched, migrations 15 and 16 not amended. The
 guard's body was sliced out of migration 16 by script rather than retyped — a diff shows 26 added
@@ -521,3 +518,96 @@ lines and zero removed.
 No staging, no real merchant endpoint, no provider account, no device, no POS or wallet, and no
 external network path. No outbound request left this machine. Freebuff supplies staging evidence
 separately.
+
+---
+
+## 15. Correction — the trigger was never the concurrency guarantee
+
+Raised in review of `bf00b89`, and correct.
+
+### 15.1 What was wrong
+
+Migration 17 enforced F1 with a `BEFORE INSERT` trigger running `SELECT ... EXISTS`, and §14.1
+called that concurrency-safe. **It is not.**
+
+That check reads only **committed** rows. Under READ COMMITTED — what this product runs — two
+overlapping transactions each run the `SELECT`, each find nothing because the other's row is
+uncommitted, each pass, and each commit. Two waiting tests, which is the thing the rule exists to
+prevent. A trigger that reads is a check, not a mutual exclusion.
+
+### 15.2 Why the test did not catch it
+
+The evidence offered was `Promise.all` of two Prisma `create` calls. Prisma issues those as two
+autocommit statements over **one** connection pool, so they serialize: the second genuinely sees the
+first's committed row and is refused. It demonstrated **sequential** refusal and was read as
+concurrency safety.
+
+That is the mistake worth naming, because it is not a typo. **A test that cannot fail for the reason
+you care about is not evidence about that reason** — and it passed, which made it persuasive.
+
+### 15.3 What the rule is enforced by now
+
+```sql
+CREATE UNIQUE INDEX "WebhookDelivery_one_pending_test_key"
+  ON "WebhookDelivery"("destinationId")
+  WHERE "isTest" AND "status" = 'PENDING';
+```
+
+PostgreSQL serializes a unique index. The second inserter **blocks** on the first transaction's
+uncommitted index entry; when the first commits it is refused with a unique violation, and if the
+first rolls back it proceeds.
+
+The trigger is **kept**, with its claim removed. Its job is to give the ordinary sequential case a
+sentence that says what is wrong instead of a bare duplicate-key error. `queueTestDelivery` keeps its
+`count` as an advisory fast path and now **catches P2002**, so a caller that loses a genuine race is
+told the same thing as one that simply pressed the button twice.
+
+### 15.4 Why the original argument against an index was wrong
+
+It was: an index is validated against existing rows, so a duplicate somewhere would fail the build
+and stop a deployment. That is true about indexes and the wrong conclusion — it traded a real
+guarantee for a convenient deployment.
+
+Migration 17 now keeps the guarantee and makes the failure **legible**: a `DO` block counts duplicate
+waiting tests first and, if it finds any, stops with the exact read-only query an operator needs and
+a statement that nothing was changed. It does not delete, settle, re-point or rewrite any delivery.
+A delivery records that something was asked for; destroying history so an index can build is not a
+repair.
+
+Preflight, safe to run anywhere:
+
+```sql
+SELECT "destinationId", count(*) AS pending_tests
+  FROM "WebhookDelivery"
+ WHERE "isTest" AND "status" = 'PENDING'
+ GROUP BY "destinationId"
+HAVING count(*) > 1;
+```
+
+Staging: Freebuff reports no destinations created, so there can be no deliveries — the query is the
+confirmation to run before applying 17, not a conclusion to carry.
+
+### 15.5 The real proof
+
+`tests/integration/webhook-pending-test-concurrency.test.ts` uses **two `PrismaClient` instances**,
+so two connection pools, and holds the first transaction open:
+
+1. A opens an interactive transaction and inserts a waiting test — uncommitted;
+2. B, on its own pool, attempts the same insert — the test asserts it is **still unsettled** after a
+   deliberate pause, which is the assertion the old test could never make;
+3. A commits — B is refused with a unique violation naming the index;
+4. and the mirror: if A **rolls back**, B is allowed through, because the rule is "one waiting test",
+   not "one attempt ever".
+
+Plus: two different destinations do not serialize against each other, and a destination stops being
+constrained once its waiting test settles.
+
+### 15.6 Status
+
+**Written and reviewed, not yet verified.** Docker Desktop is down on this machine and both
+databases live inside it, so the preflight, migration 17, the concurrency test, its red proof, the
+integration suite, the gate and Playwright have not run. TypeScript, ESLint, `prisma validate` and
+the 616 unit tests pass.
+
+No replacement SHA is offered and nothing is pushed until those are green. `docs/PHASE-3B-RELEASE-GATE.md`
+§7 lists exactly what is outstanding.

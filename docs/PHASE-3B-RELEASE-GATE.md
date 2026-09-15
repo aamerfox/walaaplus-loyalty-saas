@@ -11,9 +11,13 @@ recorded, it is because something was actually wrong.
 **Freebuff deployed `338023e` to staging during this audit and migration 16 is now applied there
 (16 applied / 0 pending / 0 failed) and immutable.** Migrations 15 and 16 are therefore untouched.
 The one database correction this audit required is **migration 17**, additive and not applied
-anywhere yet, and §4.1 explains why it is a function replacement rather than an index — a decision
-taken while that deployment was in flight, which the completed deployment now confirms was the right
-way round.
+anywhere yet.
+
+> **Correction, after review.** The first version of migration 17 enforced F1 with a trigger alone
+> and called that concurrency-safe. It is not: a `BEFORE INSERT` trigger reading `SELECT ... EXISTS`
+> sees only committed rows, so two overlapping transactions each pass it and each commit. §4 now
+> carries a partial unique index as the guarantee, the trigger is kept only for its readable
+> sentence, and §4.3 records how the original test passed without proving anything.
 
 ---
 
@@ -21,10 +25,10 @@ way round.
 
 | | |
 |---|---|
-| Findings | **1 High**, **2 Low**, all fixed and red-proved |
-| New migration | **17** — additive, one INSERT-time rule, no table touched |
+| Findings | **1 High**, **2 Low** |
+| New migration | **17** — additive: a preflight check, a partial unique index, one INSERT-time rule. No table rewritten |
 | Residual risks | 6, all documented, none newly introduced by this audit |
-| Engineering gate | **PASSED** — see the closing line |
+| Engineering gate | **Not asserted in this document.** The verdict belongs to the run that verifies it, and the F1 correction has not been through the quality bar yet — see §7 |
 
 ---
 
@@ -52,12 +56,13 @@ long every other business's webhooks wait**, without limit, with no access beyon
 session, and with the delivery table growing the whole time. One tenant setting another tenant's
 delivery latency is a tenant-isolation failure in the availability dimension.
 
-**Fixed in both layers**, as everything else in this feature is:
+**Fixed in three layers, and only one of them is the guarantee:**
 
-| Layer | Rule |
+| Layer | What it actually does |
 |---|---|
-| `queueTestDelivery` | refuses while that destination has a `PENDING` test, `409 WEBHOOK_TEST_PENDING`, message in both locales |
-| `walaaplus_webhook_delivery_guard` (**migration 17**) | refuses the same INSERT, so it holds against a direct writer and against two concurrent callers that both pass the service's `count` |
+| **Partial unique index** `WebhookDelivery_one_pending_test_key` (migration 17) | **The guarantee.** `UNIQUE ("destinationId") WHERE "isTest" AND "status" = 'PENDING'`. PostgreSQL serializes it: a second inserter blocks on the first transaction's uncommitted index entry and is refused when it commits |
+| `walaaplus_webhook_delivery_guard` trigger (migration 17) | **A readable sentence, not a guarantee.** It reads committed rows only, so it refuses the ordinary sequential case with words instead of a duplicate-key error — and cannot serialize anything |
+| `queueTestDelivery` | An advisory `count` so the common case costs one cheap query, plus a `catch` that turns the index's refusal into the same `409 WEBHOOK_TEST_PENDING` the sequential case gets |
 
 Outstanding test deliveries are now bounded by the number of destinations, which is itself bounded
 at `MAX_DESTINATIONS_PER_BUSINESS` (5).
@@ -95,7 +100,7 @@ Legend: **✅ verified** · **📋 documented residual** · **🔧 fixed by this
 | Owner-only, not owner-or-manager | ✅ | `requireWebhookOwner` = `EDIT_INTEGRATIONS` **and** `role === OWNER`; a manager holds `VIEW_INTEGRATIONS` and reaches the event history only |
 | Every lookup is scoped by tenant | ✅ | 13 `businessId: ctx.businessId` clauses; every `destinationId` lookup is `findFirst({ id, businessId })`, so another tenant's row does not exist for this caller |
 | The database enforces it independently | ✅ | `walaaplus_webhook_delivery_guard` refuses a delivery whose destination belongs to another business, and an attempt whose delivery does |
-| One tenant cannot degrade another | 🔧 | **F1.** Fixed at the service and in migration 17 |
+| One tenant cannot degrade another | 🔧 | **F1.** The partial unique index in migration 17 is the guarantee; the service check and the trigger are conveniences on top of it |
 | The worker path carries no tenant context and needs none | ✅ | `runDueDeliveries` is a system job; every row it touches is re-read by id and claim token |
 
 ### 3.2 What must never leak
@@ -196,30 +201,88 @@ Legend: **✅ verified** · **📋 documented residual** · **🔧 fixed by this
 
 ## 4. Migration 17
 
-### 4.1 Why a function replacement and not a unique index
+### 4.1 Why a unique index, and what the first version got wrong
 
-A partial unique index — `UNIQUE (destinationId) WHERE isTest AND status = 'PENDING'` — expresses
-F1's rule more tersely, and was rejected deliberately.
+The first version of migration 17 used **only** the trigger, and argued for it like this: a unique
+index is validated against rows that already exist, so if an environment already held two waiting
+tests for one destination the index would fail to build and stop the deployment.
 
-**A unique index is validated against rows that already exist.** Migration 16 was being deployed to
-staging while this was written, and has since completed. If anyone had queued two tests for one
-destination before migration 17 ran, the index would fail to build and the deployment would stop, on
-data nobody did anything wrong to create — and staging is now a live environment where that data can
-accumulate before migration 17 is ever applied. A trigger rule constrains only what is written from now on: it cannot fail on existing
-data, takes no table lock, and rewrites nothing.
+That reasoning is factually right about indexes and **wrong about what to do with it**. It traded a
+real guarantee for a convenient deployment, and then described the result as concurrency-safe, which
+it was not:
 
-Existing duplicate pending tests, if staging has any, are left alone. They settle normally through
-the ordinary retry path, and no new pair can be created.
+> A `BEFORE INSERT` trigger running `SELECT ... EXISTS` sees only **committed** rows. Under READ
+> COMMITTED — what this product runs — two overlapping transactions each run that `SELECT`, each
+> find nothing because the other's row is uncommitted, each pass, and each commit. **A trigger that
+> reads is a check, not a mutual exclusion.**
 
-### 4.2 What it does and does not touch
+The guarantee is now the index:
 
-Additive. One `CREATE OR REPLACE FUNCTION`. No table created, altered, rewritten or locked; no row
-changed; no enum value added, renamed or removed; no index created or dropped. Migrations 15 and 16
-are not amended. Replacing a function body leaves the trigger that references it pointing at the
-same function.
+```sql
+CREATE UNIQUE INDEX "WebhookDelivery_one_pending_test_key"
+  ON "WebhookDelivery"("destinationId")
+  WHERE "isTest" AND "status" = 'PENDING';
+```
 
-The guard's body was **sliced out of migration 16 by script rather than retyped** — a diff of the
-two shows 26 added lines and zero removed.
+PostgreSQL serializes that. The second inserter **blocks** on the first transaction's uncommitted
+index entry; when the first commits it is refused with a unique violation, and if the first rolls
+back it proceeds. That is mutual exclusion, not an observation about timing.
+
+The build-failure risk is handled by making the failure **legible** instead of avoiding it. Migration
+17 opens with a `DO` block that counts duplicate waiting tests and, if it finds any, stops with the
+exact read-only query an operator needs and a statement that nothing was changed. It does **not**
+delete, settle, re-point or rewrite a delivery row: a delivery records that something was asked for,
+and destroying history so an index can build is not a repair.
+
+### 4.2 Preflight, and what was actually inspected
+
+Read-only, safe to run anywhere:
+
+```sql
+SELECT "destinationId", count(*) AS pending_tests
+  FROM "WebhookDelivery"
+ WHERE "isTest" AND "status" = 'PENDING'
+ GROUP BY "destinationId"
+HAVING count(*) > 1;
+```
+
+| Environment | Result |
+|---|---|
+| Local development and test databases | **Not yet inspected.** Docker Desktop is down on this machine and both databases live in it — see §7 |
+| Staging | **Not run by me, and not assumed.** Freebuff reports no destinations created, so there can be no deliveries; the query above is the confirmation to run before applying 17, not a conclusion to carry |
+
+Zero rows means migration 17 applies cleanly. Anything else is a human decision about those
+deliveries — let them settle through the ordinary retry path, or settle them deliberately — followed
+by a re-run of the migration.
+
+### 4.3 How the original test passed without proving anything
+
+The evidence offered for the trigger was `Promise.all` of two Prisma `create` calls. Prisma issued
+those as two autocommit statements over **one** connection pool, so they serialized and the second
+genuinely saw the first's committed row. The test demonstrated **sequential** refusal and was read as
+concurrency safety. A test that cannot fail for the reason you care about is not evidence about that
+reason.
+
+`tests/integration/webhook-pending-test-concurrency.test.ts` replaces it with two `PrismaClient`
+instances — two pools — and holds the first transaction open on purpose: it asserts the second insert
+is **still unsettled** while the first is uncommitted, then refused with a unique violation naming
+the index once the first commits, then allowed through if the first rolls back instead. Removing the
+index must make it fail; that red proof is part of §7's outstanding work.
+
+### 4.4 What it does and does not touch
+
+Additive: a read-only preflight, one `CREATE UNIQUE INDEX`, one `CREATE OR REPLACE FUNCTION`. No
+table created, altered or rewritten; no row changed; no enum value added, renamed or removed;
+nothing dropped. Migrations 15 and 16 are not amended. Replacing a function body leaves the trigger
+that references it pointing at the same function.
+
+Building the index locks `WebhookDelivery` for the duration of the build. It is not `CONCURRENTLY`
+because Prisma runs each migration in a transaction and `CREATE INDEX CONCURRENTLY` cannot run in
+one; the table is small — deliveries settle — and the preflight has already established that the
+build will succeed.
+
+The guard's body was **sliced out of migration 16 by script rather than retyped** — a diff of the two
+shows 25 added lines and zero removed.
 
 ---
 
@@ -244,13 +307,44 @@ R6 — save-time port enforcement — was closed before this audit and is not a 
 
 ## 6. What was tested, and what was not
 
-**Tested here, locally:** the full gate (16 steps), the Playwright browser suite twice, the whole
-Vitest suite, `npm audit`, `prisma migrate status` and `migrate diff`, `git diff --check`, a secret
-and control-byte scan over every changed file, a raw-capability scan over the webhook and egress
-trees, resolved `docker compose config` topology assertions for all three variants with secrets
-present and absent, and the probes described above.
+**Verified for the original audit** (`61e7b65`/`bf00b89`, before the F1 correction): the full gate
+(16 steps), the Playwright browser suite twice, the whole Vitest suite, `npm audit`,
+`prisma migrate status` and `migrate diff`, `git diff --check`, a secret and control-byte scan over
+every changed file, a raw-capability scan over the webhook and egress trees, resolved
+`docker compose config` topology assertions for all three variants with secrets present and absent,
+and the probes described above.
 
-**Not tested, and not claimed:** anything on staging, any real merchant endpoint, any provider
+**Verified for the F1 correction:** TypeScript, ESLint, `prisma validate`, and the 616 unit tests —
+everything that does not need a database.
+
+**Not yet verified for the F1 correction, and not claimed:** the duplicate preflight against the
+local databases, migration 17 applying, the overlapping-transaction test, its red proof, the rest of
+the integration suite, the full gate and Playwright. See §7.
+
+**Not tested, and not claimed at all:** anything on staging, any real merchant endpoint, any provider
 account, any device, any POS or wallet, and any external network path. No outbound request left this
 machine — the receiver every test talks to is started and stopped by the test on loopback. Freebuff
 supplies staging evidence separately.
+
+---
+
+## 7. Outstanding — why this document does not assert a verdict
+
+The F1 correction is written and reviewed but **not verified**. Docker Desktop is not running on this
+machine, its backing Windows service is stopped, and the session has no rights to start it; both the
+development and test databases live inside Docker, so nothing database-backed can run.
+
+Blocked until Docker is available:
+
+| | |
+|---|---|
+| Duplicate preflight against the local development and test databases | §4.2 |
+| Migration 17 applying cleanly, including the preflight `DO` block | |
+| `webhook-pending-test-concurrency.test.ts` — the real overlapping-transaction proof | §4.3 |
+| Its red proof: drop the index, watch that test fail, restore | |
+| `webhook-release-gate.test.ts` and the rest of the integration suite | |
+| The full gate, and Playwright twice | |
+
+Until those are green, **no replacement SHA is offered and nothing is pushed.** The corrected work
+sits in the working tree. An engineering-gate verdict asserted from a run that did not happen would
+be the same category of mistake as the one this section exists to correct.

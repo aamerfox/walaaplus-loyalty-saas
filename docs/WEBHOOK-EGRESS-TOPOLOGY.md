@@ -150,7 +150,7 @@ Those codes describe *the caller's request to the gateway*; none of them describ
 | Response bytes read | 2048, then the socket is destroyed | Nothing is kept anyway |
 | Concurrent dispatches in flight | 4 | A one-vCPU host is shared. Over the limit → `BUSY`, retryable, nothing sent |
 | Requests the worker sends per run | ≤ `BATCH_SIZE` (10), sequentially | Unchanged: the runner was already sequential. **Global**, not per tenant — see R8 |
-| Test deliveries waiting per destination | **1** | Migration 17. An unbounded test queue was one tenant's lever on every other tenant's latency |
+| Test deliveries waiting per destination | **1** | Migration 17, enforced by a **partial unique index** - `UNIQUE (destinationId) WHERE isTest AND status = 'PENDING'`. An unbounded test queue was one tenant's lever on every other tenant's latency. The trigger beside it supplies a readable refusal; it reads committed rows only and is not what serializes anything |
 
 ---
 
