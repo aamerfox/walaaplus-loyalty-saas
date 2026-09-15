@@ -1,5 +1,17 @@
 # Phase 3B — implementation notes
 
+> **Scope of this file: Prompt 1 only.**
+>
+> Phase 3B's original deliverable was five things - a public API, API keys, signed outbound
+> webhooks, a private GoHighLevel OAuth app, and one validated POS connector. **Two are built.**
+> This file documents the first of them; Prompts 2 and 3 are documented in
+> `docs/evidence/phase-3b-prompt-2.md`, `docs/evidence/phase-3b-prompt-3.md`,
+> `docs/WEBHOOK-EGRESS-TOPOLOGY.md` and `docs/PHASE-3B-RELEASE-GATE.md`.
+>
+> **The public API, API keys, the GoHighLevel app and a POS connector are not started.** Nothing in
+> this file, and nothing in the webhook release gate, should be read as covering them. The full
+> reconciliation is `docs/PHASE-3B-SCOPE-RECONCILIATION.md`.
+
 Phase 3A ended with a wallet link, a referral attribution and a coupon a cashier records. Phase 3B is
 about the direction none of those went: **outwards**.
 

@@ -99,7 +99,10 @@ lying to the person reading it.
 | **Wallet pass signing and delivery** — Apple certificate, Google issuer, "Add to Wallet" | 3a / 1.5. See `docs/WALLET-CAPABILITY-MATRIX.md` §5 |
 | **Wallet pass updates** — Apple `webServiceURL` + APNs, Google object PATCH | 3a+, and D16 (device-token retention) |
 | **Wallet notifications, location relevance, Smart Tap / Apple VAS** | D17, D18, and platform approval. No date |
-| **POS, public API, webhooks and integrations** | 3b. *Prompt 1 built the internal event record a webhook would read — and no webhook, no endpoint, no key and no provider. Delivery is blocked on D27 (where a signing secret lives) and on a written answer to the SSRF question a merchant-supplied URL raises; every family is classified in* `docs/INTEGRATIONS-CAPABILITY-MATRIX.md` |
+| **Public API and API keys** | 3b, **not built**. No versioned surface, no key model, no `X-API-Key` authentication anywhere. The envelope, pagination and per-key rate limiting it needs do not exist either; the idempotency and audit primitives do, for internal callers. *Unblocked — see* `docs/PHASE-3B-SCOPE-RECONCILIATION.md` §4.1 |
+| **Private GoHighLevel OAuth app** | 3b, **not built and blocked**: a marketplace developer account nobody has created, **D27** for the token, and **D7** because contact sync is customer export to a third party |
+| **One validated POS connector** | 3b, **not built and blocked**: no merchant has asked, each vendor is a separate account and review, and what a POS may do to an append-only ledger is an unanswered design question |
+| **Other outbound integrations** (Telegram report bot, email, SMS, WhatsApp, payments, affiliate) | *Every family is classified in* `docs/INTEGRATIONS-CAPABILITY-MATRIX.md`. All still blocked on **D27** and, where a channel is involved, on D2/D3/D4 |
 | **Advanced loyalty card mechanics** — cashback, discount, gift, membership, multipass | 2+. *Coupon is no longer on this line: Phase 3A Prompt 3 shipped it as a counter-recorded entitlement rather than as a card type that computes a discount* |
 | **Agency, white-label, custom domain, billing, affiliate and franchise** | 4 / 5 |
 | **Workflow automation, AI assistance and prospecting** | 4+ |
