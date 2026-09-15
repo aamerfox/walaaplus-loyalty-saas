@@ -161,6 +161,20 @@ export const AuditAction = {
   /** The owner asked for one fixed synthetic test envelope. Two row ids, no URL. */
   WEBHOOK_TEST_QUEUED: "webhook.test_queued",
 
+  /*
+   * API key lifecycle - Phase 3B.1.
+   *
+   * LIFECYCLE ONLY. There is deliberately no action for "a key was used": one audit row per read
+   * request would let a key holder turn their own rate limit into unbounded writes to the audit
+   * table, and the useful record of use is `ApiKey.lastUsedAt`, which is one monotonic column.
+   *
+   * None of these metadata payloads carries a key or a digest. The public prefix is enough for an
+   * owner to recognise which key an entry is about.
+   */
+  API_KEY_CREATED: "api_key.created",
+  API_KEY_ROTATED: "api_key.rotated",
+  API_KEY_REVOKED: "api_key.revoked",
+
   // ── Phase 3A Prompt 2: referral attribution. Still no reward, anywhere. ───
   /**
    * A newly issued card was recorded as having arrived with an invitation.

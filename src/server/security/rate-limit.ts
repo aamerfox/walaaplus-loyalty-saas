@@ -61,6 +61,17 @@ export const RateLimitScope = {
    */
   STAFF_ENROLL: "staff.enroll",
   STAFF_WRITE: "staff.write",
+
+  /*
+   * Public API, keyed on the API KEY'S ID - Phase 3B.1.
+   *
+   * Every other scope here is consumed BEFORE the caller is known, because the thing keyed on is
+   * something a real person typed. This one is consumed only AFTER the key has been found in the
+   * database, and the reason is in `src/server/api/rate-limit.ts`: a key is a 43-character random
+   * string, so consuming a window before checking it would let an attacker create one counter row
+   * per guess and fill this table with noise they chose.
+   */
+  API_KEY: "api.key",
 } as const;
 export type RateLimitScopeName = (typeof RateLimitScope)[keyof typeof RateLimitScope];
 

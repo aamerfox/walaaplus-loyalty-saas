@@ -234,6 +234,7 @@ model User {
   redemptions         PromotionRedemption[]      @relation("RedemptionRecorder")
   audienceSnapshots   CampaignAudienceSnapshot[] @relation("SnapshotAuthor")
   webhookDestinations WebhookDestination[]
+  apiKeysCreated      ApiKey[]
 }
 
 model Business {
@@ -274,6 +275,7 @@ model Business {
   webhookAttempts     WebhookDeliveryAttempt[]
   pushMessages        PushMessage[]
   pushSubscriptions   PushSubscription[]
+  apiKeys             ApiKey[]
 }
 
 /// A user's role inside one business. Resolved from the database on EVERY request.
@@ -1157,6 +1159,71 @@ model IntegrationEvent {
 }
 
 /// The workflows that emit an event. Two, both already finished and both already safe.
+/// A credential a business uses to read its own data over the public API.
+///
+/// **Only a digest is stored.** The value is 32 bytes of `crypto.randomBytes`, shown once at
+/// creation or rotation and never recoverable - the same shape as a share capability
+/// (`src/server/share/share-links.ts`) and for the same reason: 256 bits has no dictionary to
+/// precompute, and authentication has to find the row from the value alone in ONE indexed lookup
+/// before it knows which business is involved.
+///
+/// Nothing here is customer data. A key row is metadata about a credential.
+model ApiKey {
+  id              String      @id @default(uuid())
+  businessId      String
+  /// The owner's own label. Their screens only.
+  name            String
+  /// `wpk_<8 hex>`. **Not secret and not part of the secret** - a public identifier so an owner can
+  /// tell two keys apart in a list without ever seeing either value again.
+  keyPrefix       String
+  /// sha256 of the whole key string. Unique: two keys can never share a value.
+  keyDigest       String      @unique
+  scope           ApiScope
+  state           ApiKeyState @default(ACTIVE)
+  /// 1..MAX_ACTIVE_KEYS_PER_BUSINESS while ACTIVE, NULL otherwise. The partial unique index on
+  /// (businessId, activeSlot) is what bounds active keys per business under concurrency - a count
+  /// in a trigger would not, because a BEFORE INSERT trigger reads only committed rows.
+  activeSlot      Int?
+  issuedAt        DateTime
+  /// The authority on whether a key still works. **The state column never grants**: a key one
+  /// second past this is refused whether or not anything has flipped its state to EXPIRED yet.
+  expiresAt       DateTime
+  revokedAt       DateTime?
+  /// Moves forward only, and only when a key is actually used. Never backwards - a trigger refuses.
+  lastUsedAt      DateTime?
+  /// Set when this key replaced another through rotation. Provenance, not a secret.
+  rotatedFromId   String?
+  createdByUserId String?
+  createdAt       DateTime    @default(now())
+
+  business  Business @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  createdBy User?    @relation(fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  // The partial unique index that bounds active keys per business - UNIQUE (businessId, activeSlot)
+  // WHERE activeSlot IS NOT NULL - lives in migration 18 only. Prisma cannot express a partial
+  // index, and declaring the unconditional form here would make the two disagree; the same
+  // convention as `PromotionRedemption_voids_key` and `WebhookDelivery_one_pending_test_key`.
+  @@unique([businessId, name])
+  @@index([businessId, state])
+}
+
+/// What a key may do. **One value**, because the owner approved one scope for v1.
+///
+/// A set would be the general case and there is nothing yet to put in one; adding a second value
+/// later is an additive migration, exactly as `WebhookErrorClass` grew in migration 16.
+enum ApiScope {
+  EVENTS_READ
+}
+
+/// ACTIVE is the only state that authenticates, and it is not sufficient on its own - `expiresAt`
+/// is checked too. EXPIRED is bookkeeping that frees the key's slot; REVOKED is an owner's decision.
+/// Both are terminal.
+enum ApiKeyState {
+  ACTIVE
+  EXPIRED
+  REVOKED
+}
+
 enum IntegrationEventType {
   PROMOTION_REDEMPTION_RECORDED
   PROMOTION_REDEMPTION_VOIDED

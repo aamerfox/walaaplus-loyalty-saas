@@ -87,6 +87,17 @@ const NO_DELETE_TABLES = [
    * would erase the record of what this business tried to send.
    */
   "WebhookDelivery",
+  /*
+   * A key's lifecycle is a state change - active, expired, revoked - and `lastUsedAt` moves forward
+   * on use, so UPDATE is unavoidable. What it may become is narrowed by `api_key_guard`: the
+   * business, the digest, the prefix, the scope, the name and both time stamps are frozen, EXPIRED
+   * and REVOKED are terminal, and last-use only ever moves forward.
+   *
+   * DELETE is removed at the grant as well as refused by the trigger. A key row is the record that
+   * a business held a credential between two dates; deleting one erases that, and the retention
+   * question is an open owner decision (D31) rather than something a DELETE answers.
+   */
+  "ApiKey",
 ];
 
 const MIGRATOR_ONLY_TABLES = ["_prisma_migrations"];

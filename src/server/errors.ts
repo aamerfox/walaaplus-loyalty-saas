@@ -75,6 +75,10 @@ export const ConflictCode = {
   CARD_NOT_TRANSACTABLE: "CARD_NOT_TRANSACTABLE",
   /** The group was already reversed, or is itself a reversal. */
   ALREADY_REVERSED: "ALREADY_REVERSED",
+  /** A business already holds the maximum number of active API keys. */
+  API_KEY_LIMIT_REACHED: "API_KEY_LIMIT_REACHED",
+  /** The key is revoked or expired, and the requested operation needs an active one. */
+  API_KEY_NOT_ACTIVE: "API_KEY_NOT_ACTIVE",
   /**
    * A destination already has a test delivery waiting to be sent.
    *

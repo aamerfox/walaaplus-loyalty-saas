@@ -19,6 +19,7 @@ import { createStampProgram, type StampProgramSummary } from "@/server/program/s
 
 const APP_TABLES = [
   "AuthRateLimit",
+  "ApiKey",
   "WebhookDeliveryAttempt",
   "WebhookDelivery",
   "WebhookDestination",
@@ -95,6 +96,9 @@ const APPEND_ONLY_TABLES = [
   "WebhookDestination",
   "WebhookDelivery",
   "WebhookDeliveryAttempt",
+  // `api_key_no_truncate` refuses a TRUNCATE for the owner as well as the runtime role, so the
+  // reset has to turn it off like every other protected table.
+  "ApiKey",
 ];
 
 /** Wipe every application table, with the append-only triggers off for the duration. */
