@@ -47,12 +47,31 @@
 -- first's uncommitted entry and is refused when it commits. Proved directly in
 -- `tests/integration/api-key-concurrency.test.ts`.
 --
--- LOCKING. `DROP INDEX` and `CREATE UNIQUE INDEX` both take an ACCESS EXCLUSIVE
--- lock on "ApiKey" for the duration, inside this migration's transaction. That
--- is stated rather than glossed: `ApiKey` is a small table - at most five active
--- keys per business plus their retired predecessors - so the build is
--- milliseconds, and no CONCURRENTLY variant is warranted. Authentication reads
--- block for that instant; nothing else in the product touches this table.
+-- LOCKING. The two statements do NOT take the same lock, and the difference is
+-- worth stating precisely rather than rounding to the stronger one:
+--
+--   DROP INDEX            takes ACCESS EXCLUSIVE on "ApiKey" - blocks readers
+--                         and writers alike.
+--   CREATE UNIQUE INDEX   takes SHARE (this is the plain form, not
+--                         CONCURRENTLY) - blocks writers, ALLOWS readers.
+--
+-- The operational consequence for THIS migration is nonetheless that reads and
+-- writes are both blocked throughout, and the reason is the transaction rather
+-- than the second statement. Prisma runs a migration file in ONE transaction,
+-- and PostgreSQL holds every lock a transaction acquires until it commits. So
+-- the DROP's ACCESS EXCLUSIVE is taken at the first statement and is still held
+-- when the CREATE runs; the CREATE's weaker SHARE requirement is already
+-- satisfied and adds nothing. From the DROP until commit, "ApiKey" is
+-- unavailable to everybody.
+--
+-- That is the property the swap needs - no window in which neither index exists
+-- and a duplicate live name could be inserted - and it is bought by the DROP,
+-- not by the CREATE.
+--
+-- The cost is small here and that is why no CONCURRENTLY variant is warranted:
+-- `ApiKey` holds at most five active keys per business plus their retired
+-- predecessors, so the build is milliseconds. Authentication reads block for
+-- that instant; nothing else in the product touches this table.
 
 DROP INDEX "ApiKey_businessId_name_key";
 
