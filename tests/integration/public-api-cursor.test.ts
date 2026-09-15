@@ -104,7 +104,22 @@ describe("a cursor that was altered", () => {
 
   it("is refused when the signature is changed, truncated or dropped", () => {
     const [format, payload, mac] = parts(signed);
-    const flipped = `${mac.slice(0, -1)}${mac.at(-1) === "A" ? "B" : "A"}`;
+
+    /*
+     * Flip a BIT OF THE DECODED MAC, not a character of its encoding.
+     *
+     * An earlier version changed the last base64url character (`A` to `B`, else to `A`) and was
+     * flaky about one run in sixteen. A 32-byte value encodes to 43 base64url characters, and the
+     * last one carries only four significant bits - the bottom two are padding - so `A` and `B`
+     * decode to exactly the same bytes. Whenever the real MAC happened to end in `A`, the "forged"
+     * signature was the genuine one, verification correctly succeeded, and the assertion failed.
+     *
+     * Operating on the bytes cannot have that problem: a flipped bit is always a different value.
+     */
+    const bytes = Buffer.from(mac, "base64url");
+    bytes[0] ^= 0x01;
+    const flipped = bytes.toString("base64url");
+    expect(flipped, "the forgery must differ from the real signature").not.toBe(mac);
     for (const forged of [
       `${format}.${payload}.${flipped}`,
       `${format}.${payload}.${mac.slice(0, 20)}`,
