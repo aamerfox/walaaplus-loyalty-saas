@@ -716,6 +716,17 @@ model PromotionRedemption {
   recordedAt                DateTime         @default(now())
   recordedByUserId          String?
   createdAt                 DateTime         @default(now())
+  /// The TRANSACTION this row was written in, assigned by `walaaplus_validate_redemption` from
+  /// `pg_current_xact_id()` and never chooseable by a caller. An `IntegrationEvent` naming this
+  /// redemption is accepted only when the current transaction's id equals this one.
+  ///
+  /// `Unsupported("xid8")` because Prisma has no `xid8` mapping and because NOTHING IN APPLICATION
+  /// CODE SHOULD EVER READ OR WRITE IT — it is excluded from the generated client on purpose. Only
+  /// the two triggers touch it.
+  ///
+  /// NULLABLE, permanently: rows existed before the guarantee did, and an invented value would be a
+  /// fabricated claim about when something happened. A NULL is refused by the event rule.
+  writeXactId               Unsupported("xid8")?
 
   business   Business                @relation(fields: [businessId], references: [id], onDelete: Restrict)
   promotion  Promotion               @relation(fields: [promotionId], references: [id], onDelete: Restrict)

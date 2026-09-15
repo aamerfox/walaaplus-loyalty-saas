@@ -957,9 +957,11 @@ knowing.
 recorded before the migration have no event, and none can be created for them afterwards. A
 backfilled row would assert that a decision to publish was taken at a moment when it was not.
 `occurredAt` is assigned by the database, so nobody can date one into the past — and the trigger
-further requires it to equal the redemption's own `recordedAt`, which is true exactly when the two
-rows were written in the same transaction. Supplying a matching timestamp does not help: the
-supplied value is discarded before it is compared.
+further requires the redemption's stored **transaction identity** to be the transaction doing the
+writing, which is true exactly when the two rows were written together. Supplying a matching value
+does not help: what the caller supplies is discarded before it is compared, and the comparison is an
+exact 64-bit transaction id rather than a timestamp with a resolution. A redemption recorded before
+that guarantee existed carries no identity and is refused outright.
 
 **The database refuses a row that does not describe something that happened.** The entity must exist,
 belong to the same business, and be the kind the event type claims. The table is append-only at the

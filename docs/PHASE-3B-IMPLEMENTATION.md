@@ -153,7 +153,11 @@ value it supplies is discarded before the comparison. There is a test that tries
 It is checked **last**, after the existence, tenant and entity-kind rules, so each refusal stays
 specific about what was actually wrong rather than collapsing into one message.
 
-### The residual, stated
+### The residual — CORRECTED by migration `20260925130000`
+
+> **This section described the rule as it shipped. The residual below turned out to be exploitable,
+> and has since been closed. Read §"Transaction identity" at the end of this document for what the
+> rule is now.**
 
 The columns are `TIMESTAMP(3)`, so two transactions beginning within the same millisecond would
 compare equal. That closes the thing the rule exists for — an **old** redemption can never be matched
@@ -282,3 +286,80 @@ looking for a customer's name.
 Arabic reads right to left at phone width: heading, subtitle, notice, list rows and the closing line
 all right-aligned, with the hamburger and the locale switch on the left. The ISO-shaped timestamps
 and the hex reference are `<bdi>`-isolated so they stay left-to-right inside the Arabic run.
+
+
+---
+
+## Transaction identity — the correction to the same-transaction rule
+
+**Migration `20260925130000_integration_event_transaction_identity`.** Added after the rule above had
+shipped and been deployed, because the residual it documented turned out to matter.
+
+### How it surfaced
+
+Not in review. A **Phase 4 engineering gate failed** on
+`integration-events-integrity.test.ts > refuses one written in a later transaction even seconds
+afterwards`. That test is correct; it fails exactly when the one-millisecond window opens.
+
+### Why the residual was not small
+
+Measured on this project's own database — 400 consecutive **separate** transactions:
+
+```
+consecutive SEPARATE transactions sharing the same TIMESTAMP(3): 3 of 399 (0.8%)
+```
+
+About 1 attempt in 125. **A writer performing a backfill is not limited to one attempt**, so retrying
+reaches near-certainty within a few hundred tries. Against a deliberate direct writer the timestamp
+rule was therefore not a guarantee. It did completely prevent what it was written for — an *old*
+redemption can never be matched, because no new transaction shares a millisecond weeks in the past —
+and that half was never in question.
+
+### The rule now
+
+`PromotionRedemption` carries `writeXactId xid8`, assigned by `walaaplus_validate_redemption` from
+`pg_current_xact_id()` and overwritten regardless of what a caller supplies, exactly as `recordedAt`
+already was. `walaaplus_validate_integration_event` requires:
+
+```sql
+IF redemption."writeXactId" IS DISTINCT FROM pg_current_xact_id() THEN   -- exact, not approximate
+```
+
+Equality is now identity rather than proximity. There is no window.
+
+### Why `pg_current_xact_id()` and not `xmin`
+
+A transaction-id comparison was proposed once before and **rightly rejected**, because savepoint
+behaviour had not been proven safe. Proven now, on PostgreSQL 15:
+
+```
+pg_current_xact_id() inside a SAVEPOINT      ->  the SAME top-level id
+xmin of a row inserted inside a SAVEPOINT    ->  a DIFFERENT id (the SUBtransaction's)
+xmin inside a plpgsql EXCEPTION block        ->  a DIFFERENT id (also a subtransaction)
+```
+
+`xmin` would have **refused legitimate same-transaction writes** the moment anything opened a
+savepoint — a retry helper, a nested write, a future Prisma release — and the failure mode would have
+been rejecting real work in production. `pg_current_xact_id()` returns the top-level id at every
+depth, so both sides of the comparison agree under savepoints by construction. A test writes an event
+two savepoints deep and requires it to be **accepted**; if that ever goes red, the implementation has
+drifted back to the rejected design.
+
+### Legacy rows fail closed
+
+`writeXactId` is nullable and stays that way: redemptions existed before the guarantee did, and an
+invented identity would be a fabricated claim about when something happened. A `NULL` is **refused**,
+with its own message so the reason is never confused with the general one. Such a redemption could
+only ever have received an event inside its own transaction, which ended before the migration existed.
+
+### What was preserved
+
+Migration 14's timestamp comparison is **kept as well as**, not replaced by, the identity check — it is
+now implied by it, and a second independent statement of the same fact costs nothing. Every other
+migration-14 rule is untouched: the server-assigned `occurredAt`, the event-type → entry mapping,
+"the redemption does not exist", the tenant check, the entry-kind check, and the fatal fallthrough for
+an unknown `entityType`. Both function bodies were **extracted from the applied migrations and edited
+in place**, not retyped, and the diff is in the evidence.
+
+Migrations 14–19 are byte-for-byte unchanged; the correction is ordered **before** the in-progress
+Phase 4 migration so staging can deploy it without deploying incomplete Phase 4 work.
