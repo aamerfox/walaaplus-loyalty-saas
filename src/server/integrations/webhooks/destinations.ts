@@ -415,8 +415,13 @@ export async function queueTestDelivery(ctx: TenantContext, destinationId: strin
    * therefore bounded by the number of destinations, which is itself bounded at
    * MAX_DESTINATIONS_PER_BUSINESS.
    *
-   * `walaaplus_webhook_delivery_guard` enforces the same rule at INSERT (migration 17), so it holds
-   * against a writer that is not this function.
+   * **This count is advisory and is not what makes the rule true.** Two overlapping requests can
+   * both run it, both find nothing, and both go on to insert. What serializes them is the partial
+   * unique index `WebhookDelivery_one_pending_test_key` (migration 17): the second inserter blocks
+   * on the first's uncommitted index entry and is refused when the first commits. The count is here
+   * so the ordinary case - an owner pressing the button twice - costs one cheap query rather than a
+   * transaction that has to roll back, and the `catch` below turns the index's refusal into exactly
+   * the same answer for the caller that raced.
    */
   const waiting = await prisma.webhookDelivery.count({
     where: {
@@ -430,11 +435,38 @@ export async function queueTestDelivery(ctx: TenantContext, destinationId: strin
     throw new ConflictError("A test is already queued for this destination", ConflictCode.WEBHOOK_TEST_PENDING);
   }
 
+  try {
+    return await queueTestDeliveryRow(ctx, existing.id);
+  } catch (e) {
+    /*
+     * The race, answered identically to the ordinary case.
+     *
+     * P2002 on this table means the partial unique index refused a second waiting test - the caller
+     * lost a genuine concurrent insert. A 500 would be the wrong answer to a request that was
+     * refused correctly, and "something went wrong" is the wrong sentence for "your first test is
+     * still queued".
+     *
+     * The trigger's own `check_violation` arrives as a raw database error rather than P2002, so it
+     * is matched on the sentence it raises - the one written in migration 17 and asserted by
+     * `webhook-release-gate.test.ts`.
+     */
+    const raced =
+      (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") ||
+      (e instanceof Error && e.message.includes("a test is already queued for this destination"));
+    if (raced) {
+      throw new ConflictError("A test is already queued for this destination", ConflictCode.WEBHOOK_TEST_PENDING);
+    }
+    throw e;
+  }
+}
+
+/** The write itself, kept separate so the refusal mapping above reads as one thought. */
+async function queueTestDeliveryRow(ctx: TenantContext, destinationId: string): Promise<{ deliveryId: string }> {
   return prisma.$transaction(async (tx) => {
     const delivery = await tx.webhookDelivery.create({
       data: {
         businessId: ctx.businessId,
-        destinationId: existing.id,
+        destinationId,
         isTest: true,
         // Due immediately; the worker picks it up on its next pass.
         nextAttemptAt: new Date(),
@@ -446,7 +478,7 @@ export async function queueTestDelivery(ctx: TenantContext, destinationId: strin
       actorUserId: ctx.userId,
       action: AuditAction.WEBHOOK_TEST_QUEUED,
       entityType: "WebhookDestination",
-      entityId: existing.id,
+      entityId: destinationId,
       // Two row ids. No URL, no host, no secret.
       metadata: { deliveryId: delivery.id },
     });

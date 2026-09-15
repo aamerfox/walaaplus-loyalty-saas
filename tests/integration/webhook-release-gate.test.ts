@@ -43,9 +43,21 @@ import { createStampCafe, migratorPrisma, resetDatabase, type StampCafeFixture }
  * claimed consumes no attempt. What the caller gained was **control over how long every other
  * business's webhooks wait** — without limit, and with no access beyond their own owner session.
  *
- * Closed in two places, as everything else in this feature is: the service refuses, and
- * `walaaplus_webhook_delivery_guard` refuses (migration 17), so it also holds against a writer
- * holding the runtime role directly.
+ * Closed in three places, and only one of them is the guarantee:
+ *
+ *   - a **partial unique index**, `UNIQUE (destinationId) WHERE isTest AND status = 'PENDING'`,
+ *     which PostgreSQL serializes — the second inserter blocks on the first transaction's
+ *     uncommitted index entry and is refused when it commits. That is the guarantee, and it is
+ *     proved in `webhook-pending-test-concurrency.test.ts` against two real connection pools;
+ *   - the `walaaplus_webhook_delivery_guard` trigger, which reads **committed rows only** and so
+ *     refuses the ordinary sequential case with a sentence rather than a duplicate-key error. It
+ *     cannot serialize anything, and an earlier version of this file wrongly said it could;
+ *   - `queueTestDelivery`, whose `count` is advisory and whose `catch` turns the index's refusal
+ *     into the same 409 the sequential case gets.
+ *
+ * What is asserted HERE is the sequential behaviour and the readable refusal. The concurrency
+ * proof deliberately lives in its own file, because it needs two pools and a transaction held open
+ * and would be invisible mixed in with these.
  *
  * ## The two that were already true, and are now asserted
  *
@@ -160,17 +172,32 @@ describe("one owner cannot fill a queue every tenant shares", () => {
 
   it("refuses a direct insert too, through the restricted runtime role", async () => {
     /*
-     * The half that matters most. The service's check is a `count` followed by an insert, which two
-     * concurrent callers could both pass; the trigger is what makes the rule true rather than
-     * likely, and it is also what holds against a second service, a backfill script or a console
-     * session holding the same runtime role.
+     * The rule holds against a writer that is not the service - a second service, a backfill
+     * script, a console session - and the caller gets the trigger's sentence rather than a raw
+     * duplicate-key error.
+     *
+     * This is SEQUENTIAL: the first insert has committed before the second is sent. That is what
+     * the trigger can decide. Whether two OVERLAPPING transactions can both get through is a
+     * different question with a different answer, and it is asked in
+     * `webhook-pending-test-concurrency.test.ts`.
      */
     await insertTestDelivery();
     await expect(insertTestDelivery()).rejects.toThrow(/a test is already queued for this destination/);
     expect(await pendingTests()).toBe(1);
   });
 
-  it("refuses two concurrent inserts, which is what a count-then-insert cannot do alone", async () => {
+  it("refuses the second of two inserts issued together on one pool", async () => {
+    /*
+     * **This does not prove concurrency safety, and an earlier version of this file said it did.**
+     *
+     * Prisma issues these as two autocommit statements over ONE connection pool, so they serialize:
+     * the second genuinely sees the first's committed row, and the trigger refuses it. What this
+     * shows is that firing the service's own client at the rule from two call sites at once still
+     * ends with one waiting test - useful, and not the same claim.
+     *
+     * The real question - two transactions overlapping, neither committed - needs two pools and a
+     * transaction held open, and is answered in `webhook-pending-test-concurrency.test.ts`.
+     */
     const results = await Promise.allSettled([insertTestDelivery(), insertTestDelivery()]);
     expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
     expect(results.filter((r) => r.status === "rejected")).toHaveLength(1);
@@ -198,6 +225,27 @@ describe("one owner cannot fill a queue every tenant shares", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].def).toContain('IF NEW."isTest" AND EXISTS');
     expect(rows[0].def).toContain("a test is already queued for this destination");
+  });
+
+  it("carries the partial unique index that is the actual guarantee", async () => {
+    /*
+     * Read from the live catalogue, not the migration file. The index is what serializes two
+     * overlapping inserts; its behaviour is proved in
+     * `webhook-pending-test-concurrency.test.ts`, and this asserts the object exists with the
+     * predicate it is supposed to have - partial, on the destination, restricted to waiting tests.
+     */
+    const rows = await migratorPrisma().$queryRaw<{ indexdef: string }[]>`
+      SELECT indexdef FROM pg_indexes
+       WHERE schemaname = 'public'
+         AND tablename = 'WebhookDelivery'
+         AND indexname = 'WebhookDelivery_one_pending_test_key'
+    `;
+    expect(rows).toHaveLength(1);
+    const def = rows[0].indexdef;
+    expect(def).toContain("CREATE UNIQUE INDEX");
+    expect(def).toContain('"destinationId"');
+    expect(def).toMatch(/WHERE .*"isTest"/);
+    expect(def).toMatch(/PENDING/);
   });
 
   it("answers 409 with that code at the route, and creates nothing extra", async () => {

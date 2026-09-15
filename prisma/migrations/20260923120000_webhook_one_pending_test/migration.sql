@@ -17,33 +17,146 @@
 -- tenant's delivery latency is a tenant-isolation failure in the availability dimension, and the
 -- table grows without bound while it happens.
 --
--- The service now refuses a second test while one is waiting. This is the same rule at the layer
--- that cannot be bypassed, so it also holds against a direct writer holding the runtime role.
+-- WHAT ENFORCES IT, AND WHAT MERELY EXPLAINS IT
 --
--- WHY A FUNCTION REPLACEMENT AND NOT A UNIQUE INDEX
+-- The first version of this migration used ONLY the trigger below, and claimed that made the rule
+-- concurrency-safe. That claim was wrong, and it is worth writing down why so it is not made again.
 --
--- A partial unique index - UNIQUE (destinationId) WHERE isTest AND status = 'PENDING' - would
--- express this more tersely, and it was rejected deliberately.
+-- A BEFORE INSERT trigger running `SELECT ... EXISTS` sees only COMMITTED rows. Under READ
+-- COMMITTED - what this product runs - two overlapping transactions T1 and T2 can each run that
+-- SELECT, each find nothing because the other's row is uncommitted, each pass the check, and each
+-- commit. Two pending tests. A trigger that reads is a check, not a mutual exclusion.
 --
--- Migration 16 is being deployed to staging as this is written. A unique index is validated against
--- rows that ALREADY EXIST, so if anyone had queued two tests for one destination before this
--- migration ran, the migration would fail and the deployment would stop on data nobody did anything
--- wrong to create. A trigger rule constrains only what is written from now on: it cannot fail on
--- existing data, it takes no table lock, and it rewrites nothing.
+-- The test that "proved" it was `Promise.all` of two Prisma creates. Prisma issued those as two
+-- autocommit statements on a connection pool, so they serialized and the second genuinely saw the
+-- first's committed row. It demonstrated sequential refusal and was read as concurrency safety.
 --
--- Existing duplicate PENDING tests, if any exist on staging, are therefore left alone. They settle
--- normally through the ordinary retry path and no new pair can be created.
+-- So the guarantee is now a PARTIAL UNIQUE INDEX:
+--
+--   UNIQUE ("destinationId") WHERE "isTest" AND "status" = 'PENDING'
+--
+-- PostgreSQL serializes that: the second inserter blocks on the first transaction's uncommitted
+-- index entry and, when the first commits, is refused with a unique violation. If the first rolls
+-- back, the second proceeds. That is a real mutual exclusion and not an observation about timing.
+--
+-- The trigger rule is KEPT, and its job is now only to give the ordinary sequential case a sentence
+-- that says what is wrong rather than a bare duplicate-key error. It no longer claims to be the
+-- concurrency guarantee, because it is not one.
+--
+-- WHY THE TABLE IS LOCKED FIRST
+--
+-- The preflight and the index build must see the same table, and between them sits a window the
+-- RUNNING APPLICATION can write through. Staging is live on a build that has no bound on test
+-- deliveries at all: an owner pressing the test button twice in that window would insert the very
+-- duplicate the preflight has just certified absent, and the index build would then fail - after
+-- the migration had already reported the table clean.
+--
+-- So the first statement takes SHARE ROW EXCLUSIVE on "WebhookDelivery" and Prisma's
+-- per-migration transaction holds it until commit. That mode blocks INSERT, UPDATE and DELETE -
+-- including the running web and worker - while still allowing reads, which is the least authority
+-- that makes the preflight's answer still true when the index is built. Readers are not blocked,
+-- so the owner's screens and the delivery list keep working throughout.
+--
+-- The window is the preflight count plus one index build on a small table. Writers that arrive
+-- during it wait rather than fail.
+--
+-- WHY A PREFLIGHT BLOCK, AND NOT A QUIET REPAIR
+--
+-- A unique index IS validated against rows that already exist, which is the reason the first
+-- version avoided one. That was the wrong trade: it swapped a real guarantee for a convenient
+-- deployment. The right answer is to keep the guarantee and make the failure legible.
+--
+-- The DO block below counts duplicate pending test rows BEFORE the index is built and, if it finds
+-- any, stops the migration with the exact query an operator needs. It does NOT delete, settle,
+-- re-point or rewrite a single delivery row: a delivery is a record that something was asked for,
+-- and a migration that quietly disposed of one to make an index build would be destroying history
+-- to save itself an error message.
+--
+-- Read-only preflight, safe to run against any environment before deploying (this takes no lock
+-- and is the query to run by hand ahead of time; the migration takes the lock itself):
+--
+--   SELECT "destinationId", count(*) AS pending_tests
+--     FROM "WebhookDelivery"
+--    WHERE "isTest" AND "status" = 'PENDING'
+--    GROUP BY "destinationId"
+--   HAVING count(*) > 1;
+--
+-- Zero rows means this migration applies cleanly. If it returns anything, a human decides what to
+-- do with those deliveries - let them settle through the ordinary retry path, or settle them
+-- deliberately - and re-runs the migration afterwards.
+--
+-- Checked before writing this: the local development and test databases both return zero rows.
+-- Freebuff reports staging has no created destinations, so it can have no deliveries; the query
+-- above is the confirmation to run there rather than an assumption to carry.
 --
 -- WHAT THIS DOES NOT DO
 --
--- No table is created, altered, rewritten or locked. No row changes. No enum value is added,
--- renamed or removed. No index is created or dropped. Migrations 15 and 16 are NOT amended: both
--- are applied on staging and stay exactly as they are. Replacing a function body leaves the trigger
--- that references it pointing at the same function, so no trigger is dropped or recreated.
+-- No table is created, altered or rewritten. No row changes. No enum value is added, renamed or
+-- removed. Migrations 15 and 16 are NOT amended: both are applied on staging and stay exactly as
+-- they are. Replacing a function body leaves the trigger that references it pointing at the same
+-- function.
 --
 -- The whole of `walaaplus_webhook_delivery_guard` is reproduced below because that is what
 -- CREATE OR REPLACE requires. Its body was copied from migration 16 rather than retyped; the only
 -- change is the single INSERT-time rule marked in place.
+
+-- ── Hold the table still, so the preflight's answer is still true below ─────
+--
+-- SHARE ROW EXCLUSIVE: blocks every writer, allows every reader, and is self-exclusive so two
+-- concurrent deployments cannot interleave here either. Held by Prisma's migration transaction
+-- until it commits, which is what closes the window between the count and the index.
+
+LOCK TABLE "WebhookDelivery" IN SHARE ROW EXCLUSIVE MODE;
+
+-- ── Preflight: refuse to proceed rather than repair anything ─────────────────
+--
+-- Runs with the lock already held, so nothing can insert a duplicate between this count and the
+-- CREATE UNIQUE INDEX below. If it raises, the whole migration transaction rolls back: the lock is
+-- released, the index is not created, and NOT ONE ROW HAS BEEN MODIFIED.
+
+DO $preflight$
+DECLARE
+  offenders INT;
+BEGIN
+  SELECT count(*) INTO offenders FROM (
+    SELECT "destinationId"
+      FROM "WebhookDelivery"
+     WHERE "isTest" AND "status" = 'PENDING'
+     GROUP BY "destinationId"
+    HAVING count(*) > 1
+  ) AS d;
+
+  IF offenders > 0 THEN
+    RAISE EXCEPTION USING
+      ERRCODE = 'check_violation',
+      MESSAGE = format(
+        'Migration 17 blocked: %s destination(s) already hold more than one PENDING test delivery.',
+        offenders),
+      DETAIL  = 'The partial unique index this migration creates cannot be built while they exist.',
+      HINT    = 'Run: SELECT "destinationId", count(*) FROM "WebhookDelivery" WHERE "isTest" AND "status" = ''PENDING'' GROUP BY "destinationId" HAVING count(*) > 1; then let those deliveries settle through the normal retry path, or settle them deliberately. Nothing is deleted or rewritten automatically.';
+  END IF;
+END
+$preflight$;
+
+-- ── The guarantee ───────────────────────────────────────────────────────────
+--
+-- A partial unique index, so it constrains only what is waiting. A destination may have any number
+-- of test deliveries over its life; it may have one WAITING.
+--
+-- Not CONCURRENTLY: Prisma runs each migration inside a transaction and CREATE INDEX CONCURRENTLY
+-- cannot run in one - and CONCURRENTLY would also defeat the point, because it deliberately does
+-- NOT hold the table still.
+--
+-- This build takes its own lock on top of the one already held, and writers stay blocked until the
+-- migration commits. That is a real cost and is stated plainly rather than waved away: the table is
+-- small because deliveries settle, and the preflight above has already established the build will
+-- succeed, so the window is short and bounded.
+
+CREATE UNIQUE INDEX "WebhookDelivery_one_pending_test_key"
+  ON "WebhookDelivery"("destinationId")
+  WHERE "isTest" AND "status" = 'PENDING';
+
+-- ── The readable refusal ────────────────────────────────────────────────────
 
 CREATE OR REPLACE FUNCTION walaaplus_webhook_delivery_guard() RETURNS trigger
 LANGUAGE plpgsql AS $$
@@ -87,7 +200,6 @@ BEGIN
       END IF;
     END IF;
 
-
     -- Work starts unstarted. A row created as DELIVERED would be a delivery nobody made, and one
     -- created already claimed would be a lease nobody holds.
     IF NEW."status" <> 'PENDING' OR NEW."attemptCount" <> 0 OR NEW."settledAt" IS NOT NULL THEN
@@ -99,23 +211,16 @@ BEGIN
     END IF;
 
     /*
-     * ONE test delivery in flight per destination.
+     * One test delivery in flight per destination - the READABLE half of the rule.
      *
-     * LAST among the INSERT checks, deliberately. Placed before them it changed which sentence a
-     * row breaking two rules at once reports - a forged-claim row that was also a duplicate test
-     * said "a test is already queued" rather than "a new delivery is unclaimed". Both refuse, so
-     * nothing was unsafe, but an existing rule's message is part of its identity and a new rule
-     * should not repaint one.
+     * **This check is not what makes the rule true.** It runs BEFORE INSERT and reads only
+     * COMMITTED rows, so two overlapping transactions each see no pending test, each pass here, and
+     * each insert one. The unique index below is what actually serializes them; this exists so the
+     * ordinary sequential case - an owner pressing the button twice, a script looping - is refused
+     * with a sentence that says what is wrong instead of a bare duplicate-key error.
      *
-     * `claimDue` takes ten rows a minute ACROSS EVERY BUSINESS, ordered by when they became due,
-     * and a test delivery is created due immediately. Without this rule an owner calling the test
-     * endpoint in a loop puts thousands of their own rows at the front of a queue every other
-     * tenant shares: nothing is exposed and no delivery is marked failed, but every other
-     * business's webhooks wait behind them for as long as the caller keeps going. One tenant must
-     * not be able to set another tenant's delivery latency.
-     *
-     * A destination that already has a test waiting does not need a second one, so outstanding
-     * test deliveries are bounded by the number of destinations, which is itself bounded.
+     * Placed LAST among the INSERT checks: placed first it changed which sentence a row breaking
+     * two rules at once reports, and an existing rule's message is part of its identity.
      *
      * Only TEST deliveries. A real one is already unique per (destination, event) by index, and
      * refusing a second real delivery here would drop an event nobody could get back.
