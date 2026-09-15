@@ -2,9 +2,7 @@ import { CardType, Permission } from "@prisma/client";
 import { AuditAction, recordAudit } from "../audit/audit";
 import { prisma } from "../db";
 import { NotFoundError } from "../errors";
-import { readAvailableLocations } from "../program/available-locations";
-import { isStampMechanics, readStampMechanics } from "../program/mechanics";
-import { isPointsMechanics, readPointsMechanics } from "../program/points-mechanics";
+import { readVersionAvailableLocations, versionContractOf } from "../program/card-type-support";
 import { resolveEnrollmentTarget } from "../program/programs";
 import { publicCardUrl } from "../program/public-urls";
 import { qrSvg } from "../qr";
@@ -177,16 +175,23 @@ async function assertCardWithinMemberScope(ctx: TenantContext, mechanics: unknow
   if (ctx.locationIds === null) return;
   if (ctx.locationIds.length === 0) throw new NotFoundError("Card not found");
 
-  const parsed = isPointsMechanics(mechanics)
-    ? readPointsMechanics(mechanics)
-    : isStampMechanics(mechanics)
-      ? readStampMechanics(mechanics)
-      : null;
-  // A row that parses as neither contract is corrupt. Failing closed is the only safe reading when
-  // the thing being handed over is a capability.
-  if (!parsed) throw new NotFoundError("Card not found");
+  /*
+   * Exhaustive over the contracts, so a money version's pinned locations are honoured rather than
+   * being read as "no contract". Before this, a money card fell to `null` and every cashier with a
+   * location assignment was told "Card not found" - which failed CLOSED, and was therefore safe,
+   * but for the wrong reason and with a misleading sentence.
+   *
+   * `null` here now means what it has always meant: Main only. A row that parses as no contract at
+   * all lands in the same place, and failing closed remains the only safe reading when the thing
+   * being handed over is a capability.
+   */
+  // Fail closed FIRST. A row that parses as no contract at all is corrupt, and the most permissive
+  // reading is the wrong one when the thing being handed over is a capability. Consolidating the
+  // two-contract ladder briefly lost this, which is why it is now an explicit, separately named
+  // check rather than a side effect of `readVersionAvailableLocations` returning null.
+  if (versionContractOf(mechanics) === null) throw new NotFoundError("Card not found");
 
-  const allowed = readAvailableLocations(parsed);
+  const allowed = readVersionAvailableLocations(mechanics);
   if (allowed === null) {
     const main = await prisma.location.findFirst({
       where: { businessId: ctx.businessId, isDefault: true },

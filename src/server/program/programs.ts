@@ -5,9 +5,9 @@ import { CONTENDED_TX, prisma, type DbClient, type Tx } from "../db";
 import { ConflictError, NotFoundError, ValidationError } from "../errors";
 import { opaqueToken } from "../security/tokens";
 import { requirePermission, type TenantContext } from "../tenant/context";
-import { assertLocationsBelongToBusiness, readAvailableLocations } from "./available-locations";
-import { isStampMechanics, readStampMechanics } from "./mechanics";
-import { isPointsMechanics, parsePointsMechanics, readPointsMechanics, type PointsMechanics, type PointsMechanicsInput } from "./points-mechanics";
+import { assertLocationsBelongToBusiness } from "./available-locations";
+import { readVersionAvailableLocations } from "./card-type-support";
+import { parsePointsMechanics, type PointsMechanics, type PointsMechanicsInput } from "./points-mechanics";
 import { DIRECT_SOURCE_NAME, DIRECT_UTM_SOURCE } from "./sources";
 
 /**
@@ -313,9 +313,10 @@ export async function listBusinessPrograms(ctx: TenantContext): Promise<ProgramL
  * is the safe reading, and the engines refuse the card loudly when someone tries to transact on it.
  */
 function locationsOf(mechanics: unknown): readonly string[] | null {
-  if (isPointsMechanics(mechanics)) return readAvailableLocations(readPointsMechanics(mechanics));
-  if (isStampMechanics(mechanics)) return readAvailableLocations(readStampMechanics(mechanics));
-  return null;
+  // Exhaustive over the contracts, including the money ones. Before this went through
+  // `readVersionAvailableLocations`, a cashback programme pinned to a branch was listed as
+  // Main-only, because its mechanics parsed as neither stamp nor points and fell off the end.
+  return readVersionAvailableLocations(mechanics);
 }
 
 export interface EnrollmentTarget {

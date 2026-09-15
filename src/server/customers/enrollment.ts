@@ -4,8 +4,9 @@ import { AuditAction, recordAudit } from "../audit/audit";
 import { CONTENDED_TX, prisma, type Tx } from "../db";
 import { ConflictError, NotFoundError, ValidationError } from "../errors";
 import { resolveEnrollmentLocationId } from "../program/available-locations";
-import { readStampMechanics } from "../program/mechanics";
-import { readPointsMechanics } from "../program/points-mechanics";
+import { readStampMechanics, type StampMechanics } from "../program/mechanics";
+import { readPointsMechanics, type PointsMechanics } from "../program/points-mechanics";
+import { MonetaryProgramKind, readMonetaryMechanics, type MonetaryMechanics } from "../monetary/mechanics";
 import { getDefaultLocationId } from "../program/stamp-program";
 import { grantWelcomePoints } from "../points/engine";
 import { newCardTokens } from "../security/tokens";
@@ -172,12 +173,40 @@ async function resolveSource(db: Tx, sourceToken: string): Promise<ResolvedSourc
    * source's override taking precedence (PRODUCT-SPEC §6.1). Reading through the contract rather
    * than the raw JSON is what stops a points version's `welcomePoints` being handed to the stamp
    * engine as stamps.
+   *
+   * THE DISPATCH IS EXHAUSTIVE, not "points or else stamp". Phase 4 added `CASHBACK` and `DISCOUNT`
+   * to `CardType`, and with an `else` here a cashback version's mechanics would have been read
+   * through the STAMP contract - which fails as a corrupt-row invariant error, so enrolling into a
+   * money program was impossible and the message blamed the data.
    */
-  const mechanics =
-    link.template.cardType === CardType.POINTS
-      ? readPointsMechanics(version.mechanics, { programVersionId: version.id })
-      : readStampMechanics(version.mechanics, { programVersionId: version.id });
-  const programWelcome = (mechanics.kind === "POINTS" ? mechanics.welcomePoints : mechanics.welcomeStamps) ?? 0;
+  let mechanics: StampMechanics | PointsMechanics | MonetaryMechanics;
+  switch (link.template.cardType) {
+    case CardType.POINTS:
+      mechanics = readPointsMechanics(version.mechanics, { programVersionId: version.id });
+      break;
+    case CardType.STAMP:
+      mechanics = readStampMechanics(version.mechanics, { programVersionId: version.id });
+      break;
+    case CardType.CASHBACK:
+      mechanics = readMonetaryMechanics(version.mechanics, MonetaryProgramKind.CASHBACK, { programVersionId: version.id });
+      break;
+    case CardType.DISCOUNT:
+      mechanics = readMonetaryMechanics(version.mechanics, MonetaryProgramKind.DISCOUNT, { programVersionId: version.id });
+      break;
+  }
+
+  /*
+   * A MONEY PROGRAM HAS NO WELCOME BONUS, and this is where that is enforced rather than assumed.
+   *
+   * The money mechanics contract has no welcome field at all, and `createMonetaryProgram` writes
+   * `welcomeUnitQuantity: null` on the source. But a named source is a row somebody could later set
+   * a quantity on, and `welcomeUnits` here feeds the ledger - so a money card must resolve to zero
+   * whatever the row says. A welcome balance on a cashback card is the business handing real money
+   * to anybody who enrols, with no invoice and no member of staff present.
+   */
+  const programWelcome =
+    mechanics.kind === "POINTS" ? (mechanics.welcomePoints ?? 0) : mechanics.kind === "STAMP" ? (mechanics.welcomeStamps ?? 0) : 0;
+  const isMoney = mechanics.kind === "CASHBACK" || mechanics.kind === "DISCOUNT";
 
   return {
     sourceId: link.id,
@@ -188,7 +217,7 @@ async function resolveSource(db: Tx, sourceToken: string): Promise<ResolvedSourc
     utmSource: link.utmSource,
     utmMedium: link.utmMedium,
     utmCampaign: link.utmCampaign,
-    welcomeUnits: link.welcomeUnitQuantity ?? programWelcome,
+    welcomeUnits: isMoney ? 0 : (link.welcomeUnitQuantity ?? programWelcome),
     availableLocations: mechanics.availableLocations ?? null,
   };
 }

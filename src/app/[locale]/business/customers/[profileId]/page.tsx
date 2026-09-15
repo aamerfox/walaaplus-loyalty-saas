@@ -186,10 +186,20 @@ export default async function CustomerProfilePage({
                   </div>
                 </div>
 
+                {/*
+                  * Each tile is gated on the card type that OWNS that balance, never on
+                  * "not points, therefore stamps".
+                  *
+                  * A cashback or discount card fell into the stamp arm before this change and
+                  * rendered "Stamps: 0" on a customer's record - a plausible, wrong number about
+                  * somebody's account. A money card's balance is in currency minor units and its
+                  * screen is Phase 4 Prompt 2; until then this shows the card's TYPE and no balance,
+                  * which is the honest answer rather than a confident wrong one.
+                  */}
                 <div className="grid grid-cols-2 gap-3">
                   {card.cardType === CardType.POINTS ? (
                     <StatTile label={t("points")} value={numbers.format(card.pointBalance)} testId="card-points" />
-                  ) : (
+                  ) : card.cardType === CardType.STAMP ? (
                     <StatTile
                       label={t("stamps")}
                       value={numbers.format(card.stampBalance)}
@@ -200,13 +210,23 @@ export default async function CustomerProfilePage({
                       }
                       testId="card-stamps"
                     />
+                  ) : (
+                    <StatTile label={t(`cardType.${card.cardType}`)} value="—" testId="card-monetary" />
                   )}
-                  <StatTile
-                    label={t("rewards")}
-                    value={numbers.format(card.rewardBalance)}
-                    tone="accent"
-                    testId="card-rewards"
-                  />
+                  {/*
+                    * Rewards belong to the stamp and points mechanics. A money card has no reward
+                    * balance and never will - cashback is spent against a bill, not exchanged for
+                    * an item - so showing it "Rewards: 0" would imply a mechanic this card does not
+                    * have. Zero is not wrong here; it is about a different programme.
+                    */}
+                  {card.cardType === CardType.POINTS || card.cardType === CardType.STAMP ? (
+                    <StatTile
+                      label={t("rewards")}
+                      value={numbers.format(card.rewardBalance)}
+                      tone="accent"
+                      testId="card-rewards"
+                    />
+                  ) : null}
                 </div>
 
                 {card.cardType === CardType.POINTS && card.tiers.length > 0 ? (

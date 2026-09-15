@@ -4,8 +4,7 @@ import { AuditAction, recordAudit } from "../audit/audit";
 import { CONTENDED_TX, prisma, type Tx } from "../db";
 import { ConflictCode, ConflictError, NotFoundError, ValidationError } from "../errors";
 import { MAX_AVAILABLE_LOCATIONS } from "../program/available-locations";
-import { isPointsMechanics, readPointsMechanics } from "../program/points-mechanics";
-import { isStampMechanics, readStampMechanics } from "../program/mechanics";
+import { readVersionAvailableLocations } from "../program/card-type-support";
 import { requirePermission, type TenantContext } from "./context";
 
 /**
@@ -322,14 +321,16 @@ async function strandedPrograms(db: Tx, businessId: string, locationId: string):
 
   const stranded: StrandedProgram[] = [];
   for (const version of versions) {
-    // Read through the contracts rather than off the raw JSON, for the same reason the program list
-    // does: a row that parses as neither contract is corrupt, and treating it as "Main only" is the
-    // reading that cannot strand anything.
-    const listed = isPointsMechanics(version.mechanics)
-      ? readPointsMechanics(version.mechanics).availableLocations
-      : isStampMechanics(version.mechanics)
-        ? readStampMechanics(version.mechanics).availableLocations
-        : undefined;
+    /*
+     * Read through EVERY contract, via the one resolver that knows how many there are.
+     *
+     * This was a `points ? … : stamp ? … : undefined` ladder, and a Phase 4 money version parsed as
+     * neither - so it fell off the end, was read as "Main only", and was therefore NEVER REPORTED AS
+     * STRANDED. Closing the only counter a live cashback programme ran at would have succeeded
+     * silently. `readVersionAvailableLocations` is exhaustive over the contracts and fails to
+     * compile when a card type is added without one.
+     */
+    const listed = readVersionAvailableLocations(version.mechanics) ?? undefined;
     if (listed === undefined) continue; // Main-only; Main is never deactivated.
     if (!listed.includes(locationId)) continue;
     if (!listed.some((id) => stillActive.has(id))) {

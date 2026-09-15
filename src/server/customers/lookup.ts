@@ -1,6 +1,7 @@
 import { CardType, MembershipRole, OperationKind, Permission, Prisma, UnitType, type CardStatus } from "@prisma/client";
 import { prisma } from "../db";
 import { ForbiddenError, NotFoundError } from "../errors";
+import { assertCounterSupportsCardType } from "../program/card-type-support";
 import { readStampMechanics } from "../program/mechanics";
 import { readPointsMechanics } from "../program/points-mechanics";
 import { requirePermission, type TenantContext } from "../tenant/context";
@@ -139,7 +140,15 @@ function toSearchResult(card: CardWithProfile): CardSearchResult {
    * The template's `cardType` says which contract owns this version, and the contract is then read
    * strictly. A row whose two disagree is corrupt and throws here rather than being displayed as
    * whichever kind the reader guessed - the balance on a counter screen is not a place to guess.
+   *
+   * **Money cards are refused first, by name.** The branch below is `POINTS or else STAMP`, so
+   * before this guard a cashback card fell into the stamp arm and was refused by
+   * `readStampMechanics` with "does not hold valid stamp mechanics" - which reads as a corrupt row
+   * and would send somebody looking for a broken record. Nothing is broken: this screen does not
+   * serve money cards until their counter is built in Prompt 2.
    */
+  assertCounterSupportsCardType(card.template.cardType);
+
   if (card.template.cardType === CardType.POINTS) {
     const mechanics = readPointsMechanics(card.programVersion.mechanics, { programVersionId: card.programVersion.id });
     return {

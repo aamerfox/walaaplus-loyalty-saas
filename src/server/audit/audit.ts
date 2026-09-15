@@ -191,6 +191,34 @@ export const AuditAction = {
   SEGMENT_UPDATED: "segment.updated",
   SEGMENT_ARCHIVED: "segment.archived",
   SEGMENT_RESTORED: "segment.restored",
+
+  /*
+   * Phase 4: cashback and invoice-based discounts. The first real money in this product.
+   *
+   * CONFIGURATION is audited here; the OPERATIONS are not. That asymmetry is deliberate. A
+   * `MonetaryOperation` row is already an immutable, append-only financial record carrying who
+   * performed it, where, under which rule, at which rate, and what the balance became - a duplicate
+   * in `AuditLog` would add nothing except a second copy of an amount that could then disagree with
+   * the first. The financial record is the audit trail for money; the audit log records the act of
+   * SETTING the rates, which leaves no financial row of its own.
+   */
+  /**
+   * An owner or manager configured a money program's rate table.
+   *
+   * Carries the full rate table, deliberately: the question this log exists to answer is "what rate
+   * was a customer promised, and who decided it". The rates are not secret - a customer is told them
+   * at the counter - and they are already frozen in `MonetaryTier`. What is added here is WHO.
+   */
+  MONETARY_RULE_CONFIGURED: "monetary.rule_configured",
+  /**
+   * A money operation was reversed.
+   *
+   * The reversal row itself is the financial record, and it carries the reason. This is recorded in
+   * addition to it - unlike an ordinary counter action - because a reversal is a correction to a
+   * financial history, which is precisely the event an owner reviewing this log is looking for.
+   * Carries both row ids and the signed effect, never the customer.
+   */
+  MONETARY_OPERATION_REVERSED: "monetary.operation_reversed",
 } as const;
 export type AuditActionName = (typeof AuditAction)[keyof typeof AuditAction];
 

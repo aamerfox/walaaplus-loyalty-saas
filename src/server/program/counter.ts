@@ -1,6 +1,7 @@
 import { CardType } from "@prisma/client";
 import { prisma } from "../db";
 import { NotFoundError } from "../errors";
+import { assertCounterSupportsCardType, assertNeverCardType } from "./card-type-support";
 import type { MemberSource } from "../ledger/actor";
 import { reversePointsOperation, type PointsOperationResult } from "../points/engine";
 import { reverseStampOperation, type StampOperationResult } from "../stamp/engine";
@@ -62,8 +63,28 @@ export type ReverseCounterResult =
  */
 export async function reverseCounterOperation(ctx: TenantContext, input: ReverseCounterInput): Promise<ReverseCounterResult> {
   const cardType = await cardTypeOfGroup(ctx, input.transactionGroupId);
-  if (cardType === CardType.POINTS) {
-    return { cardType: CardType.POINTS, ...(await reversePointsOperation(ctx, input)) };
+  /*
+   * Exhaustive, not `POINTS or else STAMP`.
+   *
+   * A money group cannot reach here today - `cardTypeOfGroup` resolves a `LoyaltyOperation`, and the
+   * monetary engine writes `MonetaryOperation` rows and nothing else, so a money transaction group
+   * id is simply not found. That makes this a LATENT trap rather than a live defect, and it is
+   * exactly the trap that cost four other call sites: the day anything writes a `LoyaltyOperation`
+   * for a money card, an `else` here would hand it to the STAMP engine.
+   *
+   * `assertNeverCardType` turns that into a compile error instead. Money reversals go through
+   * `reverseMonetaryOperation`, which is linked, append-only and refuses a reversal of a reversal.
+   */
+  switch (cardType) {
+    case CardType.POINTS:
+      return { cardType: CardType.POINTS, ...(await reversePointsOperation(ctx, input)) };
+    case CardType.STAMP:
+      return { cardType: CardType.STAMP, ...(await reverseStampOperation(ctx, input)) };
+    case CardType.CASHBACK:
+    case CardType.DISCOUNT:
+      assertCounterSupportsCardType(cardType);
+      throw new Error("unreachable");
+    default:
+      return assertNeverCardType(cardType);
   }
-  return { cardType: CardType.STAMP, ...(await reverseStampOperation(ctx, input)) };
 }

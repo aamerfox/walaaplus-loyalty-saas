@@ -16,10 +16,18 @@ import type { StampMechanicsInput } from "@/server/program/mechanics";
 import type { PointsMechanicsInput } from "@/server/program/points-mechanics";
 import { createPointsProgram, type PointsProgramSummary, type RewardTierInput } from "@/server/program/programs";
 import { createStampProgram, type StampProgramSummary } from "@/server/program/stamp-program";
+import type { MonetaryMechanicsInput, MonetaryProgramKind } from "@/server/monetary/mechanics";
+import { createMonetaryProgram, type MonetaryProgramSummary, type MonetaryTierInput } from "@/server/monetary/rules";
 
 const APP_TABLES = [
   "AuthRateLimit",
   "ApiKey",
+  // Phase 4 money, most dependent first. `SupportedCurrency` is deliberately ABSENT: it is
+  // reference data seeded by migration 20, not per-test state, and a trigger refuses to let
+  // anybody change it. Wiping it would delete the currency exponents every later test needs.
+  "MonetaryOperation",
+  "MonetaryTier",
+  "MonetaryRule",
   "WebhookDeliveryAttempt",
   "WebhookDelivery",
   "WebhookDestination",
@@ -99,6 +107,11 @@ const APPEND_ONLY_TABLES = [
   // `api_key_no_truncate` refuses a TRUNCATE for the owner as well as the runtime role, so the
   // reset has to turn it off like every other protected table.
   "ApiKey",
+  // Phase 4 money. A rule and its tiers are frozen once written because cards pin to a version;
+  // an operation is chained to the one before it. All three refuse TRUNCATE for the owner too.
+  "MonetaryRule",
+  "MonetaryTier",
+  "MonetaryOperation",
 ];
 
 /** Wipe every application table, with the append-only triggers off for the duration. */
@@ -413,6 +426,83 @@ export async function createPointsShop(
 export async function enrolPointsCustomer(fx: PointsShopFixture, overrides: Partial<EnrollCustomerInput> = {}) {
   const source = await prisma.utmSourceLink.findFirstOrThrow({
     where: { id: fx.program.directSourceId },
+    select: { publicToken: true },
+  });
+  return enrollCustomer({
+    sourceToken: source.publicToken,
+    phone: overrides.phone ?? uniqueSyrianPhone(),
+    firstName: overrides.firstName ?? "زبون",
+    ...overrides,
+  });
+}
+
+// ─── Phase 4: money programs ──────────────────────────────────────────────────
+
+/**
+ * Owner + business + live cashback or discount program + rate table, through the REAL services.
+ *
+ * Same principle as `createStampCafe` and `createPointsShop`: built by calling
+ * `createMonetaryProgram`, never by hand-writing rows. A fixture that inserts its own
+ * `MonetaryRule` would bypass the DRAFT-only trigger and the currency-exponent check, and the tests
+ * would then be proving something about the fixture rather than about the code that ships.
+ */
+export interface MonetaryShopFixture {
+  userId: string;
+  businessId: string;
+  locationId: string;
+  ctx: TenantContext;
+  program: MonetaryProgramSummary;
+  /** The tier that applies to a card with no history, which is most tests. */
+  baseTierId: string;
+}
+
+/** One flat rate, low enough that rounding is visible on ordinary invoices. */
+export const FLAT_CASHBACK_TIERS: MonetaryTierInput[] = [{ minCumulativeSpendMinor: 0, rateBasisPoints: 500 }];
+
+export async function createMonetaryShop(
+  opts: {
+    kind?: MonetaryProgramKind;
+    tiers?: MonetaryTierInput[];
+    mechanics?: Partial<MonetaryMechanicsInput>;
+    currency?: string;
+    timezone?: string;
+    name?: string;
+    allowAdditionalProgram?: boolean;
+    existing?: { userId: string; businessId: string; locationId: string };
+  } = {},
+): Promise<MonetaryShopFixture> {
+  const base = opts.existing ?? (await registerTestOwner());
+  const kind = opts.kind ?? "CASHBACK";
+  const patch: Prisma.BusinessUpdateInput = {};
+  if (opts.timezone) patch.timezone = opts.timezone;
+  // `Business.currency` is plain text with no FK; a test that wants JOD or JPY sets it here, which
+  // is exactly how a real business's currency would differ — it is never chosen per program.
+  if (opts.currency) patch.currency = opts.currency;
+  if (Object.keys(patch).length > 0) {
+    await prisma.business.update({ where: { id: base.businessId }, data: patch });
+  }
+
+  const ctx = await requireBusinessMembership(prisma, base.userId, base.businessId);
+  const program = await createMonetaryProgram(ctx, {
+    name: opts.name ?? (kind === "CASHBACK" ? "Cashback card" : "Discount card"),
+    kind,
+    mechanics: { kind, contractVersion: 1, ...opts.mechanics } as MonetaryMechanicsInput,
+    tiers: opts.tiers ?? FLAT_CASHBACK_TIERS,
+    allowAdditionalProgram: opts.allowAdditionalProgram ?? opts.existing !== undefined,
+  });
+
+  const baseTier = await prisma.monetaryTier.findFirstOrThrow({
+    where: { monetaryRuleId: program.monetaryRuleId, tierIndex: 0 },
+    select: { id: true },
+  });
+
+  return { userId: base.userId, businessId: base.businessId, locationId: base.locationId, ctx, program, baseTierId: baseTier.id };
+}
+
+/** Enrol a customer into a money program through the real enrolment service. */
+export async function enrolMonetaryCustomer(fx: MonetaryShopFixture, overrides: Partial<EnrollCustomerInput> = {}) {
+  const source = await prisma.utmSourceLink.findFirstOrThrow({
+    where: { templateId: fx.program.templateId },
     select: { publicToken: true },
   });
   return enrollCustomer({

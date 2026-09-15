@@ -308,7 +308,9 @@
     "by": "By",
     "cardType": {
       "STAMP": "Stamp card",
-      "POINTS": "Points card"
+      "POINTS": "Points card",
+      "CASHBACK": "Cashback card",
+      "DISCOUNT": "Discount card"
     },
     "cardsSubtitle": "One card per program. Each keeps the rules of the version it was issued under.",
     "cardsTitle": "Cards",
@@ -383,7 +385,9 @@
     "byProgram": "By program",
     "cardType": {
       "STAMP": "Stamp card",
-      "POINTS": "Points card"
+      "POINTS": "Points card",
+      "CASHBACK": "Cashback card",
+      "DISCOUNT": "Discount card"
     },
     "cardsIssued": "Cards issued",
     "cardsIssuedHint": "Cards created in this window",
@@ -694,7 +698,9 @@
     "backToList": "All programs",
     "cardType": {
       "STAMP": "Stamp card",
-      "POINTS": "Points card"
+      "POINTS": "Points card",
+      "CASHBACK": "Cashback card",
+      "DISCOUNT": "Discount card"
     },
     "confirmPause": "Pause sign-ups for this program? Existing cards keep working exactly as they do now — stamps, points, rewards and corrections all continue. Only new sign-ups stop.",
     "continueDraft": "Continue the draft",
@@ -734,7 +740,9 @@
       "cardTypeHelp": "This cannot be changed later.",
       "cardTypeHint": {
         "STAMP": "Collect stamps, get a free reward at a threshold.",
-        "POINTS": "Collect points, spend them on rewards you choose."
+        "POINTS": "Collect points, spend them on rewards you choose.",
+        "CASHBACK": "A share of each bill comes back as money on the card, to spend next time.",
+        "DISCOUNT": "A share off each bill, worked out at the counter."
       },
       "name": "Program name",
       "earning": "Earning",
@@ -952,7 +960,9 @@
     "cardNotActive": "This card is not active",
     "cardType": {
       "STAMP": "Stamp card",
-      "POINTS": "Points card"
+      "POINTS": "Points card",
+      "CASHBACK": "Cashback card",
+      "DISCOUNT": "Discount card"
     },
     "chooseBusiness": "Choose a business",
     "couponLabel": "Coupon code (optional)",
@@ -1026,7 +1036,9 @@
     "campaignNote": "A saved segment can be chosen as the audience of a campaign draft. Choosing one changes nothing about the segment, and it still sends nothing.",
     "cardType": {
       "STAMP": "Stamp card",
-      "POINTS": "Points card"
+      "POINTS": "Points card",
+      "CASHBACK": "Cashback card",
+      "DISCOUNT": "Discount card"
     },
     "choose": "Choose…",
     "conditionField": "Rule",

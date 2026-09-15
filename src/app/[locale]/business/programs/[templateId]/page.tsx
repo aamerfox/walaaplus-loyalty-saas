@@ -82,15 +82,24 @@ export default async function ProgramDetailPage({
   const money = (minor: number | null) =>
     minor === null ? t("notSet") : numbers.format(minor);
 
+  /*
+   * `earnRule` is null for a cashback or discount programme, which does not earn "units" at all: it
+   * applies a rate in basis points to an invoice a member of staff typed. The whole "how it works"
+   * block is therefore omitted for one, rather than filled with MANUAL / no limit / no welcome bonus
+   * — four rows that are each individually true and together describe a stamp programme.
+   */
+  const rule = program.earnRule;
   const earn =
-    program.earnRule.mode === "MANUAL"
-      ? t("earn.manual")
-      : program.earnRule.mode === "PER_VISIT"
-        ? t("earn.perVisit", { units: program.earnRule.unitsPerAward })
-        : t("earn.spendBlock", {
-            amount: numbers.format(program.earnRule.spendAmountPerBlockMinor),
-            units: program.earnRule.unitsPerBlock,
-          });
+    rule === null
+      ? null
+      : rule.mode === "MANUAL"
+        ? t("earn.manual")
+        : rule.mode === "PER_VISIT"
+          ? t("earn.perVisit", { units: rule.unitsPerAward })
+          : t("earn.spendBlock", {
+              amount: numbers.format(rule.spendAmountPerBlockMinor),
+              units: rule.unitsPerBlock,
+            });
 
   return (
     <>
@@ -131,20 +140,24 @@ export default async function ProgramDetailPage({
       <Card>
         <h2 className="font-display text-lg font-bold text-ink">{t("howItWorks")}</h2>
         <dl className="mt-2" data-testid="program-rules">
-          <DetailRow label={t("earnRule")}>{earn}</DetailRow>
-          <DetailRow label={t("dailyLimit")}>
-            {program.dailyAwardLimit === null ? t("noLimit") : t("awardsPerDay", { count: program.dailyAwardLimit })}
-          </DetailRow>
-          <DetailRow label={t("purchaseAmount")}>
-            {program.requirePurchaseAmount ? t("required") : t("optional")}
-          </DetailRow>
-          <DetailRow label={t("welcomeBonus")}>
-            {program.welcomeUnits === 0
-              ? t("none")
-              : program.cardType === CardType.POINTS
-                ? t("welcomePoints", { count: program.welcomeUnits })
-                : t("welcomeStamps", { count: program.welcomeUnits })}
-          </DetailRow>
+          {earn === null ? null : (
+            <>
+              <DetailRow label={t("earnRule")}>{earn}</DetailRow>
+              <DetailRow label={t("dailyLimit")}>
+                {program.dailyAwardLimit === null ? t("noLimit") : t("awardsPerDay", { count: program.dailyAwardLimit })}
+              </DetailRow>
+              <DetailRow label={t("purchaseAmount")}>
+                {program.requirePurchaseAmount ? t("required") : t("optional")}
+              </DetailRow>
+              <DetailRow label={t("welcomeBonus")}>
+                {program.welcomeUnits === 0
+                  ? t("none")
+                  : program.cardType === CardType.POINTS
+                    ? t("welcomePoints", { count: program.welcomeUnits })
+                    : t("welcomeStamps", { count: program.welcomeUnits })}
+              </DetailRow>
+            </>
+          )}
           <DetailRow label={t("locations")}>
             {program.availableLocations === null
               ? t("mainOnly")
@@ -157,6 +170,15 @@ export default async function ProgramDetailPage({
         </dl>
       </Card>
 
+      {/*
+        * The REWARDS card, shown only for the two programme kinds that have rewards.
+        *
+        * A cashback or discount programme has none — its value is a rate applied to an invoice, not
+        * an item handed over — so for one this rendered a "The reward" heading above an EMPTY tier
+        * list. An empty section under a confident heading is the same class of mistake as a zeroed
+        * stamp tile: it describes a different programme.
+        */}
+      {program.cardType === CardType.POINTS || program.cardType === CardType.STAMP ? (
       <Card>
         <h2 className="font-display text-lg font-bold text-ink">
           {program.cardType === CardType.POINTS ? t("rewardTiers") : t("theReward")}
@@ -192,19 +214,28 @@ export default async function ProgramDetailPage({
           {t("immutableNoteWithDraft")}
         </Notice>
       </Card>
+      ) : null}
 
       {metrics ? (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4" data-testid="program-metrics">
           <StatTile label={t("metricCards")} value={numbers.format(program.cardCount)} hint={t("metricCardsHint")} />
           <StatTile label={t("metricTransactions")} value={numbers.format(metrics.transactions)} hint={t("metricWindow")} />
           <StatTile label={t("metricRewards")} value={numbers.format(metrics.rewardsRedeemed)} hint={t("metricWindow")} />
-          <StatTile
-            label={program.cardType === CardType.POINTS ? t("metricPoints") : t("metricStamps")}
-            value={numbers.format(
-              program.cardType === CardType.POINTS ? metrics.unitsAwarded.points : metrics.unitsAwarded.stamps,
-            )}
-            hint={t("metricWindow")}
-          />
+          {/*
+            * Gated on the type that owns the unit. A money programme awards neither stamps nor
+            * points, and before this it was shown "Stamps awarded: 0" - a figure that is not wrong
+            * so much as about a different programme. Its own figures are money, and they arrive
+            * with the money screens in Prompt 2.
+            */}
+          {program.cardType === CardType.POINTS || program.cardType === CardType.STAMP ? (
+            <StatTile
+              label={program.cardType === CardType.POINTS ? t("metricPoints") : t("metricStamps")}
+              value={numbers.format(
+                program.cardType === CardType.POINTS ? metrics.unitsAwarded.points : metrics.unitsAwarded.stamps,
+              )}
+              hint={t("metricWindow")}
+            />
+          ) : null}
         </div>
       ) : null}
 

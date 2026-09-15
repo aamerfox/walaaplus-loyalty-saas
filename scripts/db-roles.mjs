@@ -56,7 +56,32 @@ const APPEND_ONLY_TABLES = [
    * is nothing to correct: a second attempt is a second row, which is how retries already work.
    */
   "WebhookDeliveryAttempt",
+  /*
+   * Phase 4 money. The strongest case in this list for append-only, because these rows are the only
+   * record of what a customer was told they owed.
+   *
+   * A rule and its tiers are frozen once written because CARDS PIN TO A VERSION: editing a live rate
+   * would silently change what an already-issued card agreed to. A new rate is a new program version.
+   *
+   * A `MonetaryOperation` is never corrected either. The balance on each row is chained to the row
+   * before it, so an UPDATE would not merely alter one amount - it would break the arithmetic that
+   * makes the history checkable. A mistake is undone by a linked reversal and both rows stay visible.
+   */
+  "MonetaryRule",
+  "MonetaryTier",
+  "MonetaryOperation",
 ];
+
+/**
+ * Reference data the application reads and never writes.
+ *
+ * `SupportedCurrency` maps a currency to its exponent, and that exponent is the UNIT every amount in
+ * this product is denominated in. An application that could insert a currency could insert one with
+ * the wrong number of decimal places, and every amount recorded against it would silently be out by
+ * a factor of ten. A trigger already refuses UPDATE and DELETE; this removes INSERT as well, so the
+ * runtime role can read the unit and cannot invent one.
+ */
+const READ_ONLY_TABLES = ["SupportedCurrency"];
 /**
  * Tables whose rows may be updated but must never be removed.
  *
@@ -193,7 +218,7 @@ async function main() {
   const database = who.rows[0].db;
   process.stdout.write(`db-roles: connected as migrator "${owner}" to database "${database}"\n`);
 
-  for (const t of [...APPEND_ONLY_TABLES, ...NO_DELETE_TABLES]) {
+  for (const t of [...APPEND_ONLY_TABLES, ...NO_DELETE_TABLES, ...READ_ONLY_TABLES]) {
     if (!(await tableExists(t))) fail(`table "${t}" does not exist. Run \`npm run db:migrate\` first.`);
   }
 
@@ -238,6 +263,12 @@ async function main() {
     for (const t of NO_DELETE_TABLES) {
       await run(`REVOKE ALL PRIVILEGES ON TABLE public.${ident(t)} FROM ${role}`);
       await run(`GRANT SELECT, INSERT, UPDATE ON TABLE public.${ident(t)} TO ${role}`);
+    }
+
+    // 3c. Reference data: read it, never write it.
+    for (const t of READ_ONLY_TABLES) {
+      await run(`REVOKE ALL PRIVILEGES ON TABLE public.${ident(t)} FROM ${role}`);
+      await run(`GRANT SELECT ON TABLE public.${ident(t)} TO ${role}`);
     }
 
     // 4. Migration bookkeeping is not the runtime's business.
@@ -353,6 +384,17 @@ async function main() {
     if (!r.s || !r.i || !r.u) problems.push(`${t}: SELECT/INSERT/UPDATE missing`);
     if (r.d || r.t) problems.push(`${t}: DELETE/TRUNCATE still granted`);
   }
+  for (const t of READ_ONLY_TABLES) {
+    const p = await client.query(
+      "SELECT has_table_privilege($1, $2, 'SELECT') AS s, has_table_privilege($1, $2, 'INSERT') AS i, " +
+        "has_table_privilege($1, $2, 'UPDATE') AS u, has_table_privilege($1, $2, 'DELETE') AS d, " +
+        "has_table_privilege($1, $2, 'TRUNCATE') AS t",
+      [runtime.user, `public.${ident(t)}`],
+    );
+    const r = p.rows[0];
+    if (!r.s) problems.push(`${t}: SELECT missing`);
+    if (r.i || r.u || r.d || r.t) problems.push(`${t}: INSERT/UPDATE/DELETE/TRUNCATE still granted`);
+  }
   const schemaCreate = await client.query("SELECT has_schema_privilege($1, 'public', 'CREATE') AS c", [runtime.user]);
   if (schemaCreate.rows[0].c) problems.push("role can CREATE in schema public");
 
@@ -386,6 +428,7 @@ async function main() {
   process.stdout.write(
     `db-roles: OK role "${runtime.user}" — read/write on ${tables.rows[0].n} public tables, ` +
       `append-only on [${APPEND_ONLY_TABLES.join(", ")}], no-delete on [${NO_DELETE_TABLES.join(", ")}], ` +
+      `read-only on [${READ_ONLY_TABLES.join(", ")}], ` +
       `no access to [${MIGRATOR_ONLY_TABLES.join(", ")}], ` +
       `owns schema "${WORKER_SCHEMA}", cannot CREATE in public, ` +
       `members: [${memberNames.join(", ") || "none"}]\n`,

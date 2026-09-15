@@ -2,9 +2,10 @@ import { CardType, Permission, ProgramVersionStatus, TemplateStatus } from "@pri
 import { prisma } from "../db";
 import { NotFoundError } from "../errors";
 import { requirePermission, type TenantContext } from "../tenant/context";
-import { readAvailableLocations } from "./available-locations";
-import { isStampMechanics, readStampMechanics } from "./mechanics";
-import { isPointsMechanics, readPointsMechanics } from "./points-mechanics";
+import { MonetaryProgramKind, readMonetaryMechanics } from "../monetary/mechanics";
+import { assertNeverCardType, isMonetaryCardType, readVersionAvailableLocations } from "./card-type-support";
+import { readStampMechanics, type StampMechanics } from "./mechanics";
+import { readPointsMechanics, type PointsMechanics } from "./points-mechanics";
 
 /**
  * One program, as a merchant reads it.
@@ -45,7 +46,16 @@ export interface ProgramDetail {
   activatedAt: Date | null;
   createdAt: Date;
 
-  earnRule: ProgramEarnRule;
+  /**
+   * How units are earned, in the unit this programme counts.
+   *
+   * **Null for a money programme**, and not as a placeholder: cashback and discount do not earn
+   * "units per visit" or "units per block of spend" at all. They apply a rate in basis points to an
+   * invoice a member of staff typed, which is a different shape of rule and has its own screen in
+   * Phase 4 Prompt 2. Rendering a money programme's rate through this field would mean inventing a
+   * unit for it; rendering `MANUAL, null` would be a plausible lie.
+   */
+  earnRule: ProgramEarnRule | null;
   /** Award operations allowed per card per business-timezone day. Null = no limit. */
   dailyAwardLimit: number | null;
   requirePurchaseAmount: boolean;
@@ -123,15 +133,12 @@ export async function getProgramDetail(ctx: TenantContext, templateId: string): 
     cardCount: template._count.cards,
   };
 
-  // Read through the contract that owns the row, chosen by the template's own card type. A version
-  // that parses as neither is corrupt, and a 422 from the reader is the right answer for a screen
-  // that would otherwise render a guess.
-  const mechanics =
-    template.cardType === CardType.POINTS
-      ? readPointsMechanics(version.mechanics, { programVersionId: version.id })
-      : readStampMechanics(version.mechanics, { programVersionId: version.id });
-
-  const locationIds = readAvailableLocations(mechanics);
+  /*
+   * Locations first, through the resolver that knows every contract. A money version's pinned
+   * counters are read here exactly as a stamp version's are - this screen shows WHERE a programme
+   * runs, which is a question every programme can answer.
+   */
+  const locationIds = readVersionAvailableLocations(version.mechanics);
   const locations =
     locationIds === null
       ? null
@@ -140,6 +147,61 @@ export async function getProgramDetail(ctx: TenantContext, templateId: string): 
           select: { id: true, name: true },
           orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }],
         });
+
+  /*
+   * A MONEY PROGRAMME RETURNS THE COMMON FIELDS AND NOTHING IT DOES NOT HAVE.
+   *
+   * This dispatch was `POINTS ? readPoints : readStamp`, so a cashback template's detail page read
+   * its mechanics through the STAMP contract and the screen failed with "does not hold valid stamp
+   * mechanics" - a 422 blaming the data on a page an owner reaches by clicking their own programme
+   * in the list.
+   *
+   * The honest answer is not a stamp-shaped guess and not an error: it is the name, the type, the
+   * version, the card count and the counters - all of which are true of a money programme - with
+   * every stamp/points-specific field null. Its rates are frozen in `MonetaryRule`/`MonetaryTier`
+   * and get their own screen in Prompt 2.
+   */
+  if (isMonetaryCardType(template.cardType)) {
+    readMonetaryMechanics(
+      version.mechanics,
+      template.cardType === CardType.CASHBACK ? MonetaryProgramKind.CASHBACK : MonetaryProgramKind.DISCOUNT,
+      { programVersionId: version.id },
+    );
+    return {
+      ...base,
+      earnRule: null,
+      dailyAwardLimit: null,
+      requirePurchaseAmount: false,
+      welcomeUnits: 0,
+      stampReward: null,
+      pointsLabel: null,
+      availableLocations: locations,
+    };
+  }
+
+  /*
+   * Read through the contract that owns the row, chosen by the template's own card type. A version
+   * that parses as neither is corrupt, and a 422 from the reader is the right answer for a screen
+   * that would otherwise render a guess.
+   *
+   * EXHAUSTIVE, not a ternary with an implicit stamp arm. The money types have already returned
+   * above, so a `default` here can only be a card type nobody has thought about - and
+   * `assertNeverCardType` makes that a COMPILE error rather than a stamp-shaped guess.
+   */
+  const mechanics = ((): StampMechanics | PointsMechanics => {
+    switch (template.cardType) {
+      case CardType.POINTS:
+        return readPointsMechanics(version.mechanics, { programVersionId: version.id });
+      case CardType.STAMP:
+        return readStampMechanics(version.mechanics, { programVersionId: version.id });
+      case CardType.CASHBACK:
+      case CardType.DISCOUNT:
+        // Unreachable: handled by the early return above. Named so the switch stays exhaustive.
+        throw new Error("unreachable: money card types return earlier");
+      default:
+        return assertNeverCardType(template.cardType);
+    }
+  })();
 
   if (mechanics.kind === "POINTS") {
     const earnRule: ProgramEarnRule =
@@ -202,11 +264,25 @@ export async function getProgramDetail(ctx: TenantContext, templateId: string): 
  * Everything here is resolved from the caller's own membership. A location the member is not
  * assigned to never appears, so the picker cannot offer an option the write would then refuse.
  */
+/**
+ * Card types the counter screen can actually operate.
+ *
+ * Phase 4 added `CASHBACK` and `DISCOUNT` to `CardType`, and the counter screen does not understand
+ * either of them yet - the money engine has no UI until Prompt 2. Listing one here would put a
+ * program in the picker that every write then refuses, which is a worse outcome than not offering
+ * it: the cashier would have a customer in front of them and no way to tell why nothing works.
+ *
+ * So the scope is filtered to the two kinds this screen implements, and the type says so. When the
+ * money counter arrives, this set grows and the compiler names every place that has to change.
+ */
+export const SCANNER_CARD_TYPES = [CardType.STAMP, CardType.POINTS] as const;
+export type ScannerCardType = (typeof SCANNER_CARD_TYPES)[number];
+
 export interface ScannerScope {
   programs: {
     templateId: string;
     name: string;
-    cardType: CardType;
+    cardType: ScannerCardType;
     /** Null = Main only. Otherwise the counters this program runs at that the member may use. */
     locations: { id: string; name: string }[] | null;
   }[];
@@ -232,6 +308,9 @@ export async function getScannerScope(ctx: TenantContext): Promise<ScannerScope>
         businessId: ctx.businessId,
         status: TemplateStatus.ACTIVE,
         versions: { some: { status: ProgramVersionStatus.ACTIVE } },
+        // See SCANNER_CARD_TYPES: a money program has no counter screen until Prompt 2, and
+        // offering one the write would refuse is worse than not offering it.
+        cardType: { in: [...SCANNER_CARD_TYPES] },
       },
       select: {
         id: true,
@@ -253,20 +332,18 @@ export async function getScannerScope(ctx: TenantContext): Promise<ScannerScope>
 
   return {
     programs: templates.map((t) => {
+      // Narrowed by the query above; asserted here so the cast is a single, named line.
+      const cardType = t.cardType as ScannerCardType;
+      // One resolver, exhaustive over every contract. The query above already restricts this list
+      // to SCANNER_CARD_TYPES, so money cannot arrive here - but the ladder this replaces is the
+      // shape that dropped money versions everywhere else, and leaving one behind invites the next.
       const mechanics = t.versions[0]?.mechanics;
-      const listed =
-        mechanics === undefined
-          ? null
-          : isPointsMechanics(mechanics)
-            ? readAvailableLocations(readPointsMechanics(mechanics))
-            : isStampMechanics(mechanics)
-              ? readAvailableLocations(readStampMechanics(mechanics))
-              : null;
+      const listed = mechanics === undefined ? null : readVersionAvailableLocations(mechanics);
 
       return {
         templateId: t.id,
         name: t.name,
-        cardType: t.cardType,
+        cardType,
         locations:
           listed === null
             ? null

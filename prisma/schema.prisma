@@ -78,6 +78,10 @@ enum ProgramVersionStatus {
 enum CardType {
   STAMP
   POINTS
+  /// Phase 4. A percentage of a staff-entered invoice becomes a real money balance on the card.
+  CASHBACK
+  /// Phase 4. A percentage off a staff-entered invoice, calculated here and honoured by the staff.
+  DISCOUNT
 }
 
 enum CardStatus {
@@ -221,6 +225,7 @@ model User {
 
   memberships         BusinessMembership[]
   operations          LoyaltyOperation[]         @relation("OperationActor")
+  monetaryOperations  MonetaryOperation[]        @relation("MonetaryActor")
   auditLogs           AuditLog[]                 @relation("AuditActor")
   pushMessages        PushMessage[]              @relation("PushAuthor")
   segments            CustomerSegment[]          @relation("SegmentAuthor")
@@ -253,6 +258,7 @@ model Business {
   updatedAt     DateTime @updatedAt
 
   memberships         BusinessMembership[]
+  monetaryOperations  MonetaryOperation[]
   locations           Location[]
   templates           ProgramTemplate[]
   customerProfiles    CustomerBusinessProfile[]
@@ -323,9 +329,10 @@ model Location {
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
-  business   Business           @relation(fields: [businessId], references: [id])
-  staff      StaffLocation[]
-  operations LoyaltyOperation[]
+  business           Business            @relation(fields: [businessId], references: [id])
+  staff              StaffLocation[]
+  operations         LoyaltyOperation[]
+  monetaryOperations MonetaryOperation[]
 
   @@index([businessId])
 }
@@ -371,6 +378,7 @@ model CustomerBusinessProfile {
   customer             Customer                 @relation(fields: [customerId], references: [id])
   cards                CustomerCard[]
   operations           LoyaltyOperation[]
+  monetaryOperations   MonetaryOperation[]
   consentRecords       ConsentRecord[]
   audienceMemberships  CampaignAudienceMember[]
   referralAttributions ReferralAttribution[]
@@ -403,12 +411,13 @@ model ProgramTemplate {
   createdAt        DateTime       @default(now())
   updatedAt        DateTime       @updatedAt
 
-  business     Business           @relation(fields: [businessId], references: [id])
-  versions     ProgramVersion[]
-  cards        CustomerCard[]
-  utmLinks     UtmSourceLink[]
-  operations   LoyaltyOperation[]
-  pushMessages PushMessage[]
+  business           Business            @relation(fields: [businessId], references: [id])
+  versions           ProgramVersion[]
+  cards              CustomerCard[]
+  monetaryOperations MonetaryOperation[]
+  utmLinks           UtmSourceLink[]
+  operations         LoyaltyOperation[]
+  pushMessages       PushMessage[]
 
   @@index([businessId, status])
 }
@@ -428,10 +437,14 @@ model ProgramVersion {
   /// timestamp shown to a merchant is worse than an honest blank.
   retiredAt     DateTime?
 
-  template    ProgramTemplate    @relation(fields: [templateId], references: [id])
-  rewardTiers RewardTier[]
-  cards       CustomerCard[]
-  operations  LoyaltyOperation[]
+  template           ProgramTemplate     @relation(fields: [templateId], references: [id])
+  rewardTiers        RewardTier[]
+  cards              CustomerCard[]
+  operations         LoyaltyOperation[]
+  /// Phase 4. At most one, and frozen: a card pins to a version, so changing a live rate would
+  /// change what an already-issued card agreed to. A new rate is a new version.
+  monetaryRule       MonetaryRule?
+  monetaryOperations MonetaryOperation[]
   // Also, in SQL: one ACTIVE and one DRAFT per template, as partial unique indexes Prisma cannot
   // express. See prisma/migrations/*/migration.sql.
 
@@ -533,6 +546,7 @@ model CustomerCard {
   referredBy           ReferralAttribution[]   @relation("EnrolledCard")
   referralsGiven       ReferralAttribution[]   @relation("ReferringCard")
   promotionRedemptions PromotionRedemption[]
+  monetaryOperations   MonetaryOperation[]
 
   @@unique([customerBusinessProfileId, templateId])
   @@index([businessId, status])
@@ -1425,4 +1439,150 @@ enum WebhookErrorClass {
 /// Only AES-256-GCM exists. An enum so a row cannot claim an algorithm nothing here can read.
 enum WebhookCipher {
   AES_256_GCM
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// Phase 4 — cashback and discount
+//
+// READ `docs/PHASE-4-MONEY-MATRIX.md` §2 BEFORE ADDING A COLUMN HERE. Every amount below began as
+// a number a member of staff typed at a till. Nothing here records a payment, a receipt, a tax
+// event or verified revenue, and no column may ever be named as though it does.
+//
+// Every amount is BigInt. The product's existing monetary columns are `Int`, which at exponent 2
+// caps at 21,474,836.47 SYP — roughly USD 1,400–1,700, an ordinary large purchase, and nowhere near
+// a customer's CUMULATIVE spend, which is what the tiers here depend on.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+/// A currency and the number of minor digits it has. The product had no exponent anywhere before
+/// this: `Business.currency` is unconstrained text and "minor units" appeared only in a comment.
+///
+/// Reference data. The runtime role may SELECT and nothing else — an application that could insert a
+/// currency could insert one with the wrong exponent, silently shifting every amount in it by ten.
+model SupportedCurrency {
+  code      String   @id // ISO 4217 alpha-3
+  exponent  Int      @db.SmallInt // 0 (JPY), 2 (SYP, USD), 3 (JOD, KWD, BHD)
+  createdAt DateTime @default(now())
+
+  monetaryRules MonetaryRule[]
+}
+
+enum MonetaryRuleKind {
+  CASHBACK
+  DISCOUNT
+}
+
+enum MonetaryOperationKind {
+  CASHBACK_EARNED
+  CASHBACK_REDEEMED
+  DISCOUNT_APPLIED
+  REVERSAL
+}
+
+/// The monetary rules of one program version. Frozen on write; a change is a new version.
+model MonetaryRule {
+  id               String           @id @default(uuid())
+  programVersionId String           @unique
+  kind             MonetaryRuleKind
+  /// Copied from the business and frozen. Read live, a past row would change meaning if the
+  /// business's currency changed.
+  currency         String
+  /// Copied from `SupportedCurrency` and frozen with it, so the unit travels with the record.
+  currencyExponent Int              @db.SmallInt
+  createdAt        DateTime         @default(now())
+
+  programVersion    ProgramVersion      @relation(fields: [programVersionId], references: [id])
+  supportedCurrency SupportedCurrency   @relation(fields: [currency], references: [code])
+  tiers             MonetaryTier[]
+  operations        MonetaryOperation[]
+}
+
+/// One band of a progressive rate. Thresholds rise with the index; tier 0 starts at zero spend.
+model MonetaryTier {
+  id                      String   @id @default(uuid())
+  monetaryRuleId          String
+  tierIndex               Int
+  /// Cumulative qualified spend at or above which this tier applies.
+  minCumulativeSpendMinor BigInt
+  /// 0..10000 = 0%..100%. Dimensionless, so no currency is involved.
+  rateBasisPoints         Int
+  createdAt               DateTime @default(now())
+
+  rule       MonetaryRule        @relation(fields: [monetaryRuleId], references: [id])
+  operations MonetaryOperation[]
+
+  @@unique([monetaryRuleId, tierIndex])
+  @@unique([monetaryRuleId, minCumulativeSpendMinor])
+  @@index([monetaryRuleId, minCumulativeSpendMinor(sort: Desc)])
+}
+
+/// The financial record. Append-only, chained per card, and the only source of a cashback balance.
+///
+/// `CustomerCard.cashBalanceMinor` is deliberately NOT used: it is `Int`, and a balance that can be
+/// written independently of the history is a balance that can drift from it.
+model MonetaryOperation {
+  id                        String  @id @default(uuid())
+  transactionGroupId        String
+  businessId                String
+  locationId                String
+  customerBusinessProfileId String
+  customerCardId            String
+  templateId                String
+  programVersionId          String
+  monetaryRuleId            String
+  monetaryTierId            String?
+
+  kind             MonetaryOperationKind
+  currency         String
+  currencyExponent Int                   @db.SmallInt
+
+  /// **A staff assertion.** The pre-discount invoice total as typed at the counter. Not a receipt,
+  /// not verified, not revenue. Zero on a reversal, which asserts no invoice of its own.
+  grossAmountMinor         BigInt
+  /// What was asked for before capping. Redemption rows only.
+  requestedRedemptionMinor BigInt?
+  /// Signed effect on the cashback balance: + earned, − redeemed, the exact inverse on a reversal,
+  /// and zero for a discount.
+  cashEffectMinor          BigInt
+  /// The discount the rate produced. Discount rows only.
+  discountMinor            BigInt?
+  /// What the staff member was told to collect. Calculated, never entered.
+  netCounterAmountMinor    BigInt
+  /// Copied from the tier so the row outlives it.
+  rateBasisPoints          Int?
+
+  /// Chained: the previous row's balance plus this row's effect, checked by trigger.
+  cashBalanceAfterMinor BigInt
+  /// Per-card position. The unique index on (card, sequence) is what serializes two concurrent
+  /// writers for one card — a trigger that SELECTs sees only committed rows and could not.
+  cardSequence          BigInt
+
+  reversalOfId      String?
+  reason            String?
+  performedByUserId String?
+  createdAt         DateTime @default(now())
+
+  business       Business                @relation(fields: [businessId], references: [id])
+  location       Location                @relation(fields: [locationId], references: [id])
+  profile        CustomerBusinessProfile @relation(fields: [customerBusinessProfileId], references: [id])
+  card           CustomerCard            @relation(fields: [customerCardId], references: [id])
+  template       ProgramTemplate         @relation(fields: [templateId], references: [id])
+  programVersion ProgramVersion          @relation(fields: [programVersionId], references: [id])
+  rule           MonetaryRule            @relation(fields: [monetaryRuleId], references: [id])
+  /*
+   * `onDelete: Restrict` explicitly, NOT Prisma's default for an optional relation, which is
+   * SetNull. A tier must never be nullified out from under an operation that used its rate: the row
+   * records what rate a customer was given, and a dangling NULL would erase that.
+   */
+  tier           MonetaryTier?           @relation(fields: [monetaryTierId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  performedBy    User?                   @relation("MonetaryActor", fields: [performedByUserId], references: [id])
+  /* Same reason: SetNull would silently sever a reversal from the row it reverses. */
+  reversalOf     MonetaryOperation?      @relation("MonetaryReversal", fields: [reversalOfId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  reversals      MonetaryOperation[]     @relation("MonetaryReversal")
+
+  // In SQL only, because Prisma cannot express a partial unique index: one reversal per operation,
+  // UNIQUE (reversalOfId) WHERE reversalOfId IS NOT NULL. See migration 20.
+  @@unique([customerCardId, cardSequence])
+  @@index([businessId, createdAt])
+  @@index([customerCardId, createdAt])
+  @@index([transactionGroupId])
 }

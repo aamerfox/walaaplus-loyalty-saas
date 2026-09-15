@@ -83,7 +83,14 @@ export interface ProgramVersionSummary {
   /** Cards pinned to this version. They keep its rules whatever happens to the program. */
   cardCount: number;
   tiers: VersionTier[];
-  /** Parsed through the card type's own contract. Null when the row parses as neither. */
+  /**
+   * Parsed through the card type's own contract.
+   *
+   * Null when the row is not a stamp or points version - which now includes every MONEY version, not
+   * only a corrupt one. Nothing renders this field; the version-history table shows numbers, dates
+   * and card counts, all of which are true of a money version too. Said explicitly because "parses
+   * as neither" used to mean "corrupt", and it no longer does.
+   */
   mechanics: StampMechanics | PointsMechanics | null;
 }
 
@@ -95,6 +102,41 @@ export interface ProgramVersionHistory {
   versions: ProgramVersionSummary[];
   /** The draft, if one is open. At most one per program, enforced in SQL. */
   draftVersionNumber: number | null;
+}
+
+/**
+ * Card types the draft editor implements.
+ *
+ * Phase 4 added `CASHBACK` and `DISCOUNT`. Neither can be edited through this flow, and the reason is
+ * structural rather than "the screen is not built yet": a money program's rates live in
+ * `MonetaryRule` and `MonetaryTier`, which the database FREEZES to a DRAFT version. Editing them is
+ * therefore not a matter of changing a JSON blob and republishing - it needs its own draft-rule
+ * flow, and that belongs with the money UI in Prompt 2.
+ *
+ * Refusing by name matters here. Before this constant existed, `validateDraft` dispatched
+ * `cardType === POINTS ? points : stamp`, so a cashback draft would have been validated against the
+ * STAMP contract and published as a stamp program.
+ */
+export const DRAFT_EDITABLE_CARD_TYPES = [CardType.STAMP, CardType.POINTS] as const;
+export type DraftEditableCardType = (typeof DRAFT_EDITABLE_CARD_TYPES)[number];
+
+export function isDraftEditableCardType(cardType: CardType): cardType is DraftEditableCardType {
+  return (DRAFT_EDITABLE_CARD_TYPES as readonly CardType[]).includes(cardType);
+}
+
+/**
+ * Refuse a card type this flow cannot edit, before anything is read or written.
+ *
+ * A `ValidationError` rather than a `NotFoundError`: the program genuinely exists and the owner can
+ * see it in their list, so pretending otherwise would send them looking for a bug.
+ */
+function assertDraftEditable(cardType: CardType): asserts cardType is DraftEditableCardType {
+  if (!isDraftEditableCardType(cardType)) {
+    throw new ValidationError(
+      "A cashback or discount program's rates are frozen to the version they were configured on, and cannot be edited here. " +
+        "Publish a new program version to change a rate.",
+    );
+  }
 }
 
 /** Load a template inside the caller's tenant, or refuse exactly as if it did not exist. */
@@ -203,6 +245,9 @@ async function validateDraft(
   cardType: CardType,
   input: UpdateDraftInput,
 ): Promise<{ mechanics: StampMechanics | PointsMechanics; tiers: RewardTierInput[] }> {
+  // Checked again here, not only at the entry points: the branch below is `points or else stamp`,
+  // and a card type that is neither must never fall into the stamp arm by default.
+  assertDraftEditable(cardType);
   if (cardType === CardType.POINTS) {
     const mechanics = parsePointsMechanics(input.mechanics);
     const tiers = (input.tiers ?? []).map((t) => rewardTierSchema.parse(t));
@@ -301,6 +346,8 @@ export async function createDraftVersion(ctx: TenantContext, templateId: string)
 
   return prisma.$transaction(async (tx) => {
     const template = await requireOwnTemplate(tx, ctx, templateId);
+    // Refused before a draft row exists, so a money program never gets one to edit.
+    assertDraftEditable(template.cardType);
     if (template.status === TemplateStatus.ARCHIVED) {
       throw new ConflictError("This program is archived and cannot take a new version");
     }
@@ -607,7 +654,8 @@ export interface VersionChange {
 export interface ProgramDraftReview {
   templateId: string;
   name: string;
-  cardType: CardType;
+  /** Narrowed: `getProgramDraftReview` refuses a money program before it builds one of these. */
+  cardType: DraftEditableCardType;
   draftVersionNumber: number;
   liveVersionNumber: number;
   /** Cards that will keep the live version's rules after publication. */
@@ -667,6 +715,8 @@ function diffTiers(before: VersionTier[], after: VersionTier[]): VersionChange[]
 export async function getProgramDraft(ctx: TenantContext, templateId: string): Promise<ProgramDraftReview | null> {
   requirePermission(ctx, Permission.VIEW_TEMPLATES);
   const template = await requireOwnTemplate(prisma, ctx, templateId);
+  // Narrows `cardType` for the returned review, and is the reason the screen's prop type is sound.
+  assertDraftEditable(template.cardType);
 
   const [draft, live, locations] = await Promise.all([
     prisma.programVersion.findFirst({
