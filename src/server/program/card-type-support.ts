@@ -58,10 +58,15 @@ export interface CardTypeSupport {
    * Whether the **stamp/points counter** — the scanner screen, its routes, card lookup and the
    * generic reversal path — can operate this card type.
    *
-   * False for the money types, and not because the work is unfinished: their counter UI, routes and
-   * customer views are Phase 4 Prompt 2. Until then every one of those paths must refuse a money
-   * card **by name**, rather than route it into the stamp engine or fail with an error that blames
-   * the data for not being stamp mechanics.
+   * False for the money types, and it stays false now that Prompt 2 has built their counter. It is
+   * not a "done yet" flag: a money card has a currency balance and a spend-dependent rate, and the
+   * stamp/points scanner's whole shape - stamp counts, a reward ladder, its `STAMP | POINTS` card
+   * union - has nowhere to put either. Money is served by its own counter at `/scanner/money`,
+   * reading through `monetary/counter.ts`.
+   *
+   * So these paths must still refuse a money card **by name**, rather than route it into the stamp
+   * engine or fail with an error that blames the data for not being stamp mechanics. What changed in
+   * Prompt 2 is the sentence they refuse with: it now names where the card IS served.
    */
   readonly counterUi: boolean;
   /** Whether the draft-version editor can edit this card type. Money rates are frozen to a version. */
@@ -93,13 +98,16 @@ export function isMonetaryCardType(cardType: CardType): boolean {
  * The sentence matters. Before this existed, a cashback card reaching `findCardByQrToken` was
  * refused — but with *"Program version … does not hold valid stamp mechanics"*, which reads as data
  * corruption and would have sent somebody looking for a broken row. The card is fine; this screen
- * simply does not serve it yet.
+ * does not serve it.
+ *
+ * Since Prompt 2 the message also says where it IS served, because "this screen cannot help you" is
+ * only half of what a person at a till needs to hear.
  */
 export function assertCounterSupportsCardType(cardType: CardType): void {
   if (CARD_TYPE_SUPPORT[cardType].counterUi) return;
   throw new ValidationError(
     isMonetaryCardType(cardType)
-      ? "This is a cashback or discount card. The counter screen for money programs is not built yet, so this card cannot be served here."
+      ? "This is a cashback or discount card. Serve it from the money counter (Scanner → money), not this screen."
       : `The counter does not support ${cardType} cards`,
   );
 }

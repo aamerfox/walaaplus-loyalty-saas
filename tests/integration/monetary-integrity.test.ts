@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { OperationSource, PrismaClient, ProgramVersionStatus } from "@prisma/client";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, onTestFinished } from "vitest";
 import { prisma } from "@/server/db";
 import { earnCashback } from "@/server/monetary/engine";
 import {
@@ -139,7 +139,10 @@ describe("a financial record is append-only, in TWO independent layers", () => {
     const owner = migratorPrisma();
     const runtimeUser = new URL(resolveTestDatabaseUrls().runtime).username;
 
-    for (const table of ["MonetaryOperation", "MonetaryRule", "MonetaryTier"]) {
+    // MonetaryOperation is the financial RECORD and stays SELECT/INSERT only. MonetaryRule and
+    // MonetaryTier are CONFIGURATION and are checked separately below, because migration 22 widened
+    // their grant on purpose so a draft can be edited - with the trigger as the lifecycle guard.
+    for (const table of ["MonetaryOperation"]) {
       const [p] = await owner.$queryRawUnsafe<
         { s: boolean; i: boolean; u: boolean; d: boolean; t: boolean }[]
       >(
@@ -152,6 +155,23 @@ describe("a financial record is append-only, in TWO independent layers", () => {
         `public."${table}"`,
       );
       expect({ table, ...p }).toEqual({ table, s: true, i: true, u: false, d: false, t: false });
+    }
+
+    // Draft-configurable: full DML, never TRUNCATE. The widening is deliberate and is the reason
+    // `money-draft-config.test.ts` exists to prove the trigger does the narrowing instead.
+    for (const table of ["MonetaryRule", "MonetaryTier"]) {
+      const [p] = await owner.$queryRawUnsafe<
+        { s: boolean; i: boolean; u: boolean; d: boolean; t: boolean }[]
+      >(
+        `SELECT has_table_privilege($1, $2, 'SELECT') AS s,
+                has_table_privilege($1, $2, 'INSERT') AS i,
+                has_table_privilege($1, $2, 'UPDATE') AS u,
+                has_table_privilege($1, $2, 'DELETE') AS d,
+                has_table_privilege($1, $2, 'TRUNCATE') AS t`,
+        runtimeUser,
+        `public."${table}"`,
+      );
+      expect({ table, ...p }).toEqual({ table, s: true, i: true, u: true, d: true, t: false });
     }
 
     // Reference data is narrower still: read it, never write it.
@@ -191,17 +211,38 @@ describe("a financial record is append-only, in TWO independent layers", () => {
 });
 
 describe("a rate table is frozen once its version goes live", () => {
-  it("gives the runtime role no way to change a rate at all", async () => {
+  it("gives the runtime role no way to change a LIVE rate", async () => {
+    /*
+     * **The layer that refuses moved; the guarantee did not.**
+     *
+     * Until migration 22 this was `permission denied`: `MonetaryRule` and `MonetaryTier` were classed
+     * append-only, so the runtime role could not issue the statement at all. That also meant the
+     * owner's draft editor could not write, which is the defect migration 22 corrected.
+     *
+     * The role now holds UPDATE and DELETE at table level, because PostgreSQL privileges cannot say
+     * "only while the version is a draft" — and the TRIGGER is the lifecycle enforcement. `setup()`
+     * builds an ACTIVE programme, so every attempt below must be refused by it.
+     *
+     * `tests/integration/money-draft-config.test.ts` holds the other half: the same statements
+     * against a DRAFT version must succeed.
+     */
     const c = await setup();
     await expect(
       prisma.$executeRawUnsafe(`UPDATE "MonetaryRule" SET "currency" = 'USD' WHERE id = '${c.ruleId}'`),
-    ).rejects.toThrow(/permission denied for table MonetaryRule/);
+    ).rejects.toThrow(/MonetaryRule is frozen; a rule change is a new program version/);
     await expect(
       prisma.$executeRawUnsafe(`UPDATE "MonetaryTier" SET "rateBasisPoints" = 1 WHERE id = '${c.tierId}'`),
-    ).rejects.toThrow(/permission denied for table MonetaryTier/);
+    ).rejects.toThrow(/MonetaryTier is frozen; a tier change is a new program version/);
     await expect(prisma.$executeRawUnsafe(`DELETE FROM "MonetaryTier" WHERE id = '${c.tierId}'`)).rejects.toThrow(
-      /permission denied for table MonetaryTier/,
+      /MonetaryTier is frozen; a tier change is a new program version/,
     );
+
+    // And the rate a customer was promised is still what it was - which the privilege-based version
+    // of this test never actually checked.
+    const tier = await prisma.monetaryTier.findUniqueOrThrow({ where: { id: c.tierId } });
+    expect(tier.rateBasisPoints).toBe(500);
+    const rule = await prisma.monetaryRule.findUniqueOrThrow({ where: { id: c.ruleId } });
+    expect(rule.currency).toBe("SYP");
   });
 
   it("refuses the TABLE OWNER a change to a rule or a tier - the customer's deal is frozen", async () => {
@@ -260,15 +301,55 @@ describe("the currency and its exponent are not the application's to invent", ()
     ).rejects.toThrow(/exponent for SYP is 2, not 3/);
   });
 
-  it("refuses a currency this product has no exponent for", async () => {
+  it("refuses a rule in a currency that is not the business's", async () => {
+    // Migration 22's guard. USD's exponent really is 2, so the unit is not what is wrong here.
     const c = await setup();
     const draft = await migratorPrisma().programVersion.create({
-      data: { templateId: c.templateId, versionNumber: 98, status: ProgramVersionStatus.DRAFT },
+      data: { templateId: c.templateId, versionNumber: 97, status: ProgramVersionStatus.DRAFT },
       select: { id: true },
     });
     await expect(
+      prisma.monetaryRule.create({ data: { programVersionId: draft.id, kind: "CASHBACK", currency: "USD", currencyExponent: 2 } }),
+    ).rejects.toThrow(/the currency is the business's \(SYP\), not USD/);
+  });
+
+  it("refuses a currency this product has no exponent for", async () => {
+    /*
+     * This case has to be built on a business whose OWN currency is unsupported, and the reason is
+     * worth stating because the obvious version of this test is worthless.
+     *
+     * It used to insert `XYZ` against an ordinary SYP business. Migration 22 then added the
+     * business-currency guard, which fires FIRST in the same trigger — so the row was still refused,
+     * the test still passed, and it had stopped testing SupportedCurrency altogether. It would have
+     * gone on passing with the lookup below and its foreign key both deleted.
+     *
+     * `Business.currency` is unconstrained text (`prisma/schema.prisma:1457`), so a business can be
+     * carrying a currency this product records no exponent for. That is the one path where the
+     * business-currency guard is satisfied and the SupportedCurrency check is the layer that answers.
+     */
+    const owner = migratorPrisma();
+    const business = await owner.business.create({
+      data: { name: "Trades in an unsupported unit", currency: "XYZ" },
+      select: { id: true },
+    });
+    const template = await owner.programTemplate.create({
+      data: { businessId: business.id, name: "Unsupported unit", cardType: "CASHBACK" },
+      select: { id: true },
+    });
+    const draft = await owner.programVersion.create({
+      data: { templateId: template.id, versionNumber: 1, status: ProgramVersionStatus.DRAFT },
+      select: { id: true },
+    });
+
+    /*
+     * The assertion names the CONSTRAINT, not just "rejected". The trigger deliberately does not
+     * raise its own "not supported" refusal for an unknown code — if it did, the foreign key would
+     * never be reached and dropping it would change nothing observable. Naming the constraint is what
+     * makes this test fail if that key is ever removed.
+     */
+    await expect(
       prisma.monetaryRule.create({ data: { programVersionId: draft.id, kind: "CASHBACK", currency: "XYZ", currencyExponent: 2 } }),
-    ).rejects.toThrow(/not a supported currency|Foreign key/i);
+    ).rejects.toThrow(/MonetaryRule_currency_fkey/);
   });
 
   it("gives the runtime role SELECT on SupportedCurrency and nothing else", async () => {
@@ -661,6 +742,21 @@ describe("the balance chain cannot be forged or reordered", () => {
     const runtimeUrl = resolveTestDatabaseUrls().runtime;
     const a = new PrismaClient({ datasourceUrl: runtimeUrl, log: [] });
     const b = new PrismaClient({ datasourceUrl: runtimeUrl, log: [] });
+
+    /*
+     * Teardown registered HERE rather than left to the `finally` below, for one reason that needs no
+     * incident to justify it: Vitest ABANDONS a timed-out test body, so that `finally` does not run,
+     * and these two clients would stay connected. `onTestFinished` runs either way.
+     *
+     * It is deliberately NOT claimed that this caused any particular past failure. A suite failure
+     * was once attributed to exactly that mechanism; the `resetDatabase` diagnostic then showed the
+     * blocking session had a transaction age of ONE SECOND - a live transaction, not an abandoned
+     * one - and the attribution was withdrawn. The cause of that failure is still unknown, and it did
+     * not reproduce afterwards. This hook is cheap correctness, not a fix for a diagnosed defect.
+     */
+    onTestFinished(async () => {
+      await Promise.allSettled([a.$disconnect(), b.$disconnect()]);
+    });
 
     try {
       // Connect and start both query engines BEFORE the race, so neither pays that cost inside it.

@@ -267,13 +267,14 @@ export async function getProgramDetail(ctx: TenantContext, templateId: string): 
 /**
  * Card types the counter screen can actually operate.
  *
- * Phase 4 added `CASHBACK` and `DISCOUNT` to `CardType`, and the counter screen does not understand
- * either of them yet - the money engine has no UI until Prompt 2. Listing one here would put a
- * program in the picker that every write then refuses, which is a worse outcome than not offering
- * it: the cashier would have a customer in front of them and no way to tell why nothing works.
+ * Phase 4 added `CASHBACK` and `DISCOUNT` to `CardType`, and THIS screen does not understand either:
+ * its controls are stamp counts and reward ladders, and a money card has a currency balance and a
+ * spend-dependent rate instead. Listing one here would put a program in the picker that every write
+ * refuses - the cashier would have a customer in front of them and no way to tell why nothing works.
  *
- * So the scope is filtered to the two kinds this screen implements, and the type says so. When the
- * money counter arrives, this set grows and the compiler names every place that has to change.
+ * Prompt 2 did not grow this set. It built money its own counter at `/scanner/money`, and
+ * `listMoneyCounterPrograms` below is what the scanner page uses to link to it. The two screens stay
+ * separate because they share no control, not because one is unfinished.
  */
 export const SCANNER_CARD_TYPES = [CardType.STAMP, CardType.POINTS] as const;
 export type ScannerCardType = (typeof SCANNER_CARD_TYPES)[number];
@@ -308,8 +309,8 @@ export async function getScannerScope(ctx: TenantContext): Promise<ScannerScope>
         businessId: ctx.businessId,
         status: TemplateStatus.ACTIVE,
         versions: { some: { status: ProgramVersionStatus.ACTIVE } },
-        // See SCANNER_CARD_TYPES: a money program has no counter screen until Prompt 2, and
-        // offering one the write would refuse is worse than not offering it.
+        // See SCANNER_CARD_TYPES: a money program is served by its own counter, and offering one
+        // here - where every write would refuse it - is worse than not offering it at all.
         cardType: { in: [...SCANNER_CARD_TYPES] },
       },
       select: {
@@ -355,4 +356,38 @@ export async function getScannerScope(ctx: TenantContext): Promise<ScannerScope>
     defaultLocationId: locations.find((l) => l.isDefault)?.id ?? null,
     usableLocations: locations.filter((l) => mayUse(l.id)).map((l) => ({ id: l.id, name: l.name })),
   };
+}
+
+/**
+ * The money programmes this business runs, for the link across to their own counter.
+ *
+ * Deliberately NOT folded into `getScannerScope`: that function's return type is the stamp/points
+ * screen's own vocabulary, and widening it would push a money branch into every consumer of it. This
+ * returns names and ids, which is all a link needs.
+ */
+export interface MoneyCounterProgram {
+  templateId: string;
+  name: string;
+  cardType: typeof CardType.CASHBACK | typeof CardType.DISCOUNT;
+}
+
+export async function listMoneyCounterPrograms(ctx: TenantContext): Promise<MoneyCounterProgram[]> {
+  requirePermission(ctx, Permission.VIEW_CUSTOMERS);
+
+  const templates = await prisma.programTemplate.findMany({
+    where: {
+      businessId: ctx.businessId,
+      status: TemplateStatus.ACTIVE,
+      versions: { some: { status: ProgramVersionStatus.ACTIVE } },
+      cardType: { in: [CardType.CASHBACK, CardType.DISCOUNT] },
+    },
+    select: { id: true, name: true, cardType: true },
+    orderBy: { createdAt: "asc" },
+  });
+
+  return templates.map((t) => ({
+    templateId: t.id,
+    name: t.name,
+    cardType: t.cardType as MoneyCounterProgram["cardType"],
+  }));
 }

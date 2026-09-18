@@ -60,17 +60,36 @@ const APPEND_ONLY_TABLES = [
    * Phase 4 money. The strongest case in this list for append-only, because these rows are the only
    * record of what a customer was told they owed.
    *
-   * A rule and its tiers are frozen once written because CARDS PIN TO A VERSION: editing a live rate
-   * would silently change what an already-issued card agreed to. A new rate is a new program version.
+   * A `MonetaryOperation` is never corrected. The balance on each row is chained to the row before
+   * it, so an UPDATE would not merely alter one amount - it would break the arithmetic that makes
+   * the history checkable. A mistake is undone by a linked reversal and both rows stay visible.
    *
-   * A `MonetaryOperation` is never corrected either. The balance on each row is chained to the row
-   * before it, so an UPDATE would not merely alter one amount - it would break the arithmetic that
-   * makes the history checkable. A mistake is undone by a linked reversal and both rows stay visible.
+   * `MonetaryRule` and `MonetaryTier` are NOT here. They are configuration rather than record, and
+   * an owner must be able to correct a DRAFT rate table before publishing it - see
+   * DRAFT_CONFIGURABLE_TABLES below for why that cannot be expressed as a grant.
    */
-  "MonetaryRule",
-  "MonetaryTier",
   "MonetaryOperation",
 ];
+
+/**
+ * Configuration that is editable while its program version is a DRAFT and frozen for ever after.
+ *
+ * **These are the only tables where the grant is deliberately wider than the rule.** PostgreSQL
+ * privileges are not lifecycle-aware: there is no way to say "UPDATE, but only while the row's
+ * grandparent version is still a draft". So the grant has to be SELECT/INSERT/UPDATE/DELETE at table
+ * level, and `walaaplus_monetary_rule_guard` / `walaaplus_monetary_tier_guard` are the enforcement -
+ * they refuse every UPDATE and DELETE once the owning version is ACTIVE or RETIRED, and refuse
+ * moving a row to a different version or rule.
+ *
+ * That is a real widening and it is stated rather than buried: the role CAN issue an UPDATE against
+ * a live rate table, and the database refuses it. `tests/integration/money-draft-config.test.ts`
+ * proves both halves through THIS role, not through the migrator - which is exactly the check that
+ * was missing when these tables were first classed as append-only and the draft editor could not
+ * write at all.
+ *
+ * TRUNCATE is granted to nobody and is additionally refused by trigger for the table owner.
+ */
+const DRAFT_CONFIGURABLE_TABLES = ["MonetaryRule", "MonetaryTier"];
 
 /**
  * Reference data the application reads and never writes.
@@ -218,7 +237,7 @@ async function main() {
   const database = who.rows[0].db;
   process.stdout.write(`db-roles: connected as migrator "${owner}" to database "${database}"\n`);
 
-  for (const t of [...APPEND_ONLY_TABLES, ...NO_DELETE_TABLES, ...READ_ONLY_TABLES]) {
+  for (const t of [...APPEND_ONLY_TABLES, ...NO_DELETE_TABLES, ...READ_ONLY_TABLES, ...DRAFT_CONFIGURABLE_TABLES]) {
     if (!(await tableExists(t))) fail(`table "${t}" does not exist. Run \`npm run db:migrate\` first.`);
   }
 
@@ -263,6 +282,12 @@ async function main() {
     for (const t of NO_DELETE_TABLES) {
       await run(`REVOKE ALL PRIVILEGES ON TABLE public.${ident(t)} FROM ${role}`);
       await run(`GRANT SELECT, INSERT, UPDATE ON TABLE public.${ident(t)} TO ${role}`);
+    }
+
+    // 3b2. Draft-configurable money configuration: full DML, lifecycle enforced by trigger.
+    for (const t of DRAFT_CONFIGURABLE_TABLES) {
+      await run(`REVOKE ALL PRIVILEGES ON TABLE public.${ident(t)} FROM ${role}`);
+      await run(`GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.${ident(t)} TO ${role}`);
     }
 
     // 3c. Reference data: read it, never write it.
@@ -384,6 +409,17 @@ async function main() {
     if (!r.s || !r.i || !r.u) problems.push(`${t}: SELECT/INSERT/UPDATE missing`);
     if (r.d || r.t) problems.push(`${t}: DELETE/TRUNCATE still granted`);
   }
+  for (const t of DRAFT_CONFIGURABLE_TABLES) {
+    const p = await client.query(
+      "SELECT has_table_privilege($1, $2, 'SELECT') AS s, has_table_privilege($1, $2, 'INSERT') AS i, " +
+        "has_table_privilege($1, $2, 'UPDATE') AS u, has_table_privilege($1, $2, 'DELETE') AS d, " +
+        "has_table_privilege($1, $2, 'TRUNCATE') AS t",
+      [runtime.user, `public.${ident(t)}`],
+    );
+    const r = p.rows[0];
+    if (!r.s || !r.i || !r.u || !r.d) problems.push(`${t}: SELECT/INSERT/UPDATE/DELETE required for draft configuration`);
+    if (r.t) problems.push(`${t}: TRUNCATE must never be granted`);
+  }
   for (const t of READ_ONLY_TABLES) {
     const p = await client.query(
       "SELECT has_table_privilege($1, $2, 'SELECT') AS s, has_table_privilege($1, $2, 'INSERT') AS i, " +
@@ -429,6 +465,7 @@ async function main() {
     `db-roles: OK role "${runtime.user}" — read/write on ${tables.rows[0].n} public tables, ` +
       `append-only on [${APPEND_ONLY_TABLES.join(", ")}], no-delete on [${NO_DELETE_TABLES.join(", ")}], ` +
       `read-only on [${READ_ONLY_TABLES.join(", ")}], ` +
+      `draft-configurable on [${DRAFT_CONFIGURABLE_TABLES.join(", ")}] (lifecycle by trigger), ` +
       `no access to [${MIGRATOR_ONLY_TABLES.join(", ")}], ` +
       `owns schema "${WORKER_SCHEMA}", cannot CREATE in public, ` +
       `members: [${memberNames.join(", ") || "none"}]\n`,

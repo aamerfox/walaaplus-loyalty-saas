@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { CardStatus, MonetaryOperationKind, MonetaryRuleKind, Permission } from "@prisma/client";
 import { AuditAction, recordAudit } from "../audit/audit";
-import type { Tx } from "../db";
+import type { DbClient, Tx } from "../db";
 import { ConflictCode, ConflictError, LedgerInvariantError, NotFoundError, ValidationError } from "../errors";
 import { runIdempotent } from "../ledger/idempotency";
 import type { MemberSource } from "../ledger/actor";
@@ -233,7 +233,7 @@ async function loadLockedCardForReversal(
   return { card, rule };
 }
 
-interface CardMoneyState {
+export interface CardMoneyState {
   balanceMinor: bigint;
   sequence: bigint;
   cumulativeSpendMinor: bigint;
@@ -262,7 +262,14 @@ interface CardMoneyState {
  * receipts. It is recorded as **D35** for the owner to confirm or overturn; overturning it changes
  * one line here and nothing else in the design.
  */
-async function readCardMoneyState(tx: Tx, customerCardId: string): Promise<CardMoneyState> {
+/*
+ * Exported so the counter's READ path uses this exact definition rather than a second one.
+ *
+ * Two copies of "qualified spend" would drift the first time one of them was corrected, and the
+ * screen would then show a customer a rate the engine would not give them. The engine calls it under
+ * the card's lock before writing; `readMoneyCard` calls it to show a person. Same SQL, one meaning.
+ */
+export async function readCardMoneyState(tx: DbClient, customerCardId: string): Promise<CardMoneyState> {
   const rows = await tx.$queryRaw<CardMoneyState[]>`
     SELECT
       COALESCE((SELECT o."cashBalanceAfterMinor" FROM "MonetaryOperation" o

@@ -123,6 +123,61 @@ export async function resetDatabase(): Promise<void> {
   }
   try {
     await db.$executeRawUnsafe(`TRUNCATE TABLE ${list} RESTART IDENTITY CASCADE`);
+  } catch (error) {
+    /*
+     * A deadlock here is not about this statement's contents. TRUNCATE needs AccessExclusiveLock on
+     * every table, so it loses to any connection holding a transaction open at that moment. WHICH
+     * connection, and why, is what this reports - it does not assume an answer. The first time it
+     * ran it disproved the explanation that had been offered (an abandoned client from an earlier
+     * test) by showing a transaction age of one second.
+     *
+     * The reset still FAILS; this only names the other sessions, so the next occurrence does not
+     * need the investigation this one did.
+     */
+    const code = (error as { meta?: { code?: string } })?.meta?.code;
+    if (code === "40P01" || /deadlock/i.test(String(error))) {
+      /*
+       * OPERATIONAL METADATA ONLY. No query text, no parameters, no URLs.
+       *
+       * The obvious version of this printed `left(query, 120)`, which is a leak: a test-database
+       * statement still carries inlined parameter values - card identifiers, customer rows, invoice
+       * amounts - and this string goes to stdout, into CI logs and into evidence documents. What is
+       * needed to identify a stuck session is the backend PID, what it is waiting on, and how long
+       * it has been there. None of that requires seeing the SQL.
+       */
+      const others = await db.$queryRawUnsafe<
+        {
+          pid: number;
+          app: string;
+          state: string;
+          wait: string | null;
+          held: string | null;
+          since: string | null;
+        }[]
+      >(
+        `SELECT pid,
+                coalesce(nullif(application_name, ''), '(unnamed)') AS app,
+                state,
+                coalesce(wait_event_type, '-') || '/' || coalesce(wait_event, '-') AS wait,
+                to_char(coalesce(now() - xact_start, interval '0'), 'HH24:MI:SS') AS held,
+                to_char(backend_start, 'HH24:MI:SS') AS since
+           FROM pg_stat_activity
+          WHERE datname = current_database() AND pid <> pg_backend_pid() AND state <> 'idle'`,
+      );
+      /*
+       * `app` and `since` are the two fields that separate the remaining candidates. A connection
+       * opened seconds ago is a test running now; one opened at suite start and still holding a
+       * transaction is a leak. Neither can be told apart from PID and transaction age alone, which
+       * is why the first version of this diagnostic could rule an explanation OUT but not rule one IN.
+       */
+      console.error("resetDatabase: TRUNCATE deadlocked. Other sessions holding locks:");
+      for (const o of others) {
+        console.error(
+          `  pid ${o.pid} app=${o.app} state=${o.state} wait=${o.wait} xact_age=${o.held} backend_start=${o.since}`,
+        );
+      }
+    }
+    throw error;
   } finally {
     for (const table of APPEND_ONLY_TABLES) {
       await db.$executeRawUnsafe(`ALTER TABLE "${table}" ENABLE TRIGGER USER`);

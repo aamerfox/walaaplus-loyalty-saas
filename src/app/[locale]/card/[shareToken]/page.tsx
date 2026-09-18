@@ -1,7 +1,9 @@
 import type { Metadata, Viewport } from "next";
 import { getTranslations } from "next-intl/server";
 import { notFound } from "next/navigation";
-import { getPublicCardView } from "@/server/customers/card-view";
+import { getPublicCardKind, getPublicCardView, getPublicMoneyCardView } from "@/server/customers/card-view";
+import { isMonetaryCardType } from "@/server/program/card-type-support";
+import MoneyCardBody from "./MoneyCardBody";
 import { isAppError } from "@/server/errors";
 import { qrSvg } from "@/server/qr";
 import CardPwa from "./CardPwa";
@@ -25,7 +27,12 @@ import CardPwa from "./CardPwa";
 export async function generateMetadata({ params }: { params: Promise<{ shareToken: string }> }): Promise<Metadata> {
   const { shareToken } = await params;
   try {
-    const view = await getPublicCardView(shareToken);
+    // The kind decides which reader can answer. `getPublicCardView` parses STAMP mechanics on every
+    // path, so calling it for a money card would throw and this would silently title the page "—".
+    const kind = await getPublicCardKind(shareToken);
+    const view = isMonetaryCardType(kind)
+      ? await getPublicMoneyCardView(shareToken)
+      : await getPublicCardView(shareToken);
     return {
       title: `${view.businessName} — ${view.programName}`,
       // Per-card manifest: a customer holding three cards needs three home-screen icons, which
@@ -55,13 +62,33 @@ export const viewport: Viewport = {
 export default async function CardPage({ params }: { params: Promise<{ locale: string; shareToken: string }> }) {
   const { locale, shareToken } = await params;
 
+  /*
+   * Which card type this is decides which reader can answer at all. A cashback card handed to
+   * `getPublicCardView` is refused with "does not hold valid stamp mechanics" - a message about data
+   * corruption for a card that is perfectly fine.
+   */
   let view;
+  let moneyView = null;
   try {
-    view = await getPublicCardView(shareToken);
+    const kind = await getPublicCardKind(shareToken);
+    if (isMonetaryCardType(kind)) {
+      moneyView = await getPublicMoneyCardView(shareToken);
+    } else {
+      view = await getPublicCardView(shareToken);
+    }
   } catch (e) {
     if (isAppError(e)) notFound();
     throw e;
   }
+
+  /*
+   * Rendered OUTSIDE the try, deliberately. React does not render a component at the moment its JSX
+   * is constructed, so an error thrown while rendering `MoneyCardBody` would never reach the `catch`
+   * above - it would only look as though it were handled. The try wraps the reads, which is the part
+   * that can actually throw here, and an error boundary is what catches the rest.
+   */
+  if (moneyView) return <MoneyCardBody view={moneyView} />;
+  if (!view) notFound();
 
   const t = await getTranslations("Card");
   const qr = qrSvg(view.qrToken, { cellSize: 6, margin: 4 });
