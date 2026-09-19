@@ -1,9 +1,8 @@
 # Phase 4 Prompt 1 — cashback and invoice-based discount core
 
-**What this prompt built:** the domain, the database, the server services, the integrity rules and the
-tests for two new card types that carry real money. **What it deliberately did not build:** owner
-configuration UI, cashier counter UI, customer UI, public routes, public API additions, wallet
-changes, and any staging deployment. Those are Prompt 2.
+**Phase 4 Prompt 2A implementation note.** The money domain, database services and integrity rules from Prompt 1 are now connected to the owner and manager creation UI, the authenticated scanner lookup journey, the staff-only money counter, and the authorized customer record. No staging, deployment, provider, POS, payment or public money API was added.
+
+Initial money programmes use the required lifecycle safely: Create saves a CASHBACK or DISCOUNT version and its rule as DRAFT, including an intentionally incomplete/empty table when the owner is still configuring it. The owner edits the rate table and must explicitly Publish. The database activation trigger rejects a missing rule, empty table, malformed first tier, index gap, threshold disorder, or card-type mismatch, so no incomplete money version can issue or operate a card. Subsequent rate changes remain draft → explicit Publish, and discarded money drafts remain RETIRED.
 
 Read alongside:
 

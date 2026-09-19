@@ -229,17 +229,18 @@ than doing the work twice.
 | M10 | Change a currency and reinterpret history | Currency and exponent frozen on every row by trigger |
 | M11 | Write a row from a cashier of another location | Location checked against the actor's assignment |
 | M12 | Use a stale program version | Version pinned on the card; rule read from the pinned version, not the live one |
-| M13 | Reach this from the public API, a share link or a QR token | None of them touch these services; no route is added in this prompt at all |
+| M13 | Reach this from the public API, a share link or a QR token | Money writes are staff-only; public/share routes never call the money engine, and scanner lookup is tenant/permission/location scoped |
 | M14 | Have a negative amount cancel a cap | CHECK `>= 0` on every monetary column |
 
 ---
 
 ## 6. Deferred, and why
 
-### 6.1 To Prompt 2
+### 6.1 Prompt 2A completion
 
-Owner configuration UI, cashier counter UI, customer-facing display, HTTP routes, permissions proved
-through routes, and any screen that shows a balance. **This prompt adds no route.**
+Owner/manager creation is available from the new-program form with CASHBACK/DISCOUNT and permitted locations. Initial creation saves a DRAFT, which may be empty while being configured; the owner edits tiers/rates and uses a separate explicit Publish. The migration-22 activation trigger remains the database backstop. Later edits use draft → explicit Publish, and discarded money drafts are RETIRED.
+
+The cashier reaches the money counter by the normal QR or phone lookup. The old `/scanner/money?card=...` route no longer accepts a raw card id and redirects to scanner; the card result renders the counter in the authenticated scanner page. Owner/manager customer records show currency, version, balance, entered bill, operation effect, operation kind, timestamp, and reversal relationship where present. Cashiers cannot browse those records, and public cards remain informational.
 
 ### 6.2 BoomerangMe-like capabilities deliberately not built
 
