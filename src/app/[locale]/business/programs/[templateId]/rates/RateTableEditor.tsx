@@ -61,10 +61,12 @@ export default function RateTableEditor({
   const exponent = draft?.currencyExponent ?? live?.currencyExponent ?? 2;
 
   const [rows, setRows] = useState<Draft[]>(
-    (draft ?? live)?.tiers.map((tier) => ({
-      threshold: minorToInput(tier.minCumulativeSpendMinor, exponent),
-      percent: basisPointsToPercent(tier.rateBasisPoints),
-    })) ?? [{ threshold: minorToInput("0", exponent), percent: "0" }],
+    (draft ?? live)?.tiers.length
+      ? (draft ?? live)!.tiers.map((tier) => ({
+          threshold: minorToInput(tier.minCumulativeSpendMinor, exponent),
+          percent: basisPointsToPercent(tier.rateBasisPoints),
+        }))
+      : [{ threshold: minorToInput("0", exponent), percent: "0" }],
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -81,8 +83,9 @@ export default function RateTableEditor({
         body: JSON.stringify({ businessId: businessId ?? undefined, templateId, ...body }),
       });
       if (!res.ok) {
-        const payload = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
-        setError(payload.error ?? payload.message ?? t("failed"));
+        const payload = (await res.json().catch(() => ({}))) as { error?: { code?: string } | string; message?: string };
+        const code = typeof payload.error === "object" ? payload.error.code : undefined;
+        setError(code === "VALIDATION_ERROR" && body.action === "publish" ? t("publishIncomplete") : t("failed"));
         return false;
       }
       router.refresh();
@@ -160,15 +163,13 @@ export default function RateTableEditor({
                     />
                   </Td>
                   <Td>
-                    {index > 0 ? (
-                      <Button
-                        variant="ghost"
-                        data-testid={`money-remove-${index}`}
-                        onClick={() => setRows((r) => r.filter((_, i) => i !== index))}
-                      >
-                        {t("remove")}
-                      </Button>
-                    ) : null}
+                    <Button
+                      variant="ghost"
+                      data-testid={`money-remove-${index}`}
+                      onClick={() => setRows((r) => r.filter((_, i) => i !== index))}
+                    >
+                      {t("remove")}
+                    </Button>
                   </Td>
                 </tr>
               ))}

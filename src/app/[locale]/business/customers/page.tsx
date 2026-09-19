@@ -1,8 +1,9 @@
 import { getTranslations } from "next-intl/server";
-import { redirect } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import Link from "next/link";
 import { buttonClass, EmptyState, PageHeader, Table, Td, Th, TextInput, Toolbar } from "@/components/ui";
 import { getCurrentUserId } from "@/server/auth/session";
+import { ForbiddenError, NotFoundError } from "@/server/errors";
 import { listCustomers } from "@/server/customers/lookup";
 import { resolveScannerContext } from "@/server/tenant/scanner-context";
 
@@ -40,7 +41,15 @@ export default async function CustomersPage({
     return <EmptyState testId="customers-no-business" title={t("title")} body={t("empty")} />;
   }
 
-  const page = await listCustomers(resolved.context.ctx, { search: q, cursor, limit: 25 });
+  let page;
+  try {
+    // The directory is owner/manager-only. A known authorization/tenant refusal becomes the same
+    // non-enumerating 404 as the other protected business screens; unexpected failures still escape.
+    page = await listCustomers(resolved.context.ctx, { search: q, cursor, limit: 25 });
+  } catch (e) {
+    if (e instanceof ForbiddenError || e instanceof NotFoundError) notFound();
+    throw e;
+  }
   const queryFor = (next?: string) => {
     const sp = new URLSearchParams();
     if (q) sp.set("q", q);

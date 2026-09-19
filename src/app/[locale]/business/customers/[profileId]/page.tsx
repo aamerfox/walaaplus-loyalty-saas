@@ -6,7 +6,7 @@ import { Badge, Card, DetailRow, EmptyState, Notice, PageHeader, Section, StatTi
 import { getCurrentUserId } from "@/server/auth/session";
 import { getConsentHistory, getConsentStatus } from "@/server/consent/consent";
 import { getCustomerProfile, listProfileActivity } from "@/server/customers/customer-360";
-import { isAppError } from "@/server/errors";
+import { ForbiddenError, NotFoundError } from "@/server/errors";
 import { resolveScannerContext } from "@/server/tenant/scanner-context";
 import { listCardRedemptions } from "@/server/promotions/redemption";
 import { countReferralAttributions, getCardAttribution } from "@/server/share/referrals";
@@ -14,6 +14,7 @@ import ConsentControls from "./ConsentControls";
 import RedemptionsPanel from "./RedemptionsPanel";
 import ReferralPanel from "./ReferralPanel";
 import WalletPassPanel from "./WalletPassPanel";
+import { minorToInput } from "@/lib/money-input";
 
 /**
  * One customer, and everything this business knows about them.
@@ -90,7 +91,9 @@ export default async function CustomerProfilePage({
       getConsentHistory(ctx, profileId),
     ]);
   } catch (e) {
-    if (isAppError(e)) notFound();
+    // Only the expected tenant/authorization denials become the generic non-enumerating 404.
+    // Unexpected failures must retain their normal error path and must not be disguised as access control.
+    if (e instanceof ForbiddenError || e instanceof NotFoundError) notFound();
     throw e;
   }
   const mayEditConsent = ctx.permissions.has(Permission.EDIT_CUSTOMERS) && ctx.role !== "CASHIER";
@@ -211,7 +214,11 @@ export default async function CustomerProfilePage({
                       testId="card-stamps"
                     />
                   ) : (
-                    <StatTile label={t(`cardType.${card.cardType}`)} value="—" testId="card-monetary" />
+                    <StatTile
+                      label={card.cardType === CardType.CASHBACK ? t("monetaryBalance") : t("discountCard")}
+                      value={card.money ? `${minorToInput(card.money.balanceMinor, card.money.currencyExponent)} ${card.money.currency}` : "—"}
+                      testId="card-monetary"
+                    />
                   )}
                   {/*
                     * Rewards belong to the stamp and points mechanics. A money card has no reward
@@ -228,6 +235,23 @@ export default async function CustomerProfilePage({
                     />
                   ) : null}
                 </div>
+
+                {card.money ? (
+                  <div className="space-y-2 rounded-xl border border-border p-3" data-testid="customer-money-history">
+                    <p className="text-sm font-semibold text-ink">{t("monetaryHistory")}</p>
+                    {card.money.operations.length === 0 ? <p className="text-sm text-ink-muted">{t("noMonetaryOperations")}</p> : (
+                      <ul className="space-y-2 text-sm">
+                        {card.money.operations.map((operation) => (
+                          <li key={operation.id} className="flex flex-wrap justify-between gap-2 border-b border-border pb-2 last:border-0">
+                            <span><strong>{t(`monetaryKind.${operation.kind}`)}</strong> · {operation.at.toISOString().slice(0, 10)}</span>
+                            <span className="tabular-nums">{t("billAmount", { amount: operation.grossAmountMinor })} · {t("effectAmount", { amount: operation.cashEffectMinor })}</span>
+                            {operation.reversalOfId ? <Badge tone="warn">{t("correction")}</Badge> : null}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                ) : null}
 
                 {card.cardType === CardType.POINTS && card.tiers.length > 0 ? (
                   <ul className="space-y-1 text-sm" data-testid="card-tiers">

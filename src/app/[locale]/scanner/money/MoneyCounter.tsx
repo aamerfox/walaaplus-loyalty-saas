@@ -53,12 +53,15 @@ export interface CounterCard {
 
 /** The server's answer to one operation, as the screen shows it back. */
 interface Outcome {
+  operationId: string;
   kind: string;
   grossAmountMinor: string;
   netCounterAmountMinor: string;
   cashEffectMinor: string;
   cashBalanceAfterMinor: string;
   discountMinor: string | null;
+  rateBasisPoints: number | null;
+  reversalOfId: string | null;
   requestedRedemptionMinor: string | null;
 }
 
@@ -72,6 +75,9 @@ export default function MoneyCounter({ businessId, card }: { businessId: string 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [outcome, setOutcome] = useState<Outcome | null>(null);
+  // Scanner lookup keeps the selected card in client memory, so refresh cannot be relied on to
+  // replace its server-rendered recent list. Keep the append-only result visible locally as well.
+  const [recent, setRecent] = useState<CounterOperation[]>(card.recent);
 
   const isCashback = card.cardType === "CASHBACK";
 
@@ -95,7 +101,29 @@ export default function MoneyCounter({ businessId, card }: { businessId: string 
         setError((payload.error as string) ?? (payload.message as string) ?? t("failed"));
         return;
       }
-      setOutcome(payload as unknown as Outcome);
+      const operation = payload as unknown as Outcome;
+      setOutcome(operation);
+      setRecent((current) => {
+        const row: CounterOperation = {
+          id: operation.operationId,
+          kind: operation.kind,
+          at: new Date().toISOString(),
+          grossAmountMinor: operation.grossAmountMinor,
+          netCounterAmountMinor: operation.netCounterAmountMinor,
+          cashEffectMinor: operation.cashEffectMinor,
+          cashBalanceAfterMinor: operation.cashBalanceAfterMinor,
+          discountMinor: operation.discountMinor,
+          rateBasisPoints: operation.rateBasisPoints,
+          reversalOfId: operation.reversalOfId,
+          reversed: false,
+        };
+        if (operation.reversalOfId) {
+          return [row, ...current.map((item) =>
+            item.id === operation.reversalOfId ? { ...item, reversed: true } : item,
+          )];
+        }
+        return [row, ...current];
+      });
       setBill("");
       setRedeem("");
       router.refresh();
@@ -251,7 +279,7 @@ export default function MoneyCounter({ businessId, card }: { businessId: string 
 
       <Card>
         <h2 className="mb-2 text-base font-semibold">{t("recent")}</h2>
-        {card.recent.length === 0 ? (
+        {recent.length === 0 ? (
           <p className="text-sm text-neutral-600">{t("noneYet")}</p>
         ) : (
           <Table testId="money-recent">
@@ -265,7 +293,7 @@ export default function MoneyCounter({ businessId, card }: { businessId: string 
               </tr>
             </thead>
             <tbody>
-              {card.recent.map((row) => (
+              {recent.map((row) => (
                 <tr key={row.id} data-testid={`money-op-${row.id}`}>
                   <Td>
                     {t(`kind.${row.kind}`)}

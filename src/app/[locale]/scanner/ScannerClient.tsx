@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
 import { Wordmark } from "@/components/brand/Wordmark";
 import { browserQrCameraDeps, selectQrEngine, startQrCamera, type QrCameraFailure } from "./qr-camera";
+import MoneyCounter, { type CounterCard } from "./money/MoneyCounter";
 
 /**
  * The counter screen.
@@ -52,6 +53,11 @@ interface StampCard extends CardBase {
   stampsToNextReward: number;
 }
 
+interface MoneyCard extends CardBase {
+  cardType: "CASHBACK" | "DISCOUNT";
+  money: CounterCard;
+}
+
 interface PointsCard extends CardBase {
   cardType: "POINTS";
   pointBalance: number;
@@ -59,7 +65,7 @@ interface PointsCard extends CardBase {
   tiers: { id: string; name: string; requiredPoints: number; affordable: boolean }[];
 }
 
-type CardSummary = StampCard | PointsCard;
+type CardSummary = StampCard | PointsCard | MoneyCard;
 
 /**
  * What the server says this member may do, and where.
@@ -800,7 +806,11 @@ export default function ScannerClient({
           </section>
         )}
 
-        {card !== null && (
+        {card !== null && (card.cardType === "CASHBACK" || card.cardType === "DISCOUNT") ? (
+          <MoneyCounter businessId={businessId} card={card.money} />
+        ) : null}
+
+        {card !== null && card.cardType !== "CASHBACK" && card.cardType !== "DISCOUNT" && (
           <section data-testid="scanner-coupon" className="space-y-3 rounded-2xl bg-navy-900 p-5 ring-1 ring-white/10">
             <label htmlFor="scanner-coupon-code" className="block text-xs uppercase tracking-wide text-white/55">
               {t("couponLabel")}
@@ -858,7 +868,7 @@ export default function ScannerClient({
           </section>
         )}
 
-        {card !== null && (
+        {card !== null && card.cardType !== "CASHBACK" && card.cardType !== "DISCOUNT" && (
           <section data-testid="scanner-card" className="space-y-4 rounded-2xl bg-navy-900 p-5 ring-1 ring-white/10">
             <div>
               <p className="text-xs uppercase tracking-wide text-white/55">{t("customer")}</p>
@@ -1015,7 +1025,7 @@ export default function ScannerClient({
                   {t("redeem")}
                 </button>
               </>
-            ) : (
+            ) : card.cardType === "POINTS" ? (
               <>
                 <div className="rounded-xl bg-navy-950/60 px-4 py-3">
                   <p className="text-xs text-white/55">{card.pointsLabel ?? t("pointsBalance")}</p>
@@ -1134,7 +1144,7 @@ export default function ScannerClient({
                   )}
                 </div>
               </>
-            )}
+            ) : null}
 
             {lastGroupId !== null && (
               <div className="space-y-2 border-t border-white/10 pt-4">

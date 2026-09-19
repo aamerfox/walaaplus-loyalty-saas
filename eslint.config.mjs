@@ -19,6 +19,8 @@ const eslintConfig = defineConfig([
     "playwright-report/**",
     "test-results/**",
     "coverage/**",
+    // Freebuff's tool-owned isolated worktrees are workspace metadata, not product source.
+    ".freebuff/**",
     "tmp_*",
   ]),
   {

@@ -801,13 +801,15 @@ describe("the screens a money program is reachable from", () => {
     expect(scope.programs.map((p) => p.templateId)).not.toContain(fx.program.templateId);
   });
 
-  it("refuses a money card at the counter by name, not by blaming the data", async () => {
+  it("resolves a money card through the normal scanner lookup", async () => {
     const fx = await createMonetaryShop();
     const cardId = await cardFor(fx);
     const card = await prisma.customerCard.findUniqueOrThrow({ where: { id: cardId }, select: { qrToken: true } });
 
-    await expect(findCardByQrToken(fx.ctx, card.qrToken)).rejects.toThrow(/cashback or discount card/);
-    await expect(findCardByQrToken(fx.ctx, card.qrToken)).rejects.not.toThrow(/mechanics/);
+    const resolved = await findCardByQrToken(fx.ctx, card.qrToken);
+    expect(resolved.cardType).toBe("CASHBACK");
+    if (resolved.cardType !== "CASHBACK" && resolved.cardType !== "DISCOUNT") throw new Error("expected money card");
+    expect(resolved.money.cashBalanceMinor).toBe("0");
   });
 
   it("refuses to open a draft of a money program, because its rates are frozen to a version", async () => {

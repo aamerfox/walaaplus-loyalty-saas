@@ -26,7 +26,8 @@ import { Card, Notice } from "@/components/ui";
  * points card has a list of rewards with prices. Nothing is carried between them.
  */
 
-type CardType = "STAMP" | "POINTS";
+type CardType = "STAMP" | "POINTS" | "CASHBACK" | "DISCOUNT";
+interface LocationOption { id: string; name: string }
 type EarnMode = "MANUAL" | "PER_VISIT" | "SPEND_BLOCK";
 
 interface TierDraft {
@@ -45,12 +46,14 @@ function whole(value: string): number | null {
   return Number.isSafeInteger(n) ? n : null;
 }
 
-export default function NewProgramForm({ locale }: { locale: string }) {
+export default function NewProgramForm({ locale, locations }: { locale: string; locations: LocationOption[] }) {
   const t = useTranslations("Programs");
   const tc = useTranslations("Common");
   const router = useRouter();
 
   const [cardType, setCardType] = useState<CardType>("POINTS");
+  const [moneyLocations, setMoneyLocations] = useState<string[]>(locations.map((location) => location.id));
+  const [moneyTiers, setMoneyTiers] = useState<{ threshold: string; rate: string }[]>([]);
   const [name, setName] = useState("");
   const [earnMode, setEarnMode] = useState<EarnMode>("SPEND_BLOCK");
   const [spendPerBlock, setSpendPerBlock] = useState("1000");
@@ -86,6 +89,16 @@ export default function NewProgramForm({ locale }: { locale: string }) {
   function validate(): string[] {
     const found: string[] = [];
     if (name.trim() === "") found.push(t("errors.nameRequired"));
+
+    if ((cardType === "CASHBACK" || cardType === "DISCOUNT")) {
+      if (moneyLocations.length === 0) found.push(t("errors.locationRequired"));
+      // The initial form is allowed to create an empty DRAFT. The draft editor validates the
+      // complete table on save, while the database refuses an incomplete Publish.
+      moneyTiers.forEach((tier, index) => {
+        if (whole(tier.threshold) === null || !/^\d+(\.\d+)?$/.test(tier.rate)) found.push(t("errors.moneyRate", { index: index + 1 }));
+      });
+      return found;
+    }
 
     if (earnMode === "SPEND_BLOCK") {
       if (whole(spendPerBlock) === null) found.push(t("errors.spendPerBlock"));
@@ -145,7 +158,14 @@ export default function NewProgramForm({ locale }: { locale: string }) {
           : { earnMode };
 
     const body =
-      cardType === "POINTS"
+      cardType === "CASHBACK" || cardType === "DISCOUNT"
+        ? {
+            cardType,
+            name: name.trim(),
+            availableLocations: moneyLocations,
+            tiers: moneyTiers.map((tier) => ({ minCumulativeSpendMinor: whole(tier.threshold)!, rateBasisPoints: Math.round(Number(tier.rate) * 100) })),
+          }
+        : cardType === "POINTS"
         ? {
             cardType,
             name: name.trim(),
@@ -184,7 +204,7 @@ export default function NewProgramForm({ locale }: { locale: string }) {
         return;
       }
       const created = (await response.json()) as { templateId: string };
-      router.push(`/business/programs/${created.templateId}`, { locale });
+      router.push(cardType === "CASHBACK" || cardType === "DISCOUNT" ? `/business/programs/${created.templateId}/rates` : `/business/programs/${created.templateId}`, { locale });
     } catch {
       setFailure(tc("genericError"));
     } finally {
@@ -214,7 +234,7 @@ export default function NewProgramForm({ locale }: { locale: string }) {
           <legend className={label}>{t("form.cardType")}</legend>
           <p className="mt-1 text-sm text-ink-muted">{t("form.cardTypeHelp")}</p>
           <div className="mt-3 grid gap-3 sm:grid-cols-2">
-            {(["POINTS", "STAMP"] as const).map((option) => (
+            {(["POINTS", "STAMP", "CASHBACK", "DISCOUNT"] as const).map((option) => (
               <label
                 key={option}
                 className={`flex cursor-pointer items-start gap-3 rounded-xl border p-4 ${
@@ -255,6 +275,33 @@ export default function NewProgramForm({ locale }: { locale: string }) {
         </div>
       </Card>
 
+      {(cardType === "CASHBACK" || cardType === "DISCOUNT") ? (
+        <Card className="space-y-4" data-testid="money-program-config">
+          <h2 className="font-display text-lg font-bold text-ink">{t("form.moneyConfiguration")}</h2>
+          <p className="text-sm text-ink-muted">{t("form.moneyLifecycle")}</p>
+          <fieldset>
+            <legend className={label}>{t("form.locations")}</legend>
+            <div className="mt-2 grid gap-2 sm:grid-cols-2">
+              {locations.map((location) => (
+                <label key={location.id} className="flex items-center gap-2 rounded-lg border border-border p-3">
+                  <input type="checkbox" checked={moneyLocations.includes(location.id)} onChange={(event) => setMoneyLocations((current) => event.target.checked ? [...current, location.id] : current.filter((id) => id !== location.id))} />
+                  <span>{location.name}</span>
+                </label>
+              ))}
+            </div>
+          </fieldset>
+          <div className="space-y-3">
+            {moneyTiers.map((tier, index) => (
+              <div key={index} className="grid gap-3 sm:grid-cols-2">
+                <div><label className={label}>{t("form.moneyThreshold")}</label><input inputMode="numeric" value={tier.threshold} onChange={(event) => setMoneyTiers((current) => current.map((row, i) => i === index ? { ...row, threshold: event.target.value } : row))} data-testid={`money-threshold-${index}`} className={`mt-1 ${field}`} /></div>
+                <div><label className={label}>{t("form.moneyRate")}</label><input inputMode="decimal" value={tier.rate} onChange={(event) => setMoneyTiers((current) => current.map((row, i) => i === index ? { ...row, rate: event.target.value } : row))} data-testid={`money-rate-${index}`} className={`mt-1 ${field}`} /></div>
+              </div>
+            ))}
+            <button type="button" onClick={() => setMoneyTiers((current) => [...current, { threshold: "", rate: "" }])} className="rounded-xl border border-border px-4 py-2 font-semibold">{t("form.addMoneyTier")}</button>
+          </div>
+          <p className="text-sm text-ink-muted">{t("form.moneyCurrencyFixed")}</p>
+        </Card>
+      ) : (
       <Card className="space-y-4">
         <h2 className="font-display text-lg font-bold text-ink">{t("form.earning")}</h2>
 
@@ -359,6 +406,7 @@ export default function NewProgramForm({ locale }: { locale: string }) {
           </div>
         </div>
       </Card>
+      )}
 
       {cardType === "STAMP" ? (
         <Card className="space-y-4">
@@ -497,16 +545,14 @@ export default function NewProgramForm({ locale }: { locale: string }) {
         </Card>
       )}
 
-      <Notice tone="info">{t("immutableNoteBeforeCreate")}</Notice>
+      <Notice tone="info">{cardType === "CASHBACK" || cardType === "DISCOUNT" ? t("form.moneyCreateConfirm") : t("immutableNoteBeforeCreate")}</Notice>
 
       <button
         type="submit"
         disabled={busy}
         data-testid="create-program"
         className="w-full rounded-xl bg-navy-900 px-5 py-4 font-bold text-white transition-colors hover:bg-navy-800 disabled:opacity-60 sm:w-auto"
-      >
-        {busy ? t("form.creating") : t("form.create")}
-      </button>
+      >{busy ? t("form.creating") : cardType === "CASHBACK" || cardType === "DISCOUNT" ? t("form.createDraft") : t("form.create")}</button>
     </form>
   );
 }

@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { Notice, PageHeader } from "@/components/ui";
 import { getCurrentUserId } from "@/server/auth/session";
 import { resolveScannerContext } from "@/server/tenant/scanner-context";
+import { listActiveReadableLocations } from "@/server/tenant/locations";
 import NewProgramForm from "./NewProgramForm";
 
 /**
@@ -34,10 +35,12 @@ export default async function NewProgramPage({ params }: { params: Promise<{ loc
     );
   }
 
+  const locations = await listActiveReadableLocations(ctx);
+
   return (
     <>
       <PageHeader title={t("newProgram")} description={t("newSubtitle")} />
-      <NewProgramForm locale={locale} />
+      <NewProgramForm locale={locale} locations={locations} />
     </>
   );
 }

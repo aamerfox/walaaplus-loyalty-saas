@@ -1,7 +1,8 @@
 import { CardType, MembershipRole, OperationKind, Permission, Prisma, UnitType, type CardStatus } from "@prisma/client";
 import { prisma } from "../db";
 import { ForbiddenError, NotFoundError } from "../errors";
-import { assertCounterSupportsCardType } from "../program/card-type-support";
+import { assertCounterSupportsCardType, isMonetaryCardType } from "../program/card-type-support";
+import { readMoneyCard } from "../monetary/counter";
 import { readStampMechanics } from "../program/mechanics";
 import { readPointsMechanics } from "../program/points-mechanics";
 import { requirePermission, type TenantContext } from "../tenant/context";
@@ -81,7 +82,12 @@ export interface PointsCardSearchResult extends CardSearchBase {
   tiers: { id: string; name: string; requiredPoints: number; affordable: boolean }[];
 }
 
-export type CardSearchResult = StampCardSearchResult | PointsCardSearchResult;
+export interface MoneyCardSearchResult extends CardSearchBase {
+  cardType: typeof CardType.CASHBACK | typeof CardType.DISCOUNT;
+  money: Awaited<ReturnType<typeof readMoneyCard>>;
+}
+
+export type CardSearchResult = StampCardSearchResult | PointsCardSearchResult | MoneyCardSearchResult;
 
 const CARD_SELECT = {
   id: true,
@@ -122,7 +128,7 @@ type CardWithProfile = {
   programVersion: { id: string; mechanics: unknown; rewardTiers: { id: string; name: string; requiredPoints: number }[] };
 };
 
-function toSearchResult(card: CardWithProfile): CardSearchResult {
+async function toSearchResult(ctx: TenantContext, card: CardWithProfile): Promise<CardSearchResult> {
   const base = {
     customerCardId: card.id,
     serialNumber: card.serialNumber,
@@ -147,6 +153,16 @@ function toSearchResult(card: CardWithProfile): CardSearchResult {
    * and would send somebody looking for a broken record. Nothing is broken: this screen does not
    * serve money cards until their counter is built in Prompt 2.
    */
+  if (isMonetaryCardType(card.template.cardType)) {
+    return {
+      ...base,
+      earnMode: "MANUAL" as const,
+      pinnedLocations: null,
+      cardType: card.template.cardType as MoneyCardSearchResult["cardType"],
+      money: await readMoneyCard(ctx, card.id),
+    };
+  }
+
   assertCounterSupportsCardType(card.template.cardType);
 
   if (card.template.cardType === CardType.POINTS) {
@@ -195,7 +211,7 @@ export async function findCardByQrToken(ctx: TenantContext, qrToken: string): Pr
     select: CARD_SELECT,
   });
   if (!card) throw new NotFoundError("Card not found");
-  return toSearchResult(card);
+  return toSearchResult(ctx, card);
 }
 
 /** Scanner path 2: the customer gives their phone number. */
@@ -210,7 +226,7 @@ export async function findCardsByPhone(ctx: TenantContext, phone: string): Promi
     select: CARD_SELECT,
     orderBy: { createdAt: "asc" },
   });
-  return cards.map(toSearchResult);
+  return Promise.all(cards.map((card) => toSearchResult(ctx, card)));
 }
 
 /** Scanner path 3: the serial printed on the card. */
@@ -221,7 +237,7 @@ export async function findCardBySerial(ctx: TenantContext, serialNumber: string)
     select: CARD_SELECT,
   });
   if (!card) throw new NotFoundError("Card not found");
-  return toSearchResult(card);
+  return toSearchResult(ctx, card);
 }
 
 export interface CustomerListItem {

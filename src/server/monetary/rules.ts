@@ -64,8 +64,9 @@ export const createMonetaryProgramSchema = z.strictObject({
   name: z.string().trim().min(1).max(120),
   kind: z.enum([MonetaryProgramKind.CASHBACK, MonetaryProgramKind.DISCOUNT]),
   mechanics: z.unknown(),
-  tiers: z.array(monetaryTierSchema).min(1).max(MAX_MONETARY_TIERS),
+  tiers: z.array(monetaryTierSchema).max(MAX_MONETARY_TIERS),
   allowAdditionalProgram: z.boolean().optional(),
+  activate: z.boolean().optional(),
 });
 export interface CreateMonetaryProgramInput {
   name: string;
@@ -73,6 +74,8 @@ export interface CreateMonetaryProgramInput {
   mechanics: MonetaryMechanicsInput;
   tiers: MonetaryTierInput[];
   allowAdditionalProgram?: boolean;
+  /** Initial owner creation may intentionally leave the DRAFT table empty; later publish is guarded by SQL. */
+  activate?: boolean;
 }
 
 export interface MonetaryProgramSummary {
@@ -173,7 +176,9 @@ export async function createMonetaryProgram(ctx: TenantContext, input: CreateMon
   if (mechanics.kind !== parsed.data.kind) {
     throw new ValidationError("The program kind and its mechanics must agree");
   }
-  const tiers = normaliseTiers(parsed.data.tiers as MonetaryTierInput[]);
+  const rawTiers = parsed.data.tiers as MonetaryTierInput[];
+  const shouldActivate = input.activate !== false;
+  const tiers = rawTiers.length === 0 && !shouldActivate ? [] : normaliseTiers(rawTiers);
   const name = parsed.data.name;
 
   return prisma.$transaction(async (tx) => {
@@ -232,11 +237,14 @@ export async function createMonetaryProgram(ctx: TenantContext, input: CreateMon
       tierIds.push(row.id);
     }
 
-    // Freeze it. From here the rule and its tiers are immutable, enforced by trigger.
-    await tx.programVersion.update({
-      where: { id: version.id },
-      data: { status: ProgramVersionStatus.ACTIVE, activatedAt: new Date() },
-    });
+    // Initial owner creation deliberately leaves the complete row set in DRAFT. Existing fixtures
+    // and service callers retain the historical complete-create behaviour unless activate=false.
+    if (shouldActivate) {
+      await tx.programVersion.update({
+        where: { id: version.id },
+        data: { status: ProgramVersionStatus.ACTIVE, activatedAt: new Date() },
+      });
+    }
 
     /*
      * Every template gets its `direct` source, so every card carries attribution. The token stays

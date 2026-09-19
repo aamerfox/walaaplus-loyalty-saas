@@ -4,6 +4,8 @@ import { ValidationError } from "@/server/errors";
 import { errorResponse, readJsonObject } from "@/server/http";
 import { createPointsProgram, MAX_REWARD_TIERS } from "@/server/program/programs";
 import { createStampProgram } from "@/server/program/stamp-program";
+import { createMonetaryProgram, MAX_MONETARY_TIERS } from "@/server/monetary/rules";
+import { MonetaryProgramKind } from "@/server/monetary/mechanics";
 import { requireScannerContext } from "@/server/tenant/scanner-context";
 
 /**
@@ -72,7 +74,16 @@ const stampBody = z.strictObject({
   availableLocations: z.array(z.string().min(1).max(64)).min(1).max(50).optional(),
 });
 
-const bodySchema = z.discriminatedUnion("cardType", [pointsBody, stampBody]);
+const moneyTierSchema = z.strictObject({
+  minCumulativeSpendMinor: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  rateBasisPoints: z.number().int().min(0).max(10_000),
+});
+
+const moneyBody = z.union([
+  z.strictObject({ cardType: z.literal("CASHBACK"), name: z.string().trim().min(1).max(120), availableLocations: z.array(z.string().min(1).max(64)).min(1).max(50), tiers: z.array(moneyTierSchema).max(MAX_MONETARY_TIERS) }),
+  z.strictObject({ cardType: z.literal("DISCOUNT"), name: z.string().trim().min(1).max(120), availableLocations: z.array(z.string().min(1).max(64)).min(1).max(50), tiers: z.array(moneyTierSchema).max(MAX_MONETARY_TIERS) }),
+]);
+const bodySchema = z.union([pointsBody, stampBody, moneyBody]);
 
 export async function POST(req: Request) {
   try {
@@ -81,6 +92,22 @@ export async function POST(req: Request) {
     const input = parsed.data;
 
     const { ctx } = await requireScannerContext(null);
+
+    if (input.cardType === "CASHBACK" || input.cardType === "DISCOUNT") {
+      const kind = input.cardType === "CASHBACK" ? MonetaryProgramKind.CASHBACK : MonetaryProgramKind.DISCOUNT;
+      const created = await createMonetaryProgram(ctx, {
+        name: input.name,
+        kind,
+        mechanics: { kind, contractVersion: 1, availableLocations: input.availableLocations },
+        tiers: input.tiers,
+        allowAdditionalProgram: true,
+        activate: false,
+      });
+      return NextResponse.json(
+        { templateId: created.templateId, programVersionId: created.programVersionId, tierCount: created.tierIds.length, lifecycle: "DRAFT_REQUIRES_EXPLICIT_PUBLISH" },
+        { status: 201 },
+      );
+    }
 
     if (input.cardType === "POINTS") {
       // `cardType` is the discriminator this route dispatches on, not a mechanic. Leaving it in the

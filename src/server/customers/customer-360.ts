@@ -6,6 +6,8 @@ import { isStampMechanics, readStampMechanics } from "../program/mechanics";
 import { isPointsMechanics, readPointsMechanics } from "../program/points-mechanics";
 import { requirePermission, type TenantContext } from "../tenant/context";
 import { formatSyrianPhone } from "./phone";
+import { readMoneyCard, type MoneyCardView } from "../monetary/counter";
+import { isMonetaryCardType } from "../program/card-type-support";
 
 /**
  * One customer, whole.
@@ -63,6 +65,13 @@ export interface CustomerCardView {
   issuedAt: Date;
   expiresAt: Date | null;
   lastActivityAt: Date | null;
+  /** Money-card facts are present only for CASHBACK/DISCOUNT cards and are owner/manager scoped. */
+  money: {
+    currency: string;
+    currencyExponent: number;
+    balanceMinor: string;
+    operations: MoneyCardView["recent"];
+  } | null;
 }
 
 export interface CustomerProfileView {
@@ -136,6 +145,10 @@ export async function getCustomerProfile(ctx: TenantContext, profileId: string):
   // Tenant-filtered above, so another business's profile id is simply not found.
   if (!profile) throw new NotFoundError("Customer not found");
 
+  const moneyCards = await Promise.all(
+    profile.cards.filter((card) => isMonetaryCardType(card.template.cardType)).map(async (card) => [card.id, await readMoneyCard(ctx, card.id)] as const),
+  );
+  const moneyByCard = new Map(moneyCards);
   const names = new Map(locations.map((l) => [l.id, l.name]));
 
   return {
@@ -182,6 +195,12 @@ export async function getCustomerProfile(ctx: TenantContext, profileId: string):
         locationNames: (allowed ?? []).map((id) => names.get(id)).filter((name): name is string => name !== undefined),
         sourceName: card.utmSourceLink?.name ?? null,
         issuedAt: card.issuedAt,
+        money: moneyByCard.has(card.id)
+          ? (() => {
+              const view = moneyByCard.get(card.id)!;
+              return { currency: view.currency, currencyExponent: view.currencyExponent, balanceMinor: view.cashBalanceMinor, operations: view.recent };
+            })()
+          : null,
         expiresAt: card.expiresAt,
         lastActivityAt: card.lastActivityAt,
       };

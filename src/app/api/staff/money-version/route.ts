@@ -52,7 +52,7 @@ const bodySchema = z.discriminatedUnion("action", [
     action: z.literal("updateRateTable"),
     businessId: business,
     templateId,
-    tiers: z.array(tierSchema).min(1).max(MAX_MONETARY_TIERS),
+    tiers: z.array(tierSchema).max(MAX_MONETARY_TIERS),
   }),
   z.strictObject({ action: z.literal("discardDraft"), businessId: business, templateId }),
   z.strictObject({

@@ -2,7 +2,7 @@ import { getTranslations } from "next-intl/server";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { getCurrentUserId } from "@/server/auth/session";
-import { getScannerScope, listMoneyCounterPrograms } from "@/server/program/program-detail";
+import { getScannerScope } from "@/server/program/program-detail";
 import { resolveScannerContext } from "@/server/tenant/scanner-context";
 import ScannerClient from "./ScannerClient";
 
@@ -70,35 +70,12 @@ export default async function ScannerPage({
    * The picker below is built from this and nothing else: a location the member is not assigned to
    * never reaches the browser, so the screen cannot offer an option the write would refuse.
    */
-  const [scope, moneyPrograms] = await Promise.all([getScannerScope(ctx), listMoneyCounterPrograms(ctx)]);
+  const scope = await getScannerScope(ctx);
   return (
     <>
       <ScannerClient businessId={ctx.businessId} businessName={businessName} scope={scope} />
-      {/*
-        * Cashback and discount programmes are run from their own counter, so this screen links to it
-        * rather than pretending it can serve them. Rendered only when the business actually has one:
-        * a link to an empty counter teaches staff to ignore links.
-        */}
-      {moneyPrograms.length > 0 && (
-        <nav aria-label={t("moneyCounterTitle")} className="mx-auto w-full max-w-md px-4 pb-8">
-          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
-            {t("moneyCounterTitle")}
-          </h2>
-          <ul className="space-y-2" data-testid="scanner-money-programs">
-            {moneyPrograms.map((program) => (
-              <li key={program.templateId}>
-                <Link
-                  href={`/${locale}/scanner/money?programme=${program.templateId}`}
-                  data-testid={`scanner-money-${program.templateId}`}
-                  className="block rounded-xl bg-navy-900 px-4 py-3 font-semibold ring-1 ring-white/10 hover:bg-navy-800"
-                >
-                  {program.name}
-                </Link>
-              </li>
-            ))}
-          </ul>
-        </nav>
-      )}
+      {/* Money cards are reached by the same QR/phone lookup above. No programme link carries a
+          template id to a counter: the scanned card determines the money counter in memory. */}
     </>
   );
 }

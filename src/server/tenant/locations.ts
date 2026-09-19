@@ -157,6 +157,19 @@ export async function listReadableLocations(ctx: TenantContext): Promise<{ id: s
   });
 }
 
+/** Active location choices for a new program configuration. */
+export async function listActiveReadableLocations(ctx: TenantContext): Promise<{ id: string; name: string }[]> {
+  return prisma.location.findMany({
+    where: {
+      businessId: ctx.businessId,
+      active: true,
+      ...(ctx.locationIds === null ? {} : { id: { in: [...ctx.locationIds] } }),
+    },
+    select: { id: true, name: true },
+    orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }],
+  });
+}
+
 /** Load one location inside the caller's tenant, or refuse exactly as if it did not exist. */
 async function requireOwnLocation(db: Tx, businessId: string, locationId: string) {
   const location = await db.location.findFirst({

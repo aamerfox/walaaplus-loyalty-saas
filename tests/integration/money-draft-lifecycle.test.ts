@@ -99,9 +99,10 @@ describe("editing the rate table", () => {
     expect(config.draft?.tiers[0].rateBasisPoints).toBe(9999);
   });
 
-  it("refuses an empty table, and one past the tier ceiling", async () => {
+  it("allows an incomplete empty draft, but refuses one past the tier ceiling", async () => {
     await createMoneyDraft(fx.ctx, templateId());
-    await expect(updateMoneyDraftRateTable(fx.ctx, templateId(), [])).rejects.toThrow(/at least one tier/);
+    const empty = await updateMoneyDraftRateTable(fx.ctx, templateId(), []);
+    expect(empty.tiers).toHaveLength(0);
 
     const tooMany = Array.from({ length: 11 }, (_, i) => ({
       minCumulativeSpendMinor: i * 1000,
@@ -210,6 +211,28 @@ describe("publishing", () => {
       select: { versionNumber: true },
     });
     expect(live.versionNumber).toBe(1);
+  });
+
+  it("runs the same draft, refusal, publish, and post-publish freeze for DISCOUNT", async () => {
+    const discount = await createMonetaryShop({ kind: "DISCOUNT", name: "Discount lifecycle" });
+    const draft = await createMoneyDraft(discount.ctx, discount.program.templateId);
+    await updateMoneyDraftRateTable(discount.ctx, discount.program.templateId, []);
+
+    await expect(publishMoneyDraft(discount.ctx, discount.program.templateId, draft.versionNumber)).rejects.toThrow(/tier|rate table/i);
+    await updateMoneyDraftRateTable(discount.ctx, discount.program.templateId, [{ minCumulativeSpendMinor: 0, rateBasisPoints: 1250 }]);
+    await expect(publishMoneyDraft(discount.ctx, discount.program.templateId, draft.versionNumber)).resolves.toEqual({
+      publishedVersionNumber: 2,
+      retiredVersionNumber: 1,
+    });
+
+    await expect(
+      updateMoneyDraftRateTable(discount.ctx, discount.program.templateId, [{ minCumulativeSpendMinor: 0, rateBasisPoints: 1500 }]),
+    ).rejects.toThrow(/no open draft/);
+    const live = await prisma.programVersion.findFirstOrThrow({
+      where: { templateId: discount.program.templateId, status: ProgramVersionStatus.ACTIVE },
+      select: { status: true },
+    });
+    expect(live.status).toBe(ProgramVersionStatus.ACTIVE);
   });
 });
 

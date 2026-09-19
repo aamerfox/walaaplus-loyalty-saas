@@ -202,11 +202,10 @@ export async function updateMoneyDraftRateTable(
 ): Promise<MoneyDraft> {
   requirePermission(ctx, Permission.EDIT_TEMPLATES);
 
-  if (tiers.length === 0) throw new ValidationError("A rate table needs at least one tier");
   if (tiers.length > MAX_MONETARY_TIERS) {
     throw new ValidationError(`A rate table cannot have more than ${MAX_MONETARY_TIERS} tiers`);
   }
-  const normalised = normaliseTiers(tiers);
+  const normalised = tiers.length === 0 ? [] : normaliseTiers(tiers);
   for (const tier of normalised) {
     assertRateBasisPoints(tier.rateBasisPoints);
     parseMinorAmount(tier.minCumulativeSpendMinor, "minCumulativeSpendMinor");
@@ -307,6 +306,7 @@ export async function discardMoneyDraft(ctx: TenantContext, templateId: string):
 
 export interface MoneyPublishResult {
   publishedVersionNumber: number;
+  /** 0 for an initial publish that had no prior ACTIVE version. */
   retiredVersionNumber: number;
 }
 
@@ -348,25 +348,37 @@ export async function publishMoneyDraft(
       where: { templateId: template.id, status: ProgramVersionStatus.ACTIVE },
       select: { id: true, versionNumber: true },
     });
-    if (!live) throw new ConflictError("This program has no live version to replace");
 
     const now = new Date();
-    // Retire first: the partial unique index permits exactly one ACTIVE row per template, so the
-    // other order would collide with itself.
-    await tx.programVersion.update({
-      where: { id: live.id },
-      data: { status: ProgramVersionStatus.RETIRED, retiredAt: now },
-    });
+    // Retire first when replacing an existing live version. Initial creation has no live row and
+    // can activate the complete draft directly; the database still validates the full table.
+    if (live) {
+      await tx.programVersion.update({
+        where: { id: live.id },
+        data: { status: ProgramVersionStatus.RETIRED, retiredAt: now },
+      });
+    }
     /*
      * `walaaplus_validate_money_version_activation` runs on this UPDATE and refuses an incomplete
      * rate table: no rule, no tiers, a tier 0 that does not start at zero, non-contiguous indexes,
      * thresholds that do not increase, or a rate outside 0..10000. Publish completeness is therefore
      * a database guarantee, not a promise this function makes.
      */
-    await tx.programVersion.update({
-      where: { id: draft.id },
-      data: { status: ProgramVersionStatus.ACTIVE, activatedAt: now },
-    });
+    try {
+      await tx.programVersion.update({
+        where: { id: draft.id },
+        data: { status: ProgramVersionStatus.ACTIVE, activatedAt: now },
+      });
+    } catch (error) {
+      // Keep the database trigger as the authority, but turn its safe refusal into an actionable
+      // domain validation response instead of leaking a connector error as HTTP 500. The enclosing
+      // transaction rolls back any attempted retirement when publication is refused.
+      const message = error instanceof Error ? error.message : "";
+      if (message.includes("needs at least one rate") || message.includes("needs at least one tier")) {
+        throw new ValidationError("Complete the draft rate table before publishing it");
+      }
+      throw error;
+    }
 
     await recordAudit(tx, {
       businessId: ctx.businessId,
@@ -377,12 +389,12 @@ export async function publishMoneyDraft(
       metadata: {
         templateId: template.id,
         versionNumber: draft.versionNumber,
-        replacedVersionNumber: live.versionNumber,
+        replacedVersionNumber: live?.versionNumber ?? 0,
         cardType: template.cardType,
       },
     });
 
-    return { publishedVersionNumber: draft.versionNumber, retiredVersionNumber: live.versionNumber };
+    return { publishedVersionNumber: draft.versionNumber, retiredVersionNumber: live?.versionNumber ?? 0 };
   }, CONTENDED_TX);
 }
 
