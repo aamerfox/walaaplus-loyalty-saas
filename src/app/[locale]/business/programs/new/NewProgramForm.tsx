@@ -4,13 +4,18 @@ import { useState, type FormEvent } from "react";
 import { useTranslations } from "next-intl";
 import { useRouter } from "@/i18n/routing";
 import { Card, Notice } from "@/components/ui";
+import { inputToMinor, minorToInput, percentToBasisPoints } from "@/lib/money-input";
 
 /**
  * Creating an additional loyalty program.
  *
  * ## What this form is careful about
  *
- * **Integers only, and the browser says so first.** Every numeric field is `inputMode="numeric"` with
+ * **Money is decimal input, and the browser says so first.** Money fields use `inputMode="decimal"`;
+ * `inputToMinor` and `percentToBasisPoints` refuse finer precision rather than silently rounding. The
+ * server parses the resulting minor units again, because the client is not trusted.
+ *
+ * **Integers only for non-money fields.** The other numeric fields use `inputMode="numeric"` with
  * `step={1}`, and the form refuses a fraction, a zero and a blank before it sends anything — not
  * because the client is trusted (the server parses all of it again through the same mechanics
  * contract) but because a cashier-turned-owner typing `1.5` deserves an answer in the field rather
@@ -46,7 +51,7 @@ function whole(value: string): number | null {
   return Number.isSafeInteger(n) ? n : null;
 }
 
-export default function NewProgramForm({ locale, locations }: { locale: string; locations: LocationOption[] }) {
+export default function NewProgramForm({ locale, locations, currency, currencyExponent }: { locale: string; locations: LocationOption[]; currency: string; currencyExponent: number }) {
   const t = useTranslations("Programs");
   const tc = useTranslations("Common");
   const router = useRouter();
@@ -95,7 +100,11 @@ export default function NewProgramForm({ locale, locations }: { locale: string; 
       // The initial form is allowed to create an empty DRAFT. The draft editor validates the
       // complete table on save, while the database refuses an incomplete Publish.
       moneyTiers.forEach((tier, index) => {
-        if (whole(tier.threshold) === null || !/^\d+(\.\d+)?$/.test(tier.rate)) found.push(t("errors.moneyRate", { index: index + 1 }));
+        const threshold = inputToMinor(tier.threshold, currencyExponent);
+        const thresholdNumber = threshold === null ? null : Number(threshold);
+        if (threshold === null || !Number.isSafeInteger(thresholdNumber) || percentToBasisPoints(tier.rate) === null) {
+          found.push(t("errors.moneyRate", { index: index + 1 }));
+        }
       });
       return found;
     }
@@ -163,7 +172,14 @@ export default function NewProgramForm({ locale, locations }: { locale: string; 
             cardType,
             name: name.trim(),
             availableLocations: moneyLocations,
-            tiers: moneyTiers.map((tier) => ({ minCumulativeSpendMinor: whole(tier.threshold)!, rateBasisPoints: Math.round(Number(tier.rate) * 100) })),
+            tiers: moneyTiers.map((tier) => {
+              const threshold = inputToMinor(tier.threshold, currencyExponent);
+              const rate = percentToBasisPoints(tier.rate);
+              if (threshold === null || rate === null) throw new Error("validated money input became invalid");
+              const thresholdNumber = Number(threshold);
+              if (!Number.isSafeInteger(thresholdNumber)) throw new Error("money input exceeds the supported range");
+              return { minCumulativeSpendMinor: thresholdNumber, rateBasisPoints: rate };
+            }),
           }
         : cardType === "POINTS"
         ? {
@@ -293,13 +309,13 @@ export default function NewProgramForm({ locale, locations }: { locale: string; 
           <div className="space-y-3">
             {moneyTiers.map((tier, index) => (
               <div key={index} className="grid gap-3 sm:grid-cols-2">
-                <div><label className={label}>{t("form.moneyThreshold")}</label><input inputMode="numeric" value={tier.threshold} onChange={(event) => setMoneyTiers((current) => current.map((row, i) => i === index ? { ...row, threshold: event.target.value } : row))} data-testid={`money-threshold-${index}`} className={`mt-1 ${field}`} /></div>
+                <div><label className={label}>{t("form.moneyThreshold", { currency })}</label><input inputMode="decimal" value={tier.threshold} onChange={(event) => setMoneyTiers((current) => current.map((row, i) => i === index ? { ...row, threshold: event.target.value } : row))} data-testid={`money-threshold-${index}`} className={`mt-1 ${field}`} /></div>
                 <div><label className={label}>{t("form.moneyRate")}</label><input inputMode="decimal" value={tier.rate} onChange={(event) => setMoneyTiers((current) => current.map((row, i) => i === index ? { ...row, rate: event.target.value } : row))} data-testid={`money-rate-${index}`} className={`mt-1 ${field}`} /></div>
               </div>
             ))}
-            <button type="button" onClick={() => setMoneyTiers((current) => [...current, { threshold: "", rate: "" }])} className="rounded-xl border border-border px-4 py-2 font-semibold">{t("form.addMoneyTier")}</button>
+            <button type="button" onClick={() => setMoneyTiers((current) => [...current, { threshold: minorToInput("0", currencyExponent), rate: "0" }])} data-testid="add-money-tier" className="rounded-xl border border-border px-4 py-2 font-semibold">{t("form.addMoneyTier")}</button>
           </div>
-          <p className="text-sm text-ink-muted">{t("form.moneyCurrencyFixed")}</p>
+          <p className="text-sm text-ink-muted">{t("form.moneyCurrencyFixed", { exponent: currencyExponent })}</p>
         </Card>
       ) : (
       <Card className="space-y-4">

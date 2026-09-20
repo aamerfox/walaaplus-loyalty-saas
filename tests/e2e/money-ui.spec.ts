@@ -62,6 +62,25 @@ async function cashbackShop() {
 }
 
 test.describe("the owner changes a rate table", () => {
+  test("creates a money draft from exponent-aware decimal inputs", async ({ page }) => {
+    const cafe = await createStampCafe({ name: `Decimal money ${randomUUID().slice(0, 6)}` });
+    await signIn(page, await emailOf(cafe.userId));
+    await page.goto("/en/business/programs/new");
+
+    await page.getByTestId("card-type-CASHBACK").check();
+    await page.getByTestId("program-name").fill("Decimal cashback");
+    await page.getByTestId("add-money-tier").click();
+    await page.getByTestId("money-threshold-0").fill("12.50");
+    await page.getByTestId("money-rate-0").fill("7.5");
+
+    const requestPromise = page.waitForRequest((request) => request.url().endsWith("/api/staff/programs"));
+    await page.getByTestId("create-program").click();
+    const request = await requestPromise;
+    expect(JSON.parse(request.postData() ?? "{}")).toMatchObject({
+      cardType: "CASHBACK",
+      tiers: [{ minCumulativeSpendMinor: 1250, rateBasisPoints: 750 }],
+    });
+  });
   test("creates a CASHBACK draft, refuses incomplete publish, then publishes the edited table", async ({ page }) => {
     const cafe = await createStampCafe({ name: `Initial money ${randomUUID().slice(0, 6)}` });
     const email = await emailOf(cafe.userId);

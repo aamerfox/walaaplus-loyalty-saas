@@ -374,6 +374,12 @@ export async function publishMoneyDraft(
       // domain validation response instead of leaking a connector error as HTTP 500. The enclosing
       // transaction rolls back any attempted retirement when publication is refused.
       const message = error instanceof Error ? error.message : "";
+      /*
+       * The migration's trigger is intentionally the activation authority, but PostgreSQL currently
+       * exposes this particular refusal only through its exception text (there is no stable trigger
+       * error code in the existing migration). Keep this narrow adapter next to the database boundary;
+       * changing the trigger's SQLSTATE later must update this single mapping and its route proof.
+       */
       if (message.includes("needs at least one rate") || message.includes("needs at least one tier")) {
         throw new ValidationError("Complete the draft rate table before publishing it");
       }

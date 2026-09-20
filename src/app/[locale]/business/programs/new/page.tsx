@@ -2,6 +2,7 @@ import { Permission } from "@prisma/client";
 import { getTranslations } from "next-intl/server";
 import { redirect } from "next/navigation";
 import { Notice, PageHeader } from "@/components/ui";
+import { resolveContextCurrency } from "@/server/monetary/rules";
 import { getCurrentUserId } from "@/server/auth/session";
 import { resolveScannerContext } from "@/server/tenant/scanner-context";
 import { listActiveReadableLocations } from "@/server/tenant/locations";
@@ -35,12 +36,15 @@ export default async function NewProgramPage({ params }: { params: Promise<{ loc
     );
   }
 
-  const locations = await listActiveReadableLocations(ctx);
+  const [locations, currency] = await Promise.all([
+    listActiveReadableLocations(ctx),
+    resolveContextCurrency(ctx),
+  ]);
 
   return (
     <>
       <PageHeader title={t("newProgram")} description={t("newSubtitle")} />
-      <NewProgramForm locale={locale} locations={locations} />
+      <NewProgramForm locale={locale} locations={locations} currency={currency.currency} currencyExponent={currency.exponent} />
     </>
   );
 }

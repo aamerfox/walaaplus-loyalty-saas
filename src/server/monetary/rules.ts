@@ -127,6 +127,11 @@ export async function resolveBusinessCurrency(db: DbClient, businessId: string):
   return { currency, exponent: supported.exponent };
 }
 
+/** Resolve the authenticated business's currency without letting an app route import the database client. */
+export async function resolveContextCurrency(ctx: TenantContext): Promise<{ currency: string; exponent: number }> {
+  return resolveBusinessCurrency(prisma, ctx.businessId);
+}
+
 /**
  * Validate a rate table before any of it is written.
  *
