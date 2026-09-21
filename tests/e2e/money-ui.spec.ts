@@ -81,6 +81,42 @@ test.describe("the owner changes a rate table", () => {
       tiers: [{ minCumulativeSpendMinor: 1250, rateBasisPoints: 750 }],
     });
   });
+  test("preserves the zero first threshold when saving a two-tier CASHBACK draft", async ({ page }) => {
+    const cafe = await createStampCafe({ name: `Zero threshold ${randomUUID().slice(0, 6)}` });
+    await signIn(page, await emailOf(cafe.userId));
+    await page.goto("/en/business/programs/new");
+
+    await page.getByTestId("card-type-CASHBACK").check();
+    await page.getByTestId("program-name").fill("Zero threshold cashback");
+    await page.getByTestId("create-program").click();
+    await page.waitForURL(/\/en\/business\/programs\/[0-9a-f-]{36}\/rates/);
+
+    const template = await prisma.programTemplate.findFirstOrThrow({ where: { businessId: cafe.businessId, cardType: "CASHBACK" } });
+    const draft = await prisma.programVersion.findFirstOrThrow({ where: { templateId: template.id } });
+
+    // An empty table is still not publishable.
+    await page.getByTestId("money-publish").click();
+    await expect(page.getByText(en.MoneyRates.publishIncomplete)).toBeVisible();
+    expect((await prisma.programVersion.findUniqueOrThrow({ where: { id: draft.id } })).status).toBe("DRAFT");
+
+    await page.getByTestId("money-add-tier").click();
+    await expect(page.getByTestId("money-threshold-0")).toHaveValue("0.00");
+    await expect(page.getByTestId("money-threshold-0")).toBeDisabled();
+    await page.getByTestId("money-rate-0").fill("0");
+    await page.getByTestId("money-threshold-1").fill("12.50");
+    await page.getByTestId("money-rate-1").fill("7.5");
+    await page.getByTestId("money-save").click();
+
+    await expect.poll(async () => {
+      const rule = await prisma.monetaryRule.findFirstOrThrow({ where: { programVersionId: draft.id }, select: { tiers: { orderBy: { tierIndex: "asc" }, select: { minCumulativeSpendMinor: true, rateBasisPoints: true } } } });
+      return rule.tiers.map((tier) => [tier.minCumulativeSpendMinor.toString(), tier.rateBasisPoints]);
+    }).toEqual([["0", 0], ["1250", 750]]);
+
+    await page.getByTestId("money-publish").click();
+    await expect(page.getByTestId("money-open-draft")).toBeVisible({ timeout: 15_000 });
+    expect((await prisma.programVersion.findUniqueOrThrow({ where: { id: draft.id } })).status).toBe("ACTIVE");
+  });
+
   test("creates a CASHBACK draft, refuses incomplete publish, then publishes the edited table", async ({ page }) => {
     const cafe = await createStampCafe({ name: `Initial money ${randomUUID().slice(0, 6)}` });
     const email = await emailOf(cafe.userId);

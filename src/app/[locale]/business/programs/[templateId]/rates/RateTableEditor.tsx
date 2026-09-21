@@ -60,14 +60,17 @@ export default function RateTableEditor({
   const router = useRouter();
   const exponent = draft?.currencyExponent ?? live?.currencyExponent ?? 2;
 
-  const [rows, setRows] = useState<Draft[]>(
-    (draft ?? live)?.tiers.length
-      ? (draft ?? live)!.tiers.map((tier) => ({
-          threshold: minorToInput(tier.minCumulativeSpendMinor, exponent),
-          percent: basisPointsToPercent(tier.rateBasisPoints),
-        }))
-      : [{ threshold: minorToInput("0", exponent), percent: "0" }],
-  );
+  const [rows, setRows] = useState<Draft[]>(() => {
+    const source = (draft ?? live)?.tiers ?? [];
+    if (source.length === 0) return [{ threshold: minorToInput("0", exponent), percent: "0" }];
+
+    return source.map((tier, index) => ({
+      // Tier zero is structurally the floor, not an editable merchant value. Normalize it here so
+      // an empty/legacy draft still renders in the business exponent and cannot serialize as blank.
+      threshold: minorToInput(index === 0 ? "0" : tier.minCumulativeSpendMinor || "0", exponent),
+      percent: basisPointsToPercent(tier.rateBasisPoints),
+    }));
+  });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -98,7 +101,9 @@ export default function RateTableEditor({
   function save() {
     const tiers: { minCumulativeSpendMinor: number; rateBasisPoints: number }[] = [];
     for (const [index, row] of rows.entries()) {
-      const minor = inputToMinor(row.threshold, exponent);
+      // The locked first input is always the zero-minor-unit floor, even if an old draft rendered it
+      // empty. Do not make the server depend on a disabled browser control's value.
+      const minor = index === 0 ? "0" : inputToMinor(row.threshold, exponent);
       const bp = percentToBasisPoints(row.percent);
       if (minor === null) return setError(t("badThreshold", { row: index + 1 }));
       if (bp === null) return setError(t("badRate", { row: index + 1 }));
