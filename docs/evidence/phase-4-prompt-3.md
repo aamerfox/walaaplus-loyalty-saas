@@ -109,3 +109,42 @@ The first gate invocation stopped at `test db up` only because the unrelated mai
 The isolated worktree remained at baseline SHA `59ae457acd6739071250fed895f63eb28de64498`, with only the nine modified Prompt 3 tracked files and this evidence file uncommitted. No commit, push, deploy, reset, cleanup, protected-roadmap edit, `.freebuff` metadata edit, or migration edit was performed.
 
 **PROMPT 3 VERIFICATION PASSED IN THE EXACT ISOLATED WORKTREE — AWAITING REVIEW/COMMIT INSTRUCTION**
+
+## 8. Post-review rate-table correction
+
+Manual owner review of a newly created CASHBACK draft found one browser-only
+regression: the locked first-tier floor could render empty after adding a second
+tier. Saving then sent a blank threshold for row 1, although the invariant is
+that the first tier is always the zero-minor-unit floor.
+
+The correction is deliberately limited to:
+
+- `src/app/[locale]/business/programs/[templateId]/rates/RateTableEditor.tsx`;
+- `tests/e2e/money-ui.spec.ts`.
+
+The editor now renders the first threshold as the exponent-aware display value
+(`0.00` for the two-decimal SYP business) and serializes its threshold as
+minor-unit `0`, independently of the disabled input's browser value. The new
+end-to-end regression proves this exact sequence: an empty CASHBACK draft
+cannot publish; after a second tier is added the disabled first threshold is
+`0.00`; saving `0 / 0%` and `12.50 / 7.5%` persists `[0, 1250]` minor units and
+`[0, 750]` basis points; then publication succeeds.
+
+The correction was verified in this same isolated worktree on top of
+`ebc118e8ee06ddae79df887f4fa2685607dbe36a`:
+
+- two independently completed full Playwright runs: `154 passed`, `0 failed`
+  each (the second completed in `292.6s`);
+- two independent fresh-database integration runs previously completed on the
+  isolated port-`5437` database: `80` files and `1,325` tests passed in each;
+- typecheck, scoped ESLint with `--max-warnings=0`, Prisma validation,
+  production dependency audit (`0 vulnerabilities`), and `git diff --check`:
+  passed;
+- schema/datasource comparison reported only the pre-existing
+  `ConsentRecord` foreign-key/index naming drift; no migration file changed.
+
+No migration, protected roadmap file, `.freebuff` metadata, staging resource,
+or main-checkout file was changed by this correction. The complete Prompt 3
+gate recorded above predates this two-file regression correction; this section
+records the exact post-correction checks rather than relabelling that earlier
+gate result.
