@@ -25,11 +25,13 @@ import { Button, Notice } from "@/components/ui";
 export default function ProgramLifecycle({
   businessId,
   templateId,
+  cardType,
   status,
   hasDraft,
 }: {
   businessId: string;
   templateId: string;
+  cardType: "POINTS" | "STAMP" | "CASHBACK" | "DISCOUNT";
   status: "ACTIVE" | "PAUSED" | "DRAFT" | "ARCHIVED";
   hasDraft: boolean;
 }) {
@@ -44,7 +46,8 @@ export default function ProgramLifecycle({
     setPending(true);
     setError(null);
     try {
-      const response = await fetch("/api/staff/program-version", {
+      const isMoneyDraft = body.action === "createDraft" && (cardType === "CASHBACK" || cardType === "DISCOUNT");
+      const response = await fetch(isMoneyDraft ? "/api/staff/money-version" : "/api/staff/program-version", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ businessId, templateId, ...body }),
@@ -53,7 +56,11 @@ export default function ProgramLifecycle({
         setError(tc("genericError"));
         return;
       }
-      if (then === "draft") router.push(`/business/programs/${templateId}/draft`);
+      if (then === "draft") {
+        router.push(
+          isMoneyDraft ? `/business/programs/${templateId}/rates` : `/business/programs/${templateId}/draft`,
+        );
+      }
       else router.refresh();
     } catch {
       setError(tc("genericError"));

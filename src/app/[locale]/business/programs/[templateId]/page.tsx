@@ -112,6 +112,7 @@ export default async function ProgramDetailPage({
               <ProgramLifecycle
                 businessId={ctx.businessId}
                 templateId={templateId}
+                cardType={program.cardType}
                 status={program.status}
                 hasDraft={history.draftVersionNumber !== null}
               />

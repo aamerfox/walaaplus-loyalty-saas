@@ -62,6 +62,23 @@ async function cashbackShop() {
 }
 
 test.describe("the owner changes a rate table", () => {
+  test("continues a money draft from the program overview", async ({ page }) => {
+    const { fx, email } = await cashbackShop();
+    await signIn(page, email);
+    await page.goto(`/en/business/programs/${fx.program.templateId}`);
+
+    const requestPromise = page.waitForRequest((request) => request.url().endsWith("/api/staff/money-version"));
+    await page.getByTestId("open-draft").click();
+    const request = await requestPromise;
+
+    expect(JSON.parse(request.postData() ?? "{}")).toMatchObject({
+      action: "createDraft",
+      templateId: fx.program.templateId,
+    });
+    await page.waitForURL(new RegExp(`/business/programs/${fx.program.templateId}/rates$`));
+    await expect(page.getByTestId("money-rate-rows")).toBeVisible();
+  });
+
   test("creates a money draft from exponent-aware decimal inputs", async ({ page }) => {
     const cafe = await createStampCafe({ name: `Decimal money ${randomUUID().slice(0, 6)}` });
     await signIn(page, await emailOf(cafe.userId));
