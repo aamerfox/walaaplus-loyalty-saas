@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import ar from "../../messages/ar.json";
 import en from "../../messages/en.json";
 import { prisma } from "@/server/db";
-import { createMonetaryShop, createStampCafe, enrolMonetaryCustomer, TEST_PASSWORD } from "../setup/fixtures";
+import { createLocation, createMonetaryShop, createStampCafe, enrolMonetaryCustomer, registerTestOwner, TEST_PASSWORD } from "../setup/fixtures";
 
 /**
  * The money product, through a browser: an owner changing a rate table, and a cashier working a till.
@@ -271,6 +271,48 @@ test.describe("the owner changes a rate table", () => {
 });
 
 test.describe("the cashier works the till", () => {
+  test("passes the selected location for a two-location CASHBACK card without rendering object errors", async ({ page }) => {
+    const owner = await registerTestOwner();
+    const branch = await createLocation(owner, "Branch");
+    const fx = await createMonetaryShop({
+      existing: owner,
+      name: "Two-location cashback",
+      mechanics: { availableLocations: [owner.locationId, branch] },
+    });
+    const enrolled = await enrolMonetaryCustomer(fx);
+    const card = await prisma.customerCard.findUniqueOrThrow({ where: { id: enrolled.customerCardId }, select: { qrToken: true } });
+    const email = await emailOf(fx.userId);
+    const moneyRequests: Record<string, unknown>[] = [];
+    const pageErrors: string[] = [];
+    page.on("request", (request) => {
+      if (request.url().endsWith("/api/scanner/money") && request.method() === "POST") {
+        moneyRequests.push(request.postDataJSON() as Record<string, unknown>);
+      }
+    });
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+
+    await signIn(page, email);
+    await openMoneyCounter(page, card.qrToken);
+    await expect(page.getByTestId("scanner-location-select")).toBeVisible();
+    await expect(page.getByTestId("scanner-location-required")).toBeVisible();
+    await expect(page.getByTestId("money-earn")).toBeDisabled();
+
+    await page.getByTestId("scanner-location-select").selectOption(branch);
+    await expect(page.getByTestId("money-earn")).toBeEnabled();
+    await page.getByTestId("money-bill").fill("100.00");
+    await page.getByTestId("money-earn").click();
+    await expect(page.getByTestId("money-collect")).toContainText("100.00");
+
+    expect(moneyRequests).toHaveLength(1);
+    expect(moneyRequests[0].locationId).toBe(branch);
+    expect(pageErrors.filter((message) => message.includes("Objects are not valid as a React child"))).toEqual([]);
+    const operation = await prisma.monetaryOperation.findFirstOrThrow({
+      where: { customerCardId: enrolled.customerCardId, kind: "CASHBACK_EARNED" },
+      select: { locationId: true },
+    });
+    expect(operation.locationId).toBe(branch);
+  });
+
   test("says what to collect, and calls the amount what it is", async ({ page }) => {
     await page.setViewportSize(DESKTOP);
     const { cardId, qrToken, email } = await cashbackShop();
