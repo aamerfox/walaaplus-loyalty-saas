@@ -51,6 +51,11 @@ export interface CounterCard {
   recent: CounterOperation[];
 }
 
+export interface CounterLocation {
+  id: string;
+  name: string;
+}
+
 /** The server's answer to one operation, as the screen shows it back. */
 interface Outcome {
   operationId: string;
@@ -65,8 +70,22 @@ interface Outcome {
   requestedRedemptionMinor: string | null;
 }
 
-export default function MoneyCounter({ businessId, card }: { businessId: string | null; card: CounterCard }) {
+export default function MoneyCounter({
+  businessId,
+  card,
+  locationId,
+  locations,
+  onLocationChange,
+}: {
+  businessId: string | null;
+  card: CounterCard;
+  /** null means the card's version runs at the main counter only. */
+  locations: CounterLocation[] | null;
+  locationId: string;
+  onLocationChange: (locationId: string) => void;
+}) {
   const t = useTranslations("MoneyCounter");
+  const ts = useTranslations("Scanner");
   const router = useRouter();
   const exponent = card.currencyExponent;
 
@@ -90,6 +109,7 @@ export default function MoneyCounter({ businessId, card }: { businessId: string 
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           businessId: businessId ?? undefined,
+          ...(locationId !== "" ? { locationId } : {}),
           // A fresh key per attempt: a retry after a visible failure is a NEW operation, while a
           // double-click sends the same key twice and the server returns the first row.
           idempotencyKey: crypto.randomUUID(),
@@ -98,7 +118,16 @@ export default function MoneyCounter({ businessId, card }: { businessId: string 
       });
       const payload = (await res.json().catch(() => ({}))) as Record<string, unknown>;
       if (!res.ok) {
-        setError((payload.error as string) ?? (payload.message as string) ?? t("failed"));
+        const apiError = payload.error;
+        const errorMessage =
+          typeof apiError === "string"
+            ? apiError
+            : apiError !== null && typeof apiError === "object" && "message" in apiError && typeof apiError.message === "string"
+              ? apiError.message
+              : typeof payload.message === "string"
+                ? payload.message
+                : t("failed");
+        setError(errorMessage);
         return;
       }
       const operation = payload as unknown as Outcome;
@@ -131,6 +160,10 @@ export default function MoneyCounter({ businessId, card }: { businessId: string 
       setBusy(false);
     }
   }
+
+  const noUsableCounter = locations !== null && locations.length === 0;
+  const locationRequired = locations !== null && locations.length > 1 && locationId === "";
+  const actionsBlocked = busy || noUsableCounter || locationRequired;
 
   function amounts(): { gross: string } | null {
     const gross = inputToMinor(bill, exponent);
@@ -200,6 +233,37 @@ export default function MoneyCounter({ businessId, card }: { businessId: string 
       ) : null}
 
       <Card>
+        {locations !== null && locations.length > 0 ? (
+          <div className="mb-4" data-testid="scanner-location">
+            <label htmlFor="scanner-location-select" className="text-xs uppercase tracking-wide text-white/55">
+              {ts("locationLabel")}
+            </label>
+            <select
+              id="scanner-location-select"
+              value={locationId}
+              onChange={(e) => onLocationChange(e.target.value)}
+              data-testid="scanner-location-select"
+              className="mt-1 w-full rounded-xl bg-navy-950/60 px-4 py-3 ring-1 ring-white/10"
+            >
+              {locations.length > 1 ? <option value="">{ts("locationChoose")}</option> : null}
+              {locations.map((location) => (
+                <option key={location.id} value={location.id}>
+                  {location.name}
+                </option>
+              ))}
+            </select>
+            {locationRequired ? (
+              <p role="status" data-testid="scanner-location-required" className="mt-1 text-xs text-amber-300">
+                {ts("locationRequired")}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+        {noUsableCounter ? (
+          <p role="status" data-testid="scanner-no-counter" className="mb-4 rounded-xl bg-amber-500/10 px-3 py-2 text-sm text-amber-300">
+            {ts("noUsableCounter")}
+          </p>
+        ) : null}
         <label className="block text-sm font-medium" htmlFor="money-bill">
           {t("billLabel", { currency: card.currency })}
         </label>
@@ -234,7 +298,7 @@ export default function MoneyCounter({ businessId, card }: { businessId: string 
             <>
               <Button
                 data-testid="money-earn"
-                disabled={busy}
+                disabled={actionsBlocked}
                 onClick={() => {
                   const a = amounts();
                   if (a) void send({ action: "earn", customerCardId: card.customerCardId, grossAmountMinor: a.gross });
@@ -245,7 +309,7 @@ export default function MoneyCounter({ businessId, card }: { businessId: string 
               <Button
                 variant="secondary"
                 data-testid="money-redeem"
-                disabled={busy}
+                disabled={actionsBlocked}
                 onClick={() => {
                   const a = amounts();
                   if (!a) return;
@@ -265,7 +329,7 @@ export default function MoneyCounter({ businessId, card }: { businessId: string 
           ) : (
             <Button
               data-testid="money-discount"
-              disabled={busy}
+              disabled={actionsBlocked}
               onClick={() => {
                 const a = amounts();
                 if (a) void send({ action: "discount", customerCardId: card.customerCardId, grossAmountMinor: a.gross });
@@ -305,7 +369,7 @@ export default function MoneyCounter({ businessId, card }: { businessId: string 
                   <Td>
                     {/* A reversal is never offered twice, and a reversal row is not itself reversible. */}
                     {row.reversed || row.reversalOfId ? null : (
-                      <ReverseButton busy={busy} onReverse={(reason) => send({ action: "reverse", monetaryOperationId: row.id, reason })} />
+                      <ReverseButton busy={actionsBlocked} onReverse={(reason) => send({ action: "reverse", monetaryOperationId: row.id, reason })} />
                     )}
                   </Td>
                 </tr>

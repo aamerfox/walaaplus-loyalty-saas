@@ -12,6 +12,7 @@ import {
   createMonetaryShop,
   createStaff,
   enrolMonetaryCustomer,
+  registerTestOwner,
   resetDatabase,
   type MonetaryShopFixture,
 } from "../setup/fixtures";
@@ -810,6 +811,20 @@ describe("the screens a money program is reachable from", () => {
     expect(resolved.cardType).toBe("CASHBACK");
     if (resolved.cardType !== "CASHBACK" && resolved.cardType !== "DISCOUNT") throw new Error("expected money card");
     expect(resolved.money.cashBalanceMinor).toBe("0");
+  });
+
+  it("returns the pinned locations for a multi-location money card", async () => {
+    const owner = await registerTestOwner();
+    const branchId = await createLocation(owner, "Branch");
+    const fx = await createMonetaryShop({
+      existing: owner,
+      mechanics: { availableLocations: [owner.locationId, branchId] },
+    });
+    const cardId = await cardFor(fx);
+    const card = await prisma.customerCard.findUniqueOrThrow({ where: { id: cardId }, select: { qrToken: true } });
+
+    const resolved = await findCardByQrToken(fx.ctx, card.qrToken);
+    expect(resolved.pinnedLocations).toEqual([owner.locationId, branchId]);
   });
 
   it("refuses to open a draft of a money program, because its rates are frozen to a version", async () => {

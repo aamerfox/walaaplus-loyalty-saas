@@ -1,6 +1,7 @@
 import { CardType, MembershipRole, OperationKind, Permission, Prisma, UnitType, type CardStatus } from "@prisma/client";
 import { prisma } from "../db";
 import { ForbiddenError, NotFoundError } from "../errors";
+import { MonetaryProgramKind, readMonetaryMechanics } from "../monetary/mechanics";
 import { assertCounterSupportsCardType, isMonetaryCardType } from "../program/card-type-support";
 import { readMoneyCard } from "../monetary/counter";
 import { readStampMechanics } from "../program/mechanics";
@@ -154,10 +155,15 @@ async function toSearchResult(ctx: TenantContext, card: CardWithProfile): Promis
    * serve money cards until their counter is built in Prompt 2.
    */
   if (isMonetaryCardType(card.template.cardType)) {
+    const mechanics = readMonetaryMechanics(
+      card.programVersion.mechanics,
+      card.template.cardType === CardType.CASHBACK ? MonetaryProgramKind.CASHBACK : MonetaryProgramKind.DISCOUNT,
+      { programVersionId: card.programVersion.id },
+    );
     return {
       ...base,
       earnMode: "MANUAL" as const,
-      pinnedLocations: null,
+      pinnedLocations: mechanics.availableLocations ?? null,
       cardType: card.template.cardType as MoneyCardSearchResult["cardType"],
       money: await readMoneyCard(ctx, card.id),
     };
