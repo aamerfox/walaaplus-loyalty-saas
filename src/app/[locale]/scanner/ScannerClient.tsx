@@ -15,9 +15,8 @@ import MoneyCounter, { type CounterCard } from "./money/MoneyCounter";
  *     and reused by a retry. A cashier on a café's wifi will tap twice; the second tap must replay
  *     the first answer, not award again. The key is regenerated only when the cashier starts a new
  *     action, never on a retry of the same one.
- *  2. **No location is ever sent.** There is no picker, no field and no hidden default in this
- *     component — the server resolves Main. The line under the title says so, because a cashier
- *     who cannot see where an operation lands will eventually ask.
+ *  2. **A location is explicit when the card's version names several.** The server refuses to
+ *     guess between branches, so the selected counter is passed through to every write.
  *  3. **Conflicts are translated from a code, not a server message.** "No reward to give", "daily
  *     limit reached" and "card paused" need different words at a counter, and an Arabic screen must
  *     not print an English sentence from an API.
@@ -807,7 +806,13 @@ export default function ScannerClient({
         )}
 
         {card !== null && (card.cardType === "CASHBACK" || card.cardType === "DISCOUNT") ? (
-          <MoneyCounter businessId={businessId} card={card.money} />
+          <MoneyCounter
+            businessId={businessId}
+            card={card.money}
+            locations={programLocations}
+            locationId={locationId}
+            onLocationChange={setLocationId}
+          />
         ) : null}
 
         {card !== null && card.cardType !== "CASHBACK" && card.cardType !== "DISCOUNT" && (
